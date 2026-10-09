@@ -1496,6 +1496,13 @@ class GitAssistantTests(unittest.TestCase):
         self.assertEqual(create[2], "tool")                               # the folder's name by default
         self.assertIn("--public", create)
 
+    def test_first_commit_has_no_paths(self):
+        folder, g = self.plain_folder()
+        ops = [{"op": "commit", "args": {"message": "initial", "paths": ["a.txt"]}}]
+        result = g.fill_in(ops)
+        commit_step = next(s for s in result if s["op"] == "commit")
+        self.assertNotIn("paths", commit_step["args"])
+
     def test_go_ahead_runs_the_plan_that_wasnt_answered(self):
         folder, g = self.plain_folder()
         ops = [{"op": "init", "args": {}}, {"op": "gitignore", "args": {"entries": ["__pycache__/"]}}]
