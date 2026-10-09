@@ -4026,10 +4026,16 @@ class GitAssistant:
         names = [s["op"] for s in ops]
         if not self.is_repo() and "init" not in names and any(GIT_OPS[n][1] for n in names):
             ops.insert(0, {"op": "init", "args": {}})
-        if "repo_create" in names and not self.has_commits():
+        no_commits = not self.has_commits()
+        if "repo_create" in names and no_commits:
             at = next(i for i, s in enumerate(ops) if s["op"] == "repo_create")
             if not any(s["op"] == "commit" for s in ops[:at]):
                 ops.insert(at, {"op": "commit", "args": {"message": "chore: initial commit"}})
+        # Drop paths from every commit step when the repo has no commits yet
+        if no_commits:
+            for step in ops:
+                if step["op"] == "commit" and "paths" in step.get("args", {}):
+                    del step["args"]["paths"]
         return ops
 
     def record(self, request: str, data: dict, ran: bool, done: bool) -> None:
