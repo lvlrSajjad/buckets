@@ -789,6 +789,74 @@ class FactsFirst(unittest.TestCase):
         self.assertIn("    6|     def open(self, key):", facts)
 
 
+class TargetedReading(unittest.TestCase):
+    """Long files are read through their outline: the planner names the parts it needs, the coder is
+    shown the code its task is about."""
+
+    BIG = ("import os\n\n"
+           + "".join(f"def filler_{i}(x):\n    return x + {i}\n\n\n" for i in range(120))
+           + "class Box:\n    @property\n    def size(self):\n        return 3\n\n"
+           + "    def _open(self, key):\n        return key.upper()\n")
+
+    def setUp(self):
+        self.repo = make_repo({"src/big.py": self.BIG, "src/small.py": "def tiny():\n    return 1\n"})
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "targeted_min_lines": 400})
+        self.b = buckets.Buckets(cfg, self.repo, "make Box._open strip the key")
+        self.b.on_windows = True                                         # no network: chores use the planner
+
+    def test_request_names_include_snake_case(self):
+        names = buckets.request_names("make GitAssistant.fill_in drop paths, next to "
+                                      "test_missing_init in GitAssistantTests")
+        for name in ("GitAssistant", "fill_in", "test_missing_init", "GitAssistantTests"):
+            self.assertIn(name, names)
+
+    def test_locate_symbols_and_ranges(self):
+        files, outline = self.b.index.files, self.b.index.outline()
+        size = buckets.locate(self.repo, files, outline, "Box.size")
+        self.assertRegex(size, r"^src/big\.py:\d+-\d+$")
+        start = int(size.split(":")[1].split("-")[0])
+        self.assertEqual(self.BIG.splitlines()[start - 1].strip(), "@property")  # decorators included
+        self.assertEqual(buckets.locate(self.repo, files, outline, "_open"),       # private methods too
+                         buckets.locate(self.repo, files, outline, "src/big.py:Box._open"))
+        self.assertEqual(buckets.locate(self.repo, files, outline, "10-12", "src/big.py"), "src/big.py:10-12")
+        self.assertEqual(buckets.locate(self.repo, files, outline, "`tiny()`"), "src/small.py:1-2")
+        self.assertIsNone(buckets.locate(self.repo, files, outline, "no_such_thing"))
+        self.assertIsNone(buckets.locate(self.repo, files, outline, "nowhere.py:Box"))
+
+    def test_long_files_are_read_through_their_outline(self):
+        def fake(cfg, run, label, system, user, schema, validate, **kw):
+            if label == "pick-files":
+                return validate({"files": ["src/big.py", "src/small.py"]})
+            self.assertEqual(label, "focus")
+            self.assertRegex(user, r"\d+-\d+ Box._open")                    # the outline, with lines
+            return validate({"read": ["Box._open", "Box.missing"]})
+        self.b.survey = lambda *a: self.fail("nothing should need a survey")
+        with mock.patch.object(buckets, "ask_json", fake), contextlib.redirect_stderr(io.StringIO()) as err:
+            text = self.b.material("code")
+        self.assertIn("return key.upper()", text)                         # the part it asked for
+        self.assertIn("def tiny():", text)                                # short files stay whole
+        self.assertNotIn("return x + 7", text)                            # the rest of the long file isn't
+        self.assertIn("couldn't find: Box.missing", err.getvalue())
+
+    def test_the_coder_is_shown_its_code(self):
+        task = buckets.validate_tasks([{"file": "src/big.py", "action": "edit", "instructions": "strip it",
+                                        "done_when": "stripped", "where": "Box._open"}], self.repo, 8, "T")[0]
+        self.assertEqual(task["where"], "Box._open")
+        focus = self.b.task_focus(task)
+        self.assertIn("has 489 lines", focus)
+        self.assertIn("|         return key.upper()", focus)
+        self.assertNotIn("return x + 7", focus)
+        self.assertIn("return key.upper()", buckets.coder_prompt("goal", task, focus))
+        self.assertIn("don't read it whole", self.b.task_focus({**task, "where": "", "instructions": "x"}))
+        # No "where": the places the instructions name are shown instead.
+        named = self.b.task_focus({**task, "where": "", "instructions": "In `Box._open` (line 489), strip the "
+                                                                          "key, like filler_3 does."})
+        self.assertIn("return key.upper()", named)
+        self.assertIn("def filler_3(x):", named)
+        self.assertNotIn("def filler_50(x):", named)
+        self.assertEqual(self.b.task_focus({**task, "file": "src/small.py", "where": ""}), "")
+
+
 class ReviewSkip(unittest.TestCase):
     BASE = {"typecheck": {"ok": False}, "test": {"ok": True}}
     NOW = {"typecheck": {"ok": True}, "test": {"ok": True}}

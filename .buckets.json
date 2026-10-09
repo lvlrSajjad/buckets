@@ -1,0 +1,1 @@
+{"checks": {"test": "python3 -m unittest test_buckets"}}

@@ -84,6 +84,8 @@ DEFAULT_CONFIG = {
     "opus_policy": "ask",
     "repos": {},                    # e.g. {"~/code/oss/*": {"mode": "local"}} keeps those repos free
     "reading": "direct",            # "research" for question rounds (worse on bug hunts so far)
+    "targeted_min_lines": 400,      # files this long are never read whole: outline, then the exact parts
+    "light_think_budget": 1500,     # thinking tokens for planning and reviewing light jobs (~40s on the worker)
     "research": {
         "rounds": 3,
         "questions": 5,
@@ -935,19 +937,89 @@ INDEX_SCRIPT = Path(__file__).resolve().parent / "ts_index.cjs"
 TS_EXT = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
 
 
+def py_sig(node) -> str:
+    if isinstance(node, ast.ClassDef):
+        bases = ", ".join(ast.unparse(b) for b in node.bases)
+        return f"class {node.name}" + (f"({bases})" if bases else "")
+    ret = f" -> {ast.unparse(node.returns)}" if node.returns else ""
+    return f"def {node.name}({ast.unparse(node.args)}){ret}"[:200]
+
+
+def py_decls(path: Path) -> list[dict]:
+    """Every class, function and method of a Python file (private ones too) with its qualified name
+    ("GitAssistant.fill_in") and lines, decorators included: what a task or a read can point at."""
+    try:
+        tree = ast.parse(path.read_text(errors="replace"))
+    except (SyntaxError, ValueError, OSError):
+        return []
+    out = []
+
+    def walk(body, prefix: str) -> None:
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                start = min([node.lineno] + [d.lineno for d in node.decorator_list])
+                out.append({"name": prefix + node.name, "line": start, "end": node.end_lineno,
+                            "signature": py_sig(node)})
+                if isinstance(node, ast.ClassDef):
+                    walk(node.body, f"{prefix}{node.name}.")
+
+    walk(tree.body, "")
+    return out
+
+
+def decls_of(repo: Path, path: str, outline: dict) -> list[dict]:
+    """A file's declarations with qualified names: fresh from the AST for Python, else the code index."""
+    if path.endswith(".py"):
+        return py_decls(repo / path)
+    out = []
+    for d in outline.get(path, []):
+        out.append({"name": d["name"], "line": d["line"], "end": d["end"], "signature": d["signature"]})
+        out += [{"name": f"{d['name']}.{m['name']}", "line": m["line"], "end": m["end"], "signature": m["signature"]}
+                for m in d.get("members", [])]
+    return out
+
+
+def find_decl(decls: list[dict], name: str) -> dict | None:
+    """`name` exactly ("GitAssistant.fill_in"), or the one declaration whose last part it is ("fill_in")."""
+    exact = [d for d in decls if d["name"] == name]
+    if exact:
+        return exact[0]
+    tail = [d for d in decls if d["name"].endswith("." + name)]
+    return tail[0] if len(tail) == 1 else None
+
+
+def locate(repo: Path, files: dict, outline: dict, spec: str, in_file: str = "") -> str | None:
+    """A symbol ("fill_in", "GitAssistant.fill_in", "path:Class.method") or a range ("path:12-40",
+    or "12-40" with `in_file`) as "path:start-end"; None when it isn't found or is ambiguous."""
+    spec = clean_path(spec.strip().strip("`")).removesuffix("()")
+    path, _, rest = spec.rpartition(":") if ":" in spec else ("", "", spec)
+    path = path or in_file
+    if path and path not in files:
+        hits = [f for f in files if f.endswith("/" + path)]
+        if len(hits) != 1:
+            return None
+        path = hits[0]
+    if re.fullmatch(r"\d+(\s*[-–]\s*\d+)?", rest):
+        return f"{path}:{rest.replace(' ', '')}" if path else None
+    if path:
+        d = find_decl(decls_of(repo, path, outline), rest)
+        return f"{path}:{d['line']}-{d['end']}" if d else None
+    found = [(f, d) for f in files if f.endswith(".py") or f in outline
+             for d in [find_decl(decls_of(repo, f, outline), rest)] if d]
+    return f"{found[0][0]}:{found[0][1]['line']}-{found[0][1]['end']}" if len(found) == 1 else None
+
+
+def outline_text(decls: list[dict]) -> str:
+    return "\n".join(f"  {d['line']}-{d['end']} {d['name']}" for d in decls)
+
+
 def py_outline(path: Path) -> list[dict]:
     """Top-level functions and classes (with public methods) of a Python file, from its AST."""
     try:
         tree = ast.parse(path.read_text(errors="replace"))
     except (SyntaxError, ValueError):
         return []
-
-    def sig(node) -> str:
-        if isinstance(node, ast.ClassDef):
-            bases = ", ".join(ast.unparse(b) for b in node.bases)
-            return f"class {node.name}" + (f"({bases})" if bases else "")
-        ret = f" -> {ast.unparse(node.returns)}" if node.returns else ""
-        return f"def {node.name}({ast.unparse(node.args)}){ret}"[:200]
+    sig = py_sig
 
     out = []
     for node in tree.body:
@@ -1027,11 +1099,11 @@ def enclosing(decls: list[dict], line: int) -> dict | None:
 
 
 REQUEST_NAMES = re.compile(r"`([A-Za-z_$][\w$]*)(?:\(\))?`|\b([A-Za-z_$][\w$]*)\(|"
-                           r"\b([A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+|[a-z]+(?:[A-Z][a-z0-9]*)+)\b")
+                           r"\b([A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+|[a-z]+(?:[A-Z][a-z0-9]*)+|[a-z]+_[a-z0-9_]+)\b")
 
 
 def request_names(text: str) -> list[str]:
-    """Code-like names in a request: `backticked`, called(), CamelCase or camelCase words."""
+    """Code-like names in a request: `backticked`, called(), CamelCase, camelCase or snake_case words."""
     seen: list[str] = []
     for m in REQUEST_NAMES.finditer(text):
         name = next(g for g in m.groups() if g)
@@ -1649,8 +1721,9 @@ TASK_SCHEMA = {
         "instructions": {"type": "string"},
         "done_when": {"type": "string"},
         "read_first": {"type": "array", "items": {"type": "string"}},
+        "where": {"type": "string"},
     },
-    "required": ["id", "file", "action", "instructions", "done_when"],
+    "required": ["id", "file", "action", "instructions", "done_when", "where"],
 }
 ROUTE_SCHEMA = {
     "type": "object",
@@ -1759,6 +1832,25 @@ Request:
 
 {files}"""
 
+FOCUS_SCHEMA = {
+    "type": "object",
+    "properties": {"read": {"type": "array", "items": {"type": "string"}}, "why": {"type": "string"}},
+    "required": ["read"],
+}
+
+FOCUS_PROMPT = """You're about to {goal}, but these files are too long to read whole. Below is each
+file's outline: what it declares, with line ranges. Name the parts you need to see exactly, at most
+{reads}: the code that will change, the code it calls or that calls it, and an existing example to
+copy (for new tests, the nearest similar test and the helpers it uses). Give each as a name from the
+outline ("GitAssistant.fill_in", "path:Class.method") or a line range ("path:120-180").
+
+Request:
+{request}
+
+Already shown to you in full (don't ask for these again): {shown}
+
+{outlines}"""
+
 ANSWER_PROMPT = """Answer the request using the repository material below.
 Write a clear markdown report. Cite code as `path:line`. If the material doesn't contain the
 answer, say what's missing instead of guessing.
@@ -1778,6 +1870,10 @@ text and the files it opens itself, and it cannot run commands):
   or change, their signatures, and where in the file they go. Include exact code when it's short.
 - "read_first" lists other files the coder should open for context (types it must use, patterns to
   copy). Keep it short.
+- "where": for an edit, the function, method or class the change goes in, or next to for new code
+  ("GitAssistant.fill_in", "parse_args", "GitAssistantTests.test_x"), or a line range ("120-180").
+  The coder is shown exactly that code instead of reading the whole file, so give the place that
+  holds what it needs. Say in the instructions exactly what to change there. "" for a new file.
 - Order tasks so dependencies come first.
 - If the change alters behavior and the repo has tests, include a task that adds or updates tests.
 - Fix problems properly. Never plan `any`, `@ts-ignore`, lint-disable comments, or skipped,
@@ -2064,7 +2160,8 @@ def validate_tasks(tasks: list, repo: Path, max_tasks: int, prefix: str) -> list
         reads = [clean_path(r) for r in (t.get("read_first") or []) if (repo / clean_path(r)).is_file()]
         out.append({"id": f"{prefix}{len(out) + 1}", "file": f, "action": action,
                     "instructions": str(t["instructions"]).strip(),
-                    "done_when": str(t["done_when"]).strip(), "read_first": reads[:6]})
+                    "done_when": str(t["done_when"]).strip(), "read_first": reads[:6],
+                    "where": str(t.get("where") or "").strip()})
     return out
 
 
@@ -2178,7 +2275,14 @@ class Buckets:
 
         def show(path: str, decl: dict, why: str) -> None:
             key = (path, decl["line"])
-            if key in shown or decl["end"] - decl["line"] > 120:
+            if key in shown:
+                return
+            if decl["end"] - decl["line"] > 120:
+                members = decl.get("members") or []
+                if members:  # too long to show: say where its parts are, so the planner can ask for one
+                    shown.add(key)
+                    parts.append(f"{why} (lines {decl['line']}-{decl['end']}, too long to show whole); its parts:\n"
+                                 + "\n".join(f"  {m['line']}-{m['end']}  {m['signature'][:100]}" for m in members[:60]))
                 return
             shown.add(key)
             parts.append(f"{why}:\n" + read_spec(self.repo, files, f"{path}:{decl['line']}-{decl['end']}",
@@ -2191,7 +2295,7 @@ class Buckets:
             decl = enclosing(outline.get(f, []), line)
             decl = decl or {"line": max(1, line - 15), "end": line + 3}
             show(f, decl, f"Where a check fails ({f}:{line}: {msg[:100]})")
-        for name in request_names(self.request)[:8]:
+        for name in request_names(self.request)[:12]:
             for f, decls in outline.items():
                 for d in decls:
                     hits = [d] if d["name"] == name else [m for m in d.get("members", []) if m["name"] == name]
@@ -2256,24 +2360,73 @@ class Buckets:
                 raise ValueError("none of the picked files are in the list")
             return good
 
-        picked = ask_json(self.chores, self.run, "pick-files", SYSTEM,
-                          FILES_PROMPT.format(goal=self.goal(mode), max_files=self.cfg["max_files"],
-                                              request=self.request, guidance=gd,
-                                              context=f"\n{ctx[:12000]}\n" if ctx else "",
-                                              map=self.code_map(files)),
-                          FILES_SCHEMA, check_files, think=False, max_tokens=1500, timeout=self.timeout)
+        named = [f for f in paths_in_text(self.request, files) if f in files]
+        if named and self.difficulty == "light":
+            picked = named[: self.cfg["max_files"]]  # the request says where; no need to ask
+        else:
+            picked = ask_json(self.chores, self.run, "pick-files", SYSTEM,
+                              FILES_PROMPT.format(goal=self.goal(mode), max_files=self.cfg["max_files"],
+                                                  request=self.request, guidance=gd,
+                                                  context=f"\n{ctx[:12000]}\n" if ctx else "",
+                                                  map=self.code_map(files)),
+                              FILES_SCHEMA, check_files, think=False, max_tokens=1500, timeout=self.timeout)
         # Files named in check output are read whether or not the model picked them.
         named = [f for f in paths_in_text(self.checks_seen, files) if f not in picked]
         picked = (picked + named)[: max(self.cfg["max_files"], len(picked))]
-        say(f"  reading {len(picked)} files: {', '.join(picked[:8])}{' …' if len(picked) > 8 else ''}")
-        blocks = [numbered(self.repo, f, self.cfg["max_file_chars"]) for f in picked]
+        long = [f for f in picked if self.too_long(f)]
+        whole = [f for f in picked if f not in long]
+        if whole:
+            say(f"  reading {len(whole)} files: {', '.join(whole[:8])}{' …' if len(whole) > 8 else ''}")
+        blocks = [numbered(self.repo, f, self.cfg["max_file_chars"]) for f in whole]
+        parts = self.focus(mode, long, ctx) if long else ""
         total = sum(est_tokens(b) for b in blocks)
         head = f"{ctx}\n\n" if ctx else ""
-        if total <= self.cfg["file_budget_tokens"]:
-            return head + "Files:\n\n" + "\n\n".join(blocks)
+        if total + est_tokens(parts) <= self.cfg["file_budget_tokens"]:
+            return head + "Files:\n\n" + "\n\n".join(blocks + ([parts] if parts else []))
         groups = batches(blocks, self.cfg["batch_tokens"])
-        notes = self.survey(mode, groups, total)
-        return head + "Survey notes (one section per batch of files):\n\n" + "\n\n---\n\n".join(notes)
+        notes = self.survey(mode, groups, total) if groups else []
+        return (head + "Survey notes (one section per batch of files):\n\n" + "\n\n---\n\n".join(notes)
+                + (f"\n\n{parts}" if parts else ""))
+
+    def think_budget(self) -> dict:
+        """Light jobs get a short think (the worker thinks at ~37 tokens/s); others keep the model's own."""
+        budget = self.cfg.get("light_think_budget", 0)
+        return {"think_budget": budget} if budget and self.difficulty == "light" else {}
+
+    def too_long(self, path: str) -> bool:
+        """Files this long are read through their outline, never whole (when there is an outline)."""
+        limit = self.cfg.get("targeted_min_lines", 0)
+        return bool(limit) and self.index.files.get(path, 0) >= limit and bool(
+            decls_of(self.repo, path, self.index.outline()))
+
+    def focus(self, mode: str, long: list[str], ctx: str) -> str:
+        """Long files: the planner sees what each declares on which lines, names the parts it needs
+        (the code to change, what it calls, an example to copy) and gets exactly those."""
+        outline, files, n = self.index.outline(), self.index.files, self.cfg["research"]["reads"] + 2
+        maps = "\n\n".join(f"=== {f} ({files[f]} lines; outline: lines, name, signature) ===\n"
+                            + outline_text(decls_of(self.repo, f, outline)) for f in long)
+        say(f"  {', '.join(long)}: too long to read whole, so the planner picks the parts it needs from the outline")
+
+        def check(d):
+            return [str(x).strip() for x in d.get("read") or [] if str(x).strip()][:n]
+
+        shown = re.findall(r"^=== (.+?) ===$", ctx, re.M)
+        wanted = ask_json(self.planner, self.run, "focus", SYSTEM,
+                          FOCUS_PROMPT.format(goal=self.goal(mode), request=self.request, reads=n,
+                                              shown=", ".join(shown) or "nothing", outlines=maps),
+                          FOCUS_SCHEMA, check, think=False, max_tokens=1500, timeout=self.timeout)
+        found, missing = [], []
+        for spec in wanted:
+            where = locate(self.repo, files, outline, spec, long[0] if len(long) == 1 else "")
+            (found if where else missing).append((spec, where))
+        texts = [read_spec(self.repo, files, where, self.cfg["max_file_chars"]) for _, where in found]
+        if found:
+            say(f"  {ok()} read exactly: {', '.join(spec for spec, _ in found)}")
+        if missing:
+            say(f"  {warn()} couldn't find: {', '.join(spec for spec, _ in missing)}")
+        sizes = ", ".join(f"{f} ({files[f]} lines)" for f in long)
+        return (f"Parts of the long files ({sizes}; only these parts are shown), exactly as they are:\n\n"
+                + ("\n\n".join(texts) or "(none)"))
 
     def reading(self) -> str:
         """How the local planner learns the code: read picked files directly, or ask the Windows
@@ -2289,7 +2442,7 @@ class Buckets:
         prompt = ERRAND_PROMPT.format(ask=ask, where=("Look in: " + ", ".join(f"`{w}`" for w in where) + "\n")
                                       if where else "")
         model = getattr(self, "errand_model", c["opencode_model"])
-        cmd = [self.cfg["opencode_bin"], "run", "--agent", r["opencode_agent"], "-m", model,
+        cmd = [self.cfg["opencode_bin"], "run", "--standalone", "--agent", r["opencode_agent"], "-m", model,
                "--auto", "--title", f"buckets {label}", prompt]
         start = time.time()
         with Ticker(f"  {cap(self.worker)} is looking up: {ask[:60]}") as tick:
@@ -2654,15 +2807,15 @@ class Buckets:
             plan = self.ask_escalated(target, "plan-escalated", prompt, PLAN_SCHEMA, validate)
         else:
             plan = ask_json(self.planner, self.run, "plan", SYSTEM, prompt, PLAN_SCHEMA, validate,
-                            max_tokens=16000, timeout=self.timeout)
+                            max_tokens=16000, timeout=self.timeout, **self.think_budget())
         self.run.save("plan.json", plan)
         return plan
 
     def code_task(self, task: dict, commit: bool = True) -> dict:
         """One coder session for one file. Anything else it touches is put back as it was."""
         c = self.cfg["coder"]
-        prompt = coder_prompt(self.request, task)
-        cmd = [self.cfg["opencode_bin"], "run", "--agent", c["opencode_agent"], "-m", c["opencode_model"],
+        prompt = coder_prompt(self.request, task, self.task_focus(task))
+        cmd = [self.cfg["opencode_bin"], "run", "--standalone", "--agent", c["opencode_agent"], "-m", c["opencode_model"],
                "--auto", "--title", f"buckets {task['id']} {task['file']}", prompt]
         note = ""
         for attempt in range(1, c["attempts"] + 1):
@@ -2700,13 +2853,70 @@ class Buckets:
             if (attempt < c["attempts"] and not timed_out
                     and self.cfg.get("offload", {}).get("escalate_repeated_failure")):
                 task = self.rewrite_tasks([task], f"{task['id']} made no change on its first try")[0]
-                prompt = coder_prompt(self.request, task)
+                prompt = coder_prompt(self.request, task, self.task_focus(task))
                 cmd[-1] = prompt
             errors = [l for l in lines if l.startswith("Error:")]
             if errors:
                 note += f" ({errors[-1][:200]})"
             say(f"  {warn()} {task['id']} {task['file']}, try {attempt}: {note}")
         return {**task, "status": "failed", "note": note}
+
+    def task_focus(self, task: dict) -> str:
+        """The code a task is about, read now (earlier tasks may have moved it), so the coder starts at
+        its place instead of reading a long file to find it: the task's "where", or else the places its
+        instructions name ("`fill_in`", "lines 120-140")."""
+        path = self.repo / task["file"]
+        if task["action"] != "edit" or not path.is_file():
+            return ""
+        lines = path.read_text(errors="replace").splitlines()
+        spots = self.task_spots(task, len(lines))
+        if spots:
+            blocks, budget = [], 250
+            for lo, hi in spots:
+                lo, hi = max(1, lo - 3), min(len(lines), hi + 3, lo + budget)
+                budget -= hi - lo + 1
+                blocks.append(f"=== {task['file']}:{lo}-{hi} ===\n"
+                              + "\n".join(f"{i:>5}| {lines[i - 1]}" for i in range(lo, hi + 1)))
+                if budget <= 0:
+                    break
+            return (f"The code this task is about, exactly as it is now (`{task['file']}` has {len(lines)} lines; "
+                    f"you don't need to read the rest unless the task needs it, and then read only those lines "
+                    f"with offset and limit):\n" + "\n".join(blocks))
+        if len(lines) >= self.cfg.get("targeted_min_lines", 0) > 0:
+            return (f"`{task['file']}` has {len(lines)} lines: don't read it whole. Search for the names in "
+                    f"your task first, then read only the lines around them (offset and limit).")
+        return ""
+
+    def task_spots(self, task: dict, n: int) -> list[tuple[int, int]]:
+        """Line ranges in the task's file: its "where", else up to 3 places its instructions name (each
+        under 150 lines, so a whole class doesn't crowd out the method that matters)."""
+        f, outline = task["file"], self.index.outline()
+        where = task.get("where", "").removeprefix(f + ":")
+        if where:
+            specs, longest = [where], 10 ** 6
+        else:
+            text = task["instructions"]
+            specs = [f"{a}-{b or a}" for a, b in re.findall(r"\blines? (\d+)(?:\s*[-–]\s*(\d+))?", text)]
+            specs += re.findall(r"\b([A-Z]\w*\.[A-Za-z_]\w*)\b", text) + request_names(text)
+            longest = 150
+        spots: list[tuple[int, int]] = []
+        for spec in specs:
+            hit = locate(self.repo, {f: n}, outline, spec, f)
+            if not hit:
+                continue
+            m = SPEC.match(hit)
+            lo, hi = int(m.group(2)), int(m.group(3) or m.group(2))
+            if hi - lo < longest and lo <= n and not any(a <= lo and hi <= b for a, b in spots):
+                spots = [(a, b) for a, b in spots if not (lo <= a and b <= hi)] + [(lo, hi)]
+            if len(spots) == 3:
+                break
+        merged: list[tuple[int, int]] = []
+        for lo, hi in sorted(spots):  # neighbours become one block
+            if merged and lo <= merged[-1][1] + 7:
+                merged[-1] = (merged[-1][0], max(hi, merged[-1][1]))
+            else:
+                merged.append((lo, hi))
+        return merged
 
     def diff_text(self, base: str) -> str:
         stat = git(self.repo, "diff", "--stat", f"{base}..HEAD")
@@ -2801,7 +3011,7 @@ class Buckets:
             return self.claude(f"review-{rnd}", CLAUDE_INTRO + "\nYou may open files to verify the diff.\n\n"
                                + prompt, REVIEW_SCHEMA, validate)
         return ask_json(self.planner, self.run, f"review-{rnd}", SYSTEM, prompt, REVIEW_SCHEMA, validate,
-                        max_tokens=16000, timeout=self.timeout)
+                        max_tokens=16000, timeout=self.timeout, **self.think_budget())
 
     def gate(self, verdict: dict, shortcuts: list, api, now: dict, baseline: dict) -> dict:
         """The mechanical gates a reviewer can't overrule: shortcuts and regressed checks."""
@@ -3146,10 +3356,10 @@ def impact_text(api: dict | None) -> str:
     return "\n".join(out) + "\n"
 
 
-def coder_prompt(request: str, task: dict) -> str:
+def coder_prompt(request: str, task: dict, focus: str = "") -> str:
     hint = ("\nOpen these first for context: " + ", ".join(f"`{p}`" for p in task["read_first"]) + "\n"
             if task["read_first"] else "")
-    hint = ACTION_NOTES[task["action"]] + hint
+    hint = ACTION_NOTES[task["action"]] + (f"\n{focus}\n" if focus else "") + hint
     return CODER_PROMPT.format(request=request, read_hint=hint, id=task["id"], action=task["action"],
                                file=task["file"], instructions=task["instructions"],
                                done_when=task["done_when"])

@@ -154,9 +154,12 @@ first commit it can't apply (later ones may depend on it).
 
 Two strategies in local mode (`--reading direct|research`; automatic: research for heavy jobs):
 
-- **direct**: the planner picks files from an outline of the repo, the script reads them, and
-  when they're too big for one prompt they're summarized in parts, on the worker first (the
-  advisor's machine helps with 3+ parts).
+- **direct**: the planner picks files from an outline of the repo (or, for light jobs, takes the
+  files the request names, with no model call), the script reads them, and when they're too big for
+  one prompt they're summarized in parts, on the worker first (the advisor's machine helps with 3+
+  parts). Files of `targeted_min_lines` (400) or more are never read whole: the planner gets their
+  outline (each class, function and method with its lines), names the parts it needs, and gets
+  exactly those.
 - **research**: rounds of back-and-forth. The planner asks for:
   - `read`: files or line ranges, which the script serves exactly from disk;
   - `uses`: where a symbol is imported and used, answered exactly by the code index;
@@ -170,7 +173,18 @@ Before either, buckets gathers **facts mechanically**: the code around every fai
 definitions and uses of code names in your request, and the closest tests. The planner also gets
 **`grep`** (exact, via `git grep`) alongside `read` and `uses`.
 
-**Thinking budget:** the planner's thinking is streamed and cut at `planner.think_budget` tokens
+**The coder starts at its place:** each task names a `where` (`GitAssistant.fill_in`, or a line
+range), and the coder's prompt carries that code exactly as it is when the task starts, so it doesn't
+read a long file to find it. When the planner leaves `where` empty, buckets uses the places the
+instructions name (code names, "lines 120-140"). Coders run with `opencode run --standalone`, so
+stopping buckets stops their edits too (the shared background server kept editing after Ctrl-C).
+
+On the worker, every 1,000 tokens sent costs about 5 seconds before the model writes anything, so
+keeping prompts short is most of the speed: the same small Python change went from 20+ minutes to
+about 2 minutes of reading and planning.
+
+**Thinking budget:** light jobs plan and review with `light_think_budget` (1,500) thinking tokens.
+Otherwise the planner's thinking is streamed and cut at `planner.think_budget` tokens
 (default 2,500, about 5 minutes on the M2 Pro); then it's asked for the answer without thinking,
 with its notes so far. `0` turns the cap off.
 
