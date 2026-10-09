@@ -451,6 +451,14 @@ def git(repo: Path, *args: str, check: bool = True) -> str:
     return r.stdout
 
 
+def dirty_tree(repo: Path) -> str:
+    """Why a job can't start: which files are uncommitted, and the git chores that clear them."""
+    paths = sorted({p.split("/")[0] + ("/" if "/" in p else "") for p in changed_paths(repo)})
+    shown = ", ".join(paths[:6]) + (f" and {len(paths) - 6} more" if len(paths) > 6 else "")
+    return (f"the working tree has uncommitted changes ({shown}); commit or stash them first, e.g. "
+            f'buckets "commit everything" or buckets "add __pycache__/ to .gitignore"')
+
+
 def changed_paths(repo: Path) -> list[str]:
     """Paths that differ from HEAD, including untracked files, as repo-relative paths."""
     raw = git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all")
@@ -1694,8 +1702,10 @@ intent: "info" (explain, review, survey, answer; nothing changes), "code" (files
 created, edited or deleted), "pick" (cherry-pick existing commits onto a branch), or "git"
 (branches, commits, squashing, rebasing, pushing, pull requests, CI status and other git or GitHub
 housekeeping, with no code to write). Questions about pull requests, CI runs and their logs,
-branches or commits are "git", not "info" ("info" is for questions about the code itself). If the
-user asks to fix, change or make something work, it's "code", even when they also ask why.
+branches or commits are "git", not "info" ("info" is for questions about the code itself). Adding
+entries to .gitignore, committing or pushing files that already exist, and questions about uncommitted
+or untracked files are "git" too: no code gets written. If the user asks to fix, change or make
+something work, it's "code", even when they also ask why.
 difficulty:
 - "light": mechanical or well-specified work: tests for existing code, renames, docs, small
   features with clear instructions, fixes whose cause is known, simple questions.
@@ -2943,7 +2953,7 @@ class Buckets:
     def pick(self, refs: list[str], onto: str = "") -> int:
         repo = self.repo
         if changed_paths(repo):
-            die("the working tree has uncommitted changes; commit or stash them first")
+            die(dirty_tree(repo))
         require_identity(repo)
         commits = expand_commits(repo, refs)
         if not commits:
@@ -3041,7 +3051,7 @@ class Buckets:
     def code(self, plan_only: bool = False) -> int:
         repo = self.repo
         if changed_paths(repo) and not plan_only:
-            die("the working tree has uncommitted changes; commit or stash them first")
+            die(dirty_tree(repo))
         if not plan_only:
             require_identity(repo)
         checks = self.checks_with_index(detect_checks(repo, self.rc))
@@ -3429,7 +3439,7 @@ def cmd_merge(repo: Path) -> int:
     d = last_branch(repo)
     branch, into = d["branch"], d["merge_into"]
     if changed_paths(repo):
-        die("the working tree has uncommitted changes; commit or stash them first")
+        die(dirty_tree(repo))
     if not d.get("done"):
         say(f"{warn()} that run finished but wasn't done; merging anyway because you asked")
     if git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() != into:
