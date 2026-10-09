@@ -20,6 +20,20 @@ behind these are in [field-notes.md](field-notes.md).
 - A hardware-free end-to-end test (fake Ollama and fake opencode: plan → code → checks → review →
   merge in ~2 s). Tests are sandboxed so they can't touch real configs.
 
+## Done (2026-10-10)
+
+- Chat mode (`buckets` on its own), git follow-ups ("name it X", "yes go ahead"), defaults instead
+  of refusals for `repo_create`, and fixes from the first live publish (unborn HEAD crash, `.gitignore`
+  requests routed as code, never `git init` the home folder).
+- **Speed** (the worker reads prompts at ~200 tokens/s, so prompt size is most of the time): long
+  files read through their outline; light jobs take the files the request names; tasks carry a
+  `where` and the coder is shown that code; the planner's exact `edits` are applied without a
+  coder session; no "pick the parts" call when the facts already show the named code; light jobs
+  think for 1,500 tokens at most, and thinking that repeats itself is cut early; checks aren't
+  re-run on a file tree already checked. A small Python change went from 20+ minutes (unfinished)
+  to 6 minutes before the last three of these.
+- Coders and look-ups run with `opencode run --standalone`, so Ctrl-C stops their edits.
+
 ## Git and GitHub assistant (added 2026-10-09)
 
 - **`pr_fix`: fix red PRs with real code failures:** check out the PR branch, feed the parsed CI
@@ -46,7 +60,7 @@ behind these are in [field-notes.md](field-notes.md).
 | **Mechanical renames** through the TypeScript language service (`rope` for Python) | A rename across packages with no planner or coder at all | Large: needs a full type-checked program per repo |
 | **`git bisect run <check>`** when a check passed at a known commit | Pins a regression to the commit that caused it, mechanically | Medium: needs a "good" commit from the request or history |
 | **Affected tests only** during rounds (Vitest `related`, Jest `--findRelatedTests`), the full suite at the end | Faster rounds on big repos | Medium |
-| **Python index parity**: `uses`, `importers` and the broken-imports check (the outline exists) | The same impact checks for Python repos | Medium |
+| **Python index parity**: `uses`, `importers` and the broken-imports check (the outline exists), plus a syntax check right after each coder edit (planned edits already get one) | The same impact checks for Python repos; a broken edit caught in a second instead of at the next check run | Medium |
 | **Dependency inventory** (package tree, `pnpm audit --json` / `osv-scanner`, optionally a CycloneDX SBOM) for dependency, vulnerability or license requests | Exact lists instead of reading lockfiles | Medium |
 | **Coverage-driven jobs**: add a coverage check where missing (castellan needs `@vitest/coverage-v8`) | The coverage map is built but dormant until a repo produces a report | Small per repo |
 

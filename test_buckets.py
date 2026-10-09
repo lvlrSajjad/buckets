@@ -830,13 +830,26 @@ class TargetedReading(unittest.TestCase):
             self.assertEqual(label, "focus")
             self.assertRegex(user, r"\d+-\d+ Box._open")                    # the outline, with lines
             return validate({"read": ["Box._open", "Box.missing"]})
-        self.b.survey = lambda *a: self.fail("nothing should need a survey")
+        b = buckets.Buckets(self.b.cfg, self.repo, "make opening a box strip the key")   # names no code
+        b.on_windows = True
+        b.survey = lambda *a: self.fail("nothing should need a survey")
         with mock.patch.object(buckets, "ask_json", fake), contextlib.redirect_stderr(io.StringIO()) as err:
-            text = self.b.material("code")
+            text = b.material("code")
         self.assertIn("return key.upper()", text)                         # the part it asked for
         self.assertIn("def tiny():", text)                                # short files stay whole
         self.assertNotIn("return x + 7", text)                            # the rest of the long file isn't
         self.assertIn("couldn't find: Box.missing", err.getvalue())
+
+    def test_no_reading_when_the_facts_show_the_named_code(self):
+        b = buckets.Buckets(self.b.cfg, self.repo, "make Box.size return 4")
+        b.on_windows = True
+        def fake(cfg, run, label, system, user, schema, validate, **kw):
+            self.assertEqual(label, "pick-files")                         # no "focus" call
+            return validate({"files": ["src/big.py"]})
+        with mock.patch.object(buckets, "ask_json", fake), contextlib.redirect_stderr(io.StringIO()) as err:
+            text = b.material("code")
+        self.assertIn("the facts already show the code the request names", err.getvalue())
+        self.assertIn("return 3", text)                                   # Box.size, from the facts
 
     def test_the_coder_is_shown_its_code(self):
         task = buckets.validate_tasks([{"file": "src/big.py", "action": "edit", "instructions": "strip it",
@@ -855,6 +868,84 @@ class TargetedReading(unittest.TestCase):
         self.assertIn("def filler_3(x):", named)
         self.assertNotIn("def filler_50(x):", named)
         self.assertEqual(self.b.task_focus({**task, "file": "src/small.py", "where": ""}), "")
+
+
+class FasterRuns(unittest.TestCase):
+    """Planned edits applied without a coder, thinking loops cut, facts that make reading needless,
+    and checks that aren't repeated on the same code."""
+
+    def setUp(self):
+        self.repo = make_repo({"src/m.py": "def run(x):\n    y = x\n    return y + 1\n\n\n"
+                                           "def other():\n    return 2\n"})
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "opencode_bin": "no-such-opencode",
+                                                          "offload": {"escalate_repeated_failure": False}})
+        self.b = buckets.Buckets(cfg, self.repo, "x")
+
+    def task(self, edits, file="src/m.py", action="edit"):
+        return buckets.validate_tasks([{"file": file, "action": action, "instructions": "do it",
+                                        "done_when": "done", "where": "", "edits": edits}], self.repo, 8, "T")[0]
+
+    def test_apply_edits(self):
+        text = "def run(x):\n    y = x\n    return y + 1\n"
+        self.assertEqual(buckets.apply_edits(text, [{"find": "    y = x\n", "replace": "    y = x * 2\n"}]),
+                         "def run(x):\n    y = x * 2\n    return y + 1\n")
+        # copied with the excerpt's line numbers and without the indentation: still found
+        out = buckets.apply_edits(text, [{"find": "    2| y = x", "replace": "    2|     y = -x"}])
+        self.assertIn("    y = -x\n", out)
+        with self.assertRaisesRegex(ValueError, "isn't in the file"):
+            buckets.apply_edits(text, [{"find": "z = 1", "replace": "z = 2"}])
+        with self.assertRaisesRegex(ValueError, "appears 2 times"):
+            buckets.apply_edits("a\nb\na\n", [{"find": "a", "replace": "c"}])
+
+    def test_planned_edits_skip_the_coder(self):
+        task = self.task([{"find": "    return y + 1", "replace": "    return y + 2"}])
+        with mock.patch.object(buckets, "run_proc", side_effect=AssertionError("no coder")), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            result = self.b.code_task(task)
+        self.assertEqual(result["status"], "done")
+        self.assertIn("applied the planned edit directly", err.getvalue())
+        self.assertIn("return y + 2", (self.repo / "src/m.py").read_text())
+        self.assertEqual(buckets.git(self.repo, "status", "--porcelain").strip(), "")    # committed
+
+    def test_edits_that_dont_fit_go_to_the_coder(self):
+        calls = []
+        def fake_proc(cmd, cwd, timeout, **kw):
+            calls.append(cmd)
+            return 0, "DONE: nothing", False
+        for edits in ([{"find": "nope", "replace": "x"}],                       # not in the file
+                      [{"find": "    return y + 1", "replace": "    return (y +"}]):  # doesn't parse
+            with mock.patch.object(buckets, "run_proc", fake_proc), contextlib.redirect_stderr(io.StringIO()) as err:
+                self.b.code_task(self.task(edits))
+            self.assertIn("the planned edits don't apply", err.getvalue())
+        self.assertEqual(len(calls), 2 * self.b.cfg["coder"]["attempts"])
+        self.assertIn("--standalone", calls[0])
+        self.assertIn("return y + 1", (self.repo / "src/m.py").read_text())   # untouched
+
+    def test_a_new_file_from_one_edit(self):
+        task = self.task([{"find": "", "replace": "def new():\n    return 3\n"}], "src/n.py", "create")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.b.code_task(task)["status"], "done")
+        self.assertEqual((self.repo / "src/n.py").read_text(), "def new():\n    return 3\n")
+
+    def test_thinking_loops(self):
+        varied = " ".join(f"Step {i} looks at a different part of the code, number {i * 7}." for i in range(60))
+        self.assertFalse(buckets.thinking_loops(varied))
+        circle = varied[:1500] + " Wait, I need to double check whether fill_in drops the paths here. " * 4
+        self.assertTrue(buckets.thinking_loops(circle))
+
+    def test_checks_arent_repeated_on_the_same_code(self):
+        counter = Path(tempfile.mkdtemp()) / "n"
+        checks = {"test": f"echo x >> {counter}"}
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            first = buckets.run_checks(self.repo, checks, self.b.run, "a", 60)
+            second = buckets.run_checks(self.repo, checks, self.b.run, "b", 60)
+        self.assertEqual(counter.read_text().count("x"), 1)
+        self.assertEqual(first, second)
+        self.assertIn("cached: same code as an earlier run", err.getvalue())
+        (self.repo / "src/m.py").write_text("changed\n")                   # not committed: run it
+        with contextlib.redirect_stderr(io.StringIO()):
+            buckets.run_checks(self.repo, checks, self.b.run, "c", 60)
+        self.assertEqual(counter.read_text().count("x"), 2)
 
 
 class ReviewSkip(unittest.TestCase):

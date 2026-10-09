@@ -677,9 +677,21 @@ class ModelError(RuntimeError):
 class ThinkingCut(Exception):
     """The model used up its thinking budget before answering; carries what it thought so far."""
 
-    def __init__(self, thinking: str, tokens: int):
+    def __init__(self, thinking: str, tokens: int, looped: bool = False):
         super().__init__(f"thinking stopped after {tokens} tokens")
-        self.thinking, self.tokens = thinking, tokens
+        self.thinking, self.tokens, self.looped = thinking, tokens, looped
+
+
+def thinking_loops(text: str) -> bool:
+    """Qwen sometimes thinks in circles, writing the same sentences again and again. True when the
+    latest stretch already appeared earlier, or one long sentence has come up three times."""
+    if len(text) < 1500:
+        return False
+    tail = text[-160:]
+    if tail.strip() and tail in text[:-160]:
+        return True
+    sentences = [x.strip().lower() for x in re.split(r"(?<=[.!?])\s+|\n+", text) if len(x.strip()) >= 40]
+    return bool(sentences) and max(sentences.count(x) for x in set(sentences)) >= 3
 
 
 class StreamCut(RuntimeError):
@@ -723,6 +735,8 @@ def _stream_chat(url: str, body: dict, label: str, timeout: float, quiet: bool =
                 nthink += 1
                 if think_budget and nthink >= think_budget and not content:
                     raise ThinkingCut("".join(thinking), nthink)  # leaving the `with` closes the request
+                if nthink % 100 == 0 and not content and thinking_loops("".join(thinking)):
+                    raise ThinkingCut("".join(thinking), nthink, looped=True)
             if m.get("content"):
                 content.append(m["content"])
                 ntok += 1
@@ -765,7 +779,9 @@ def chat(cfg: dict, run: Run, label: str, system: str, user: str, *, schema: dic
             run.save(f"{label}-thinking-cut.txt", cut.thinking)
             room = cfg.get("num_ctx", 32768) - max_tokens - est_tokens(system) - est_tokens(user) - 300
             notes = cut.thinking[-max(room, 0) * 3:]
-            say(f"  {friendly(label)}: thought for {cut.tokens} tokens (the budget); asking for the answer now")
+            say(f"  {friendly(label)}: " + (f"was thinking in circles after {cut.tokens} tokens" if cut.looped
+                                             else f"thought for {cut.tokens} tokens (the budget)")
+                + "; asking for the answer now")
             body["think"] = False
             body["options"]["num_predict"] = min(max_tokens, 8000)
             body["messages"][1]["content"] = (user + "\n\nYour notes from thinking about this so far (cut short, "
@@ -1109,6 +1125,9 @@ def request_names(text: str) -> list[str]:
         name = next(g for g in m.groups() if g)
         if len(name) >= 3 and name not in seen:
             seen.append(name)
+    for m in re.finditer(r"\b[A-Z]\w*\.(_*[A-Za-z]\w*)\b", text):  # Box.size, GitAssistant._open
+        if len(m.group(1)) >= 3 and m.group(1) not in seen:
+            seen.append(m.group(1))
     return seen
 
 
@@ -1249,9 +1268,34 @@ def index_check(repo: Path) -> tuple[bool, str]:
     return not broken, "\n".join(lines) or "all imports of repository files resolve"
 
 
+CHECKS_CACHE_HOURS = 12
+
+
+def clean_tree(repo: Path) -> str:
+    """The file tree of HEAD when the working tree matches it exactly ("" otherwise): checks on the
+    same tree give the same result, so a run that starts where the last one ended needn't repeat them."""
+    if changed_paths(repo):
+        return ""
+    return git(repo, "rev-parse", "HEAD^{tree}", check=False).strip()
+
+
 def run_checks(repo: Path, checks: dict[str, str], run: Run, tag: str, timeout: float) -> dict:
-    results = {}
+    results, cached = {}, []
+    tree = clean_tree(repo)
+    cache_path = STATE_DIR / "checks-cache.json"
+    try:
+        cache = json.loads(cache_path.read_text()) if tree else {}
+    except (OSError, json.JSONDecodeError):
+        cache = {}
     for name, cmd in checks.items():
+        key = f"{repo}|{tree}|{cmd}"
+        hit = cache.get(key) if tree and cmd != "(code index)" else None
+        if hit and time.time() - hit.get("at", 0) < CHECKS_CACHE_HOURS * 3600:
+            results[name] = {k: v for k, v in hit.items() if k != "at"}
+            cached.append(name)
+            run.save(f"check-{tag}-{name}.log", f"$ {cmd}\n(cached: the same code was checked {elapsed(hit['at'])} ago)"
+                                                 f"\n\n{hit['output']}")
+            continue
         if cmd == "(code index)":
             start = time.time()
             good, out = index_check(repo)
@@ -1267,8 +1311,16 @@ def run_checks(repo: Path, checks: dict[str, str], run: Run, tag: str, timeout: 
         results[name] = {"ok": code == 0 and not timed_out, "seconds": round(time.time() - start, 1),
                          "tail": ("(timed out)\n" if timed_out else "") + out[-3000:],
                          "output": ("(timed out)\n" if timed_out else "") + out[-20000:]}
+        if tree and not timed_out:
+            cache[key] = {**results[name], "at": time.time()}
+    if tree and len(results) > len(cached):
+        keep = sorted(cache.items(), key=lambda kv: kv[1].get("at", 0))[-200:]
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(dict(keep)))
     say("  checks: " + ("  ".join(f"{n} {ok() if r['ok'] else bad()}" for n, r in results.items())
-                        or warn("none configured (add them to .buckets.json)")))
+                        or warn("none configured (add them to .buckets.json)"))
+        + (paint(f"  (cached: same code as an earlier run)", "dim") if cached and len(cached) == len(results)
+           else paint(f"  ({', '.join(cached)} cached)", "dim") if cached else ""))
     return results
 
 
@@ -1722,8 +1774,11 @@ TASK_SCHEMA = {
         "done_when": {"type": "string"},
         "read_first": {"type": "array", "items": {"type": "string"}},
         "where": {"type": "string"},
+        "edits": {"type": "array", "items": {
+            "type": "object", "properties": {"find": {"type": "string"}, "replace": {"type": "string"}},
+            "required": ["find", "replace"]}},
     },
-    "required": ["id", "file", "action", "instructions", "done_when", "where"],
+    "required": ["id", "file", "action", "instructions", "done_when", "where", "edits"],
 }
 ROUTE_SCHEMA = {
     "type": "object",
@@ -1874,6 +1929,12 @@ text and the files it opens itself, and it cannot run commands):
   ("GitAssistant.fill_in", "parse_args", "GitAssistantTests.test_x"), or a line range ("120-180").
   The coder is shown exactly that code instead of reading the whole file, so give the place that
   holds what it needs. Say in the instructions exactly what to change there. "" for a new file.
+- "edits": when you've seen the exact code and know the change, give it as edits and the system
+  applies them directly (much faster than a coder session; the coder takes over if they don't apply).
+  "find" is a few complete lines copied exactly from the code shown (without the line numbers), unique
+  in the file; "replace" is what they become. To add code, repeat the lines it goes after in "find"
+  and put them plus the new code in "replace". For a new file: one edit, "find" "", "replace" the
+  whole file. [] when you haven't seen the exact code; the instructions must still say what to do.
 - Order tasks so dependencies come first.
 - If the change alters behavior and the repo has tests, include a task that adds or updates tests.
 - Fix problems properly. Never plan `any`, `@ts-ignore`, lint-disable comments, or skipped,
@@ -2161,7 +2222,9 @@ def validate_tasks(tasks: list, repo: Path, max_tasks: int, prefix: str) -> list
         out.append({"id": f"{prefix}{len(out) + 1}", "file": f, "action": action,
                     "instructions": str(t["instructions"]).strip(),
                     "done_when": str(t["done_when"]).strip(), "read_first": reads[:6],
-                    "where": str(t.get("where") or "").strip()})
+                    "where": str(t.get("where") or "").strip(),
+                    "edits": [{"find": str(e.get("find") or ""), "replace": str(e["replace"])}
+                              for e in t.get("edits") or [] if isinstance(e, dict) and "replace" in e]})
     return out
 
 
@@ -2295,10 +2358,13 @@ class Buckets:
             decl = enclosing(outline.get(f, []), line)
             decl = decl or {"line": max(1, line - 15), "end": line + 3}
             show(f, decl, f"Where a check fails ({f}:{line}: {msg[:100]})")
+        private: dict[str, list] = {}
         for name in request_names(self.request)[:12]:
             for f, decls in outline.items():
+                found = False
                 for d in decls:
                     hits = [d] if d["name"] == name else [m for m in d.get("members", []) if m["name"] == name]
+                    found = found or bool(hits)
                     for hit in hits:
                         show(f, hit, f"`{name}`, named in the request, is defined in {f}")
                         used = self.index.uses(name, f) if d["name"] == name and d["exported"] else None
@@ -2306,6 +2372,11 @@ class Buckets:
                             where = sorted({u["file"] for u in used["uses"]} - {f})
                             parts.append(f"`{name}` is used in {len(where)} other file(s): {', '.join(where[:10])}"
                                          + (" …" if len(where) > 10 else ""))
+                if not found and f.endswith(".py"):  # the outline leaves out private methods
+                    if f not in private:
+                        private[f] = py_decls(self.repo / f)
+                    for hit in [d for d in private[f] if d["name"].split(".")[-1] == name][:2]:
+                        show(f, hit, f"`{name}`, named in the request, is defined in {f}")
         sources = list(dict.fromkeys(s for s in sources if not re.search(r"\.(test|spec)\.", s)))[:6]
         importers = self.index.importers(sources)
         for src in sources:
@@ -2393,6 +2464,29 @@ class Buckets:
         budget = self.cfg.get("light_think_budget", 0)
         return {"think_budget": budget} if budget and self.difficulty == "light" else {}
 
+    def facts_cover(self, long: list[str], ctx: str) -> bool:
+        """The mechanically gathered facts already show every part of the long files that the request
+        names (and something of each), so asking the planner which parts to read would add nothing."""
+        shown: dict[str, list[tuple[int, int]]] = {}
+        for head in re.findall(r"^=== (.+?) ===$", ctx, re.M):
+            m = SPEC.match(head)
+            if m and m.group(2):
+                shown.setdefault(m.group(1), []).append((int(m.group(2)), int(m.group(3) or m.group(2))))
+        if not all(shown.get(f) for f in long):
+            return False
+        outline = self.index.outline()
+        for name in request_names(self.request):
+            for f in long:
+                hit = locate(self.repo, {f: self.index.files[f]}, outline, name, f)
+                if not hit:
+                    continue
+                m = SPEC.match(hit)
+                lo, hi = int(m.group(2)), int(m.group(3) or m.group(2))
+                # (decorators: the locator starts a few lines before the facts do)
+                if hi - lo <= 120 and not any(a <= lo + 5 and hi <= b for a, b in shown[f]):
+                    return False
+        return True
+
     def too_long(self, path: str) -> bool:
         """Files this long are read through their outline, never whole (when there is an outline)."""
         limit = self.cfg.get("targeted_min_lines", 0)
@@ -2403,6 +2497,10 @@ class Buckets:
         """Long files: the planner sees what each declares on which lines, names the parts it needs
         (the code to change, what it calls, an example to copy) and gets exactly those."""
         outline, files, n = self.index.outline(), self.index.files, self.cfg["research"]["reads"] + 2
+        sizes = ", ".join(f"{f} ({files[f]} lines)" for f in long)
+        if self.facts_cover(long, ctx):
+            say(f"  {ok()} {', '.join(long)}: the facts already show the code the request names; reading nothing more")
+            return f"(The long files, {sizes}, are shown only through the facts above.)"
         maps = "\n\n".join(f"=== {f} ({files[f]} lines; outline: lines, name, signature) ===\n"
                             + outline_text(decls_of(self.repo, f, outline)) for f in long)
         say(f"  {', '.join(long)}: too long to read whole, so the planner picks the parts it needs from the outline")
@@ -2424,7 +2522,6 @@ class Buckets:
             say(f"  {ok()} read exactly: {', '.join(spec for spec, _ in found)}")
         if missing:
             say(f"  {warn()} couldn't find: {', '.join(spec for spec, _ in missing)}")
-        sizes = ", ".join(f"{f} ({files[f]} lines)" for f in long)
         return (f"Parts of the long files ({sizes}; only these parts are shown), exactly as they are:\n\n"
                 + ("\n\n".join(texts) or "(none)"))
 
@@ -2812,7 +2909,12 @@ class Buckets:
         return plan
 
     def code_task(self, task: dict, commit: bool = True) -> dict:
-        """One coder session for one file. Anything else it touches is put back as it was."""
+        """One file's task: the planner's exact edits applied directly when they fit, else a coder
+        session. Anything else the coder touches is put back as it was."""
+        if task.get("edits"):
+            done = self.apply_planned(task, commit)
+            if done:
+                return done
         c = self.cfg["coder"]
         prompt = coder_prompt(self.request, task, self.task_focus(task))
         cmd = [self.cfg["opencode_bin"], "run", "--standalone", "--agent", c["opencode_agent"], "-m", c["opencode_model"],
@@ -2860,6 +2962,39 @@ class Buckets:
                 note += f" ({errors[-1][:200]})"
             say(f"  {warn()} {task['id']} {task['file']}, try {attempt}: {note}")
         return {**task, "status": "failed", "note": note}
+
+    def apply_planned(self, task: dict, commit: bool) -> dict | None:
+        """Apply the planner's edits without a coder session; None (file untouched) when they don't
+        apply cleanly or leave a Python file that doesn't parse, so the coder does the task instead."""
+        path, start = self.repo / task["file"], time.time()
+        before = path.read_text(errors="replace") if path.is_file() else None
+        try:
+            edits = task["edits"]
+            if task["action"] == "create" and len(edits) == 1 and not edits[0]["find"].strip():
+                after = edits[0]["replace"]
+            elif before is None:
+                raise ValueError("the file doesn't exist")
+            else:
+                after = apply_edits(before, edits)
+            if after == before:
+                raise ValueError("the edits change nothing")
+            if task["file"].endswith(".py"):
+                try:
+                    ast.parse(after)
+                except SyntaxError as e:
+                    raise ValueError(f"the result doesn't parse (line {e.lineno}: {e.msg})")
+        except ValueError as e:
+            say(f"  {warn()} {task['id']}: the planned edits don't apply ({str(e)[:120]}); the coder does it")
+            return None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(after)
+        if commit:
+            git(self.repo, "add", "-A", "--", task["file"])
+            git(self.repo, "commit", "--no-verify", "-q", "-m",
+                f"buckets {task['id']}: {task['action']} {task['file']}\n\n{task['instructions'][:1500]}")
+        note = f"applied the planned edit{'s' if len(task['edits']) != 1 else ''} directly"
+        say(f"  {ok()} {task['id']} {task['file']} ({int(time.time() - start)}s): {paint(note, 'dim')}")
+        return {**task, "status": "done", "note": f"DONE: {note}"}
 
     def task_focus(self, task: dict) -> str:
         """The code a task is about, read now (earlier tasks may have moved it), so the coder starts at
@@ -3354,6 +3489,38 @@ def impact_text(api: dict | None) -> str:
         out.append("Callers of changed exports that this work didn't update:")
         out += [f"- {u}" for u in api["untouched"][:30]]
     return "\n".join(out) + "\n"
+
+
+LINE_NUMBER = re.compile(r"^\s*\d+\| ?")
+
+
+def apply_edits(text: str, edits: list[dict]) -> str:
+    """The planner's find/replace edits, in order. Each `find` must match once: exactly, or line by
+    line ignoring indentation and trailing spaces. Line numbers copied from the excerpts are dropped."""
+    def plain(block: str) -> str:
+        lines = block.split("\n")
+        numbered = [l for l in lines if l.strip()]
+        return "\n".join(LINE_NUMBER.sub("", l) for l in lines) if numbered and all(
+            LINE_NUMBER.match(l) for l in numbered) else block
+
+    for i, e in enumerate(edits, 1):
+        find, new = plain(e["find"]), plain(e["replace"])
+        if not find.strip():
+            raise ValueError(f"edit {i} has nothing to find")
+        count = text.count(find)
+        if count == 1:
+            text = text.replace(find, new)
+            continue
+        if count > 1:
+            raise ValueError(f"edit {i}: the text to find appears {count} times")
+        lines, want = text.split("\n"), [l.strip() for l in find.strip("\n").split("\n")]
+        hits = [k for k in range(len(lines) - len(want) + 1)
+                if [l.strip() for l in lines[k:k + len(want)]] == want]
+        if len(hits) != 1:
+            raise ValueError(f"edit {i}: the text to find " + (f"appears {len(hits)} times" if hits else "isn't in the file"))
+        lines[hits[0]:hits[0] + len(want)] = new.strip("\n").split("\n") if new.strip() else []
+        text = "\n".join(lines)
+    return text
 
 
 def coder_prompt(request: str, task: dict, focus: str = "") -> str:

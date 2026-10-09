@@ -173,6 +173,16 @@ Before either, buckets gathers **facts mechanically**: the code around every fai
 definitions and uses of code names in your request, and the closest tests. The planner also gets
 **`grep`** (exact, via `git grep`) alongside `read` and `uses`.
 
+**Planned edits skip the coder:** when the planner has seen the exact code, each task carries
+`edits` (lines to find, copied from the code shown, and what they become). buckets applies them
+directly, checks that a Python file still parses, and commits; only edits that don't apply (or
+don't parse) go to a coder session. When the facts gathered mechanically already show every part of
+a long file that the request names, the planner isn't asked which parts to read.
+
+**Checks aren't repeated on the same code:** results are cached by the commit's file tree for 12
+hours (`~/.local/state/buckets/checks-cache.json`), and only for a clean working tree. A run that
+starts where the last one ended (after `buckets merge`) reuses its final check results.
+
 **The coder starts at its place:** each task names a `where` (`GitAssistant.fill_in`, or a line
 range), and the coder's prompt carries that code exactly as it is when the task starts, so it doesn't
 read a long file to find it. When the planner leaves `where` empty, buckets uses the places the
@@ -183,7 +193,9 @@ On the worker, every 1,000 tokens sent costs about 5 seconds before the model wr
 keeping prompts short is most of the speed: the same small Python change went from 20+ minutes to
 about 2 minutes of reading and planning.
 
-**Thinking budget:** light jobs plan and review with `light_think_budget` (1,500) thinking tokens.
+**Thinking budget:** light jobs plan and review with `light_think_budget` (1,500) thinking tokens,
+and any thinking that starts repeating itself (the same long sentence three times, or the latest
+stretch already written earlier) is cut there and the model is asked for its answer.
 Otherwise the planner's thinking is streamed and cut at `planner.think_budget` tokens
 (default 2,500, about 5 minutes on the M2 Pro); then it's asked for the answer without thinking,
 with its notes so far. `0` turns the cap off.
