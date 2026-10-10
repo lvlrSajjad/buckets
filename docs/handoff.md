@@ -1,69 +1,80 @@
-# Handoff (2026-10-11)
+# Handoff (2026-10-11, before compacting the session)
 
-Where buckets stands after the second build day, for whoever (or whichever session) picks it up
-next. Details live in [../README.md](../README.md), [field-notes.md](field-notes.md) (every
-measurement and failure; 16–17 are today's) and [roadmap.md](roadmap.md).
+Read this first. Details: [../README.md](../README.md), [field-notes.md](field-notes.md) (every
+measurement; 16–19 are the latest), [roadmap.md](roadmap.md), and the research in
+[research/2026-10-11-local-agentic-coding.md](research/2026-10-11-local-agentic-coding.md).
 
 ## What it is
 
 `~/Coding/ME/buckets/buckets.py` (single file, Python 3.11+, no dependencies), linked as
-`~/.local/bin/buckets`, plus `ts_index.cjs` (the TypeScript code index) and `test_buckets.py`
-(155 tests, all passing in ~30 s; sandboxed, hardware-free). A public GitHub repo:
-`lvlrSajjad/buckets` (pushed with the personal account, via the repo's credential helper).
+`~/.local/bin/buckets`, plus `ts_index.cjs` (TypeScript index) and `test_buckets.py` (160 tests, ~30 s,
+sandboxed, never touch real servers). Public repo `lvlrSajjad/buckets`, pushed with the personal
+account (the repo's credential helper). Use it as a chat: `cd <repo> && buckets`. Commands: `merge`,
+`discard`, `last`, `pr`, `review` (Claude reviews the latest branch), `setup`, `--doctor`.
 
-Use it as a chat: `cd <repo> && buckets`, then one request per line. Commands in the chat or the
-shell: `merge`, `discard`, `last`, `pr`, `review`, `setup`, `--doctor`.
+## Machines and the current split (default since 2026-10-11)
 
-## How the owner's machines are set up
-
-| Role | Where | Model |
+| Role | Where | Model, speed |
 |---|---|---|
-| Reader and coder: routes, picks files, chooses parts, codes | Windows laptop (RTX 3070 8 GB, 32 GB RAM), **llama.cpp server** at `192.168.1.111:8080` | `qwen3.6:35b-a3b` (Ollama's GGUF, experts in RAM, 4,096-token chunks): ~650 tok/s reading, ~35 tok/s writing |
-| Planner and reviewer | the Mac (M2 Pro, 32 GB), Ollama at `localhost:11434` | the same `qwen3.6:35b-a3b`, copied from Windows: ~475 tok/s reading, ~48 tok/s writing; ~21 GB while loaded, unloaded after each run |
-| Unused, installed | the Mac | `qwen3.6-planner` (27B, the old advisor: ~85 / ~9 tok/s) |
-| Claude (`--claude`, the ladder's last step, `buckets review`) | `claude` CLI, Team login | Sonnet by default |
-| Unused, installed | Windows Ollama | `qwen3:4b-instruct-2507` (fast but too inaccurate for chores; field notes 16) |
+| Reader and coder: routes, picks files, chooses parts, answers the planner's `ask` look-ups, codes | Windows (RTX 3070 8 GB, 32 GB RAM), llama.cpp server `192.168.1.111:8080`, starts at login (`C:\llama\start-buckets-server.ps1`) | Qwen3.6-35B-A3B (Ollama's GGUF `sha256-d372…`, experts in RAM, 4,096-token chunks): ~650 tok/s reading, ~35 writing |
+| Planner and reviewer (plans with look-up tools) | the Mac (M2 Pro 32 GB), Ollama `localhost:11434`, unloaded after each run | the same Qwen3.6-35B-A3B (copied from Windows): ~475 tok/s reading, ~48 writing (Ollama's MTP is on) |
+| Paid fallback | `claude` CLI (Team login) | Sonnet: `--claude`, the escalation ladder's last step, `buckets review` |
+| Installed, unused | Mac: `qwen3.6-planner` (27B); Windows Ollama: `qwen3:4b-instruct-2507`, `qwen3-coder:30b` | |
 
-The Windows server starts at login (a shortcut to `C:\llama\start-buckets-server.ps1` in the
-Startup folder; the script stops Ollama's copy of the 35B first: both can't fit in 32 GB). Config:
-`~/.config/buckets/config.json` (`reader`, `thinker`, `coder` have `"api": "llamacpp"` and the
-8080 URL; backups `*.bak-*`); opencode has a `llamacpp_windows` provider. Going back to Ollama is
-those two settings per role.
+Config: `~/.config/buckets/config.json` (backups `config.json.bak-*`). `planner` = the Mac's 35B,
+`offload.planner` = `advisor`, `offload.light_jobs` = false; `reader`/`thinker`/`coder` = Windows with
+`"api": "llamacpp"`. opencode has a `llamacpp_windows` provider. Repo rules: `~/Coding/ME/*` local-only;
+`~/Coding/ET/ecotrak-mobile` has explicit checks (tsc, eslint errors-only, jest in `packages/shared`)
+and `"related": {"ecotrak-api": "~/Coding/ET/web_api/ecotrak-api"}`, mode automatic. ecotrak-mobile
+itself was left exactly as found (no branches, no `.buckets/`).
 
-Repo rules in the config: `~/Coding/ME/*` local-only; each `~/Coding/<org>/*` sets `GH_CONFIG_DIR`;
-`~/Coding/ET/ecotrak-mobile` has explicit checks (tsc, eslint errors only, jest, all in
-`packages/shared`), `"related": {"ecotrak-api": …}` and, for the tests, `"mode": "local"` (the
-owner may want it back on auto so heavy jobs go to Claude).
+## The plan, in order (what to do next)
 
-## What makes it fast (and why)
+1. **Windows server: MTP and caching** (waiting on the owner to restart the server). New start-script
+   flags: add `--spec-type draft-mtp --spec-draft-n-max 2`; remove `--no-reasoning-preserve` (it breaks
+   prompt caching in multi-turn coder sessions). The model file already has the MTP (`nextn`) tensors.
+   Measure before/after on the saved plan prompt (`runs/buckets-20261010-132712/08-plan.json`, nonce in
+   the system prompt to defeat the cache): expected writing 35 → ~42–45 tok/s, reading may drop. If the
+   flag is refused, the llama.cpp build predates 2026-05-16 (PR #22673): get a newer CUDA release.
+2. **Double review + evidence rules** (next to build). After each round both machines review at once
+   (the Mac as now, Windows as a second reviewer); any issue wins, except: when every check passes and
+   only one reviewer claims a definite error ("undefined", "never called"), confirm it (ask the other
+   reviewer, or a mechanical check) before rewriting working code. Add a **mock-ratio check** on new
+   tests (the function under test mocked; only `assert_called*`/`toHaveBeenCalled*` assertions) as
+   evidence for the reviewers. Test on the `tags` request (A created a tag named "10"; B was right) and
+   the `buckets review` request (field notes 19).
+3. **Prompt layout for cache reuse:** byte-stable front (system, tool schema in fixed order, guidance,
+   map, facts), the step's instructions last; check `prompt_eval_cached_count`. Ollama: constant
+   `num_ctx`, a longer `keep_alive` during a run.
+4. **Parallel coding lanes:** independent tasks coded on both machines when edits fall back to coders
+   (needs an opencode provider for the Mac's Ollama 35B).
+5. **Two candidates + tests** for hard tasks (both machines, tests pick, only "both failed" goes to
+   Claude); research cites 63.5% → 71.2% (SWE-TRACE).
+6. **Language servers and ast-grep:** `multilspy` (tsserver, basedpyright) for references/rename;
+   ast-grep for codemods; tree-sitter outlines (TS outline is cached per run today).
+7. **Adaptive placement:** if the Mac is under memory pressure (IDE, browsers), plan on Windows.
+8. **Windows network** (owner, when convenient): Windows → Mac is ~27 KB/s on every non-SMB port (SMB
+   30–40 MB/s). Research's top suspects: antivirus HTTP/web scanning on all ports, or Killer/SmartByte
+   prioritization. Diagnostics in the research file, section 8.
 
-Reading is the cost on local hardware, so buckets reads as little as possible, mechanically:
-- the project map (`.buckets/map.md`, one line per file) instead of the repo's outline;
-- the request's own words searched as paths and code (`work order details` → `work-order-details/`);
-- named code found by name; long files through their outline; long components as the stretches
-  around the request's terms; agent docs cut to the sections that match;
-- the planner's exact edits applied with no coder; coders shown the lines they change;
-- check results cached by file tree; thinking capped (1,500 tokens on light jobs) and cut when it
-  loops.
+## How to test changes (gotchas learned the hard way)
 
-## Where local stops and Claude starts (field notes 17)
+- **buckets runs from this working copy.** Never `git stash` buckets.py before a live run: the run uses
+  the stashed-away (old) code. Commit first, then run.
+- A/B: the same request twice, each on its own branch from the same `main`; a second config via
+  `BUCKETS_CONFIG=/path/config.json buckets …`; compare per-step times in each run's `run.log` (the
+  second run's "tests before" is cached).
+- Verify every branch yourself before merging: `git diff main...<branch>` and the tests in a worktree
+  (`git worktree add <scratch> <branch>`), never by switching the owner's checkout.
+- macOS `zsh`: quote `"${B}:file"` (zsh reads `$B:t` as a modifier).
+- Tests must not reach real servers: tests that plan should mock `chat_turn`/`ask_json` or set
+  `"lookups": False`.
 
-Local is reliable for questions, finding things and changes in places it can find (2–5 min on a
-2,000-file repo, free). It is not reliable for changes that must fit existing patterns across files,
-or for judgment calls (hook dependencies). Claude planning did those in 2–8 min for $0.50–1.20, and
-`buckets review` ($0.20–0.50) caught a design mistake no check could see. buckets now says so: a
-suggestion to add `--claude` for heavy local jobs, and to run `buckets review` when a local result
-adds files, spans 3+ files, needed rounds, or isn't done.
+## Where local stops and Claude starts (field notes 17–19)
 
-## Open threads
-
-1. **ecotrak-mobile throwaway branches** from the tests (8 `buckets/…` branches): delete them, or
-   keep the Project filter (`buckets/look-at-the-current-work-order-s-1010-1832`, slot 33) if the
-   owner wants it. `.buckets/` there is ignored through `.git/info/exclude`.
-2. **castellan PRs** #1–#3 (from the first day): CI re-runs were triggered; check their state.
-3. **Two brains** (roadmap): a double review first (both machines review each round at once), then
-   parallel coding lanes, look-ups answered while the other thinks, plans compared.
-4. **Windows → Mac is slow on most ports** (~27 KB/s; SMB is fast): field notes 18.
-5. The roadmap's "Next (from the big-repo tests)": edit anchors, more matches, a reading loop on
-   the llama.cpp prompt cache, speculative decoding with the model's MTP layers, an MCP tool for
-   Claude Code.
+Local is reliable for questions, finding things, and changes in places it can find (2–5 min on a
+2,000-file repo). It isn't for changes that must fit patterns across files, or judgment calls; Claude
+planning did those in 2–8 min for $0.50–1.20, and `buckets review` caught a design mistake no check
+could see for $0.28. Reviews are the weak spot locally: a false "undefined variable" turned a 3-minute
+success into a broken result (fixed: whole changed functions in the review, loop check ignores quoted
+code); mocked tests pass broken code.

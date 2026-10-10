@@ -43,6 +43,27 @@ behind these are in [field-notes.md](field-notes.md).
   it), suggestions to use Claude (heavy local runs) and to have Claude review (risky local results).
   See field notes 17.
 
+## Research (2026-10-11), summarized
+
+From [research/2026-10-11-local-agentic-coding.md](research/2026-10-11-local-agentic-coding.md):
+- **Model:** keep Qwen3.6-35B-A3B (NVIDIA's like-for-like table: 70.1% SWE-bench Verified vs 51–59% for
+  Qwen3-Coder-30B-A3B, Nemotron 3.5 Lightning, gpt-oss-20b, Gemma 4 26B-A4B, GLM-4.7-Flash). Dense
+  models (Devstral Small 2, Qwen3.6-27B) would be slow here.
+- **MTP:** llama.cpp supports Qwen3.6's built-in MTP heads (`--spec-type draft-mtp --spec-draft-n-max
+  2`, PR #22673, 2026-05-16); expect ~+20–30% writing with experts on CPU, slower prefill, single slot.
+  Ollama already uses MTP (`draft_num_predict`).
+- **Caching:** Qwen3.6 is hybrid (Gated DeltaNet), so `--cache-reuse` can't work; only exact prefix
+  matches and context checkpoints do. Keep prompts byte-stable at the front; keep reasoning in multi-turn
+  history (don't use `--no-reasoning-preserve`); constant `num_ctx` on Ollama.
+- **MLX on the Mac:** ~1.5× faster writing, ~40% slower reading, memory crashes on 32 GB: not yet.
+- **Agent findings:** planner/editor split mainly buys edit-format reliability for small models;
+  search/replace edits with a lint gate; ~100-line windows; one retry with test output roughly doubles
+  solve rate (34.7% → 62.2% on Aider Polyglot for this model); candidates + a verifier pay off.
+- **Tooling:** multilspy (tsserver, basedpyright) for references/rename, ast-grep for codemods,
+  tree-sitter for outlines; mutation testing (StrykerJS incremental, mutmut) and a mock-ratio check
+  for weak tests.
+- **Windows network:** likely antivirus HTTP scanning on all ports or Killer/SmartByte shaping.
+
 ## Two brains (the Mac and Windows both run the 35B)
 
 Where a run's time goes now (field notes 18, B): planning and review thinking ~45%, tests ~20%,
