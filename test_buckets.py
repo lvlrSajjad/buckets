@@ -919,6 +919,14 @@ class FasterRuns(unittest.TestCase):
         out = buckets.apply_edits("X = {\n    'a': 1,\n    'c': 3,\n}\n", [{"at": "    'a': 1,", "mode": "after",
                                                                          "code": "    'b': 2,"}], decls)
         self.assertEqual(out, "X = {\n    'a': 1,\n    'b': 2,\n    'c': 3,\n}\n")
+        # "after" a quoted def line (exact, or misremembered): after the whole method, never inside it
+        for quote in ("    def size(self):", "    def size(self):\n        return 30"):
+            out = buckets.apply_edits(text, [{"at": quote, "mode": "after", "code": "def area(self):\n    return 9"}],
+                                      decls)
+            self.assertIn("        return 3\n\n    def area(self):\n        return 9\n\n    def open", out)
+        # a misremembered short quote can't replace the whole function
+        with self.assertRaisesRegex(ValueError, "isn't a name or lines in the file"):
+            buckets.apply_edits(text, [{"at": "def run(x):\n    y = 2", "mode": "replace", "code": "def run(x):"}], decls)
         with self.assertRaisesRegex(ValueError, "isn't a name or lines in the file"):
             buckets.apply_edits(text, [{"at": "Box.nothing", "mode": "after", "code": "x = 1"}], decls)
         with self.assertRaisesRegex(ValueError, "appears 2 times"):
@@ -1167,7 +1175,7 @@ class LlamaCppServer(unittest.TestCase):
         sent = fake.bodies[0]
         self.assertTrue(sent["stream"])
         self.assertTrue(sent["chat_template_kwargs"]["enable_thinking"])
-        self.assertNotIn("response_format", sent)                # no grammar while it may think
+        self.assertEqual(sent["response_format"]["json_schema"]["schema"], schema)  # applies after the thinking
         saved = json.loads(next(self.run.dir.glob("*plan.json")).read_text())
         self.assertEqual(saved["thinking"], "step 0. step 1. step 2. step 3. step 4. ")
         self.assertEqual(saved["stats"]["prompt_eval_count"], 120)

@@ -763,13 +763,12 @@ def guard_thinking(thinking: list[str], nthink: int, content: list[str], think_b
 
 
 def openai_body(body: dict) -> dict:
-    """buckets' (Ollama-shaped) request as llama.cpp's server takes it. A JSON schema is enforced only
-    without thinking: as a grammar it would apply from the first token and leave no room to think
-    (the reply is still checked against the schema, with a retry)."""
+    """buckets' (Ollama-shaped) request as llama.cpp's server takes it. The JSON schema applies after
+    the thinking, as with Ollama (checked: it thinks first, then answers in the schema)."""
     out = {"model": body["model"], "messages": body["messages"], "stream": True,
            "max_tokens": body["options"]["num_predict"], "temperature": body["options"].get("temperature", 0.3),
            "chat_template_kwargs": {"enable_thinking": bool(body["think"])}}
-    if body.get("format") and not body["think"]:
+    if body.get("format"):
         out["response_format"] = {"type": "json_schema", "json_schema": {"name": "answer", "schema": body["format"]}}
     return out
 
@@ -3932,6 +3931,7 @@ def reindent(code: str, like: str) -> list[str]:
     return [(" " * (want - have) + l if l.strip() else l) for l in lines] if want > have else lines
 
 
+DECL_LINE = re.compile(r"\s*(?:export\s+)?(?:async\s+)?(?:def|class|function)\s+([\w$]+)")
 CLOSER = re.compile(r"[\]\)\}][\]\)\};,]*")
 
 
@@ -3977,15 +3977,28 @@ def apply_edits(text: str, edits: list[dict], decls_for=None) -> str:
             text = "\n".join(append_into(lines, span, plain_code(e["code"])))
             continue
         if span is None:
+            by_name = False
             want = [l.strip() for l in at.split("\n")]
             if not any(want):
                 raise ValueError(f"edit {i} says where only with an empty \"at\"")
             hits = [k for k in range(len(lines) - len(want) + 1)
                     if [l.strip() for l in lines[k:k + len(want)]] == want]
-            if len(hits) != 1:
+            # Lines that start with a declaration (def test_op_log(self): …) mean that declaration:
+            # "after" it is after its last line, even when only its first line was quoted, and lines
+            # "quoted" from memory that don't match still find it. A replace takes the whole
+            # declaration only when the quote covered most of it (else it could drop a body).
+            head = DECL_LINE.match(next(l for l in at.split("\n") if l.strip()))
+            d = find_decl(decls_for(text), head.group(1)) if head and decls_for else None
+            if d:
+                inside = len(hits) == 1 and d["line"] - 1 <= hits[0] < d["end"]
+                whole = len(want) >= 0.8 * (d["end"] - d["line"] + 1)
+                if (mode in ("after", "before") and (not hits or inside)) or (mode == "replace" and not hits and whole):
+                    span, by_name, hits = (d["line"] - 1, d["end"]), True, [d["line"] - 1]
+            if span is None and len(hits) != 1:
                 raise ValueError(f"edit {i}: `{at[:60]}` " + (f"appears {len(hits)} times" if hits
                                                               else "isn't a name or lines in the file"))
-            span = (hits[0], hits[0] + len(want))
+            if span is None:
+                span = (hits[0], hits[0] + len(want))
         lo, hi = span
         new = reindent(plain_code(e["code"]), lines[lo]) if e["code"].strip() else []
         gap = 0  # next to a declaration: the same spacing that follows it (or precedes it, at the end)
@@ -3994,7 +4007,7 @@ def apply_edits(text: str, edits: list[dict], decls_for=None) -> str:
                 gap += 1
             while not gap and lo - 1 >= 0 and not lines[lo - 1].strip():
                 gap = 1 + (lo - 2 >= 0 and not lines[lo - 2].strip())
-            gap = max(gap, 1)
+            gap = max(gap, 1) if not lines[lo][:1].isspace() else 1  # members: one blank line
         if mode == "replace":
             lines[lo:hi] = new
         elif mode == "after":
