@@ -4527,6 +4527,7 @@ GIT_OPS = {
                     "(default private), description?}", True, True),
     "status": ("the working tree: changed and untracked files, the branch and how far ahead or behind its upstream it is: {}", False, False),
     "log": ("show the last {count} commits (default 10): {count?}", False, False),
+    "branches": ("list local branches with upstream and ahead/behind counts: {}", False, False),
 }
 
 GIT_SCHEMA = {
