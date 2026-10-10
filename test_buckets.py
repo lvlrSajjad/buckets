@@ -1017,10 +1017,13 @@ class FasterRuns(unittest.TestCase):
         self.assertEqual((self.repo / "src/n.py").read_text(), "def new():\n    return 3\n")
 
     def test_thinking_loops(self):
-        varied = " ".join(f"Step {i} looks at a different part of the code, number {i * 7}." for i in range(60))
+        varied = " ".join(f"Step {i} looks at a different part of the work, number {i * 7}." for i in range(70))
         self.assertFalse(buckets.thinking_loops(varied))
-        circle = varied[:1500] + " Wait, I need to double check whether fill_in drops the paths here. " * 4
+        circle = varied[:3200] + " Wait, I need to double check whether the step drops the paths here. " * 4
         self.assertTrue(buckets.thinking_loops(circle))
+        # quoting the same line of code again while reasoning about it isn't a loop
+        quoted = varied[:3200] + "".join(f"\nLooking at it again:\n    print(f\"Reviewing: {{d['request']}}\")\nAttempt {i} checks scope." for i in range(4))
+        self.assertFalse(buckets.thinking_loops(quoted))
 
     def test_checks_arent_repeated_on_the_same_code(self):
         counter = Path(tempfile.mkdtemp()) / "n"
@@ -1253,6 +1256,18 @@ class BigRepoTools(unittest.TestCase):
         commit_all(repo, "remove a row")
         self.assertTrue(buckets.drop_leftover_blanks(repo, base, "s.tsx"))
         self.assertEqual((repo / "s.tsx").read_text(), "<A>\n  <B />\n\n\n  <C />\n</A>\n")  # its own blanks kept
+
+    def test_the_review_sees_the_whole_changed_function(self):
+        body = "def review(repo):\n    d = find(repo)\n" + "".join(f"    x{i} = {i}\n" for i in range(12)) + "    return d\n"
+        repo = make_repo({"m.py": body + "\n\ndef other():\n    return 1\n"})
+        base = buckets.git(repo, "rev-parse", "HEAD").strip()
+        (repo / "m.py").write_text(body.replace("    return d\n", "    print(d['request'])\n    return d\n")
+                                   + "\n\ndef other():\n    return 1\n")
+        commit_all(repo, "print the request")
+        b = buckets.Buckets(buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False}), repo, "x")
+        text = b.changed_code(base)
+        self.assertIn("    2|     d = find(repo)", text)              # where d is set, 13 lines above the change
+        self.assertNotIn("def other", text)
 
     def test_the_review_sees_where_the_requests_phrases_still_are(self):
         repo = make_repo({"s.tsx": '<Row title={"Original ETA"} />\n<Row title={"Tracking Code"} />\n'})

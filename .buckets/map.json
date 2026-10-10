@@ -39,9 +39,9 @@
     "ReplyTooLong",
     "SchemaGaveUp"
    ],
-   "hash": "aa296b4a21d0",
+   "hash": "941071446c08",
    "imports": [],
-   "lines": 5882,
+   "lines": 6100,
    "purpose": "buckets: empty the pool with many small buckets.",
    "source": "docstring"
   },
@@ -80,15 +80,15 @@
     "Mechanical",
     "ProjectMemoryTests",
     "Offload",
+    "Lookups",
     "ClaudeMode",
-    "FakeModels",
-    "Research"
+    "FakeModels"
    ],
-   "hash": "b0e701bb2d89",
+   "hash": "691c5a967f9b",
    "imports": [
     "buckets.py"
    ],
-   "lines": 2121,
+   "lines": 2194,
    "purpose": "Tests for the parts of buckets that don't need a model: run with `python3 -m unittest -v`.",
    "source": "docstring"
   },

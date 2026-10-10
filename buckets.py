@@ -691,15 +691,22 @@ class ThinkingCut(Exception):
         self.thinking, self.tokens, self.looped = thinking, tokens, looped
 
 
+CODE_LINE = re.compile(r"""[{}()\[\];=]|^\s*(def|class|import|from|return|if|for|const|let|function)\b|["'`].*["'`]""")
+
+
 def thinking_loops(text: str) -> bool:
     """Qwen sometimes thinks in circles, writing the same sentences again and again. True when the
-    latest stretch already appeared earlier, or one long sentence has come up three times."""
-    if len(text) < 1500:
+    latest stretch of its prose already appeared earlier, or one long sentence has come up three
+    times. Quoted code doesn't count: re-reading the same line of code while reasoning about it is
+    work, not a loop (a review was cut at 400 tokens for quoting one line twice)."""
+    prose = re.sub(r"```.*?(```|$)", " ", text, flags=re.S)
+    prose = "\n".join(l for l in prose.splitlines() if not CODE_LINE.search(l))
+    if len(prose) < 3000:
         return False
-    tail = text[-160:]
-    if tail.strip() and tail in text[:-160]:
+    tail = prose[-200:]
+    if tail.strip() and tail in prose[:-200]:
         return True
-    sentences = [x.strip().lower() for x in re.split(r"(?<=[.!?])\s+|\n+", text) if len(x.strip()) >= 40]
+    sentences = [x.strip().lower() for x in re.split(r"(?<=[.!?])\s+|\n+", prose) if len(x.strip()) >= 40]
     return bool(sentences) and max(sentences.count(x) for x in set(sentences)) >= 3
 
 
@@ -3920,6 +3927,32 @@ class Buckets:
         say(f"  {ok()} {task['id']} {task['file']} ({int(time.time() - start)}s): {paint(note, 'dim')}")
         return {**task, "status": "done", "note": f"DONE: {note}"}
 
+    def changed_code(self, base: str, budget: int = 14000) -> str:
+        """The whole of every function or method the change touches, as it is now: a diff's few
+        lines of context can hide where a name is defined (a review called a variable undefined
+        that was set ten lines above the hunk)."""
+        out, used = [], 0
+        for f in git(self.repo, "diff", "--name-only", f"{base}..HEAD").split():
+            if not (self.repo / f).is_file():
+                continue
+            decls = [d for d in decls_of(self.repo, f, self.index.outline()) if not d["signature"].endswith("= …")]
+            diff = git(self.repo, "diff", "-U0", f"{base}..HEAD", "--", f, check=False)
+            touched = {int(m.group(1)) for m in re.finditer(r"^@@ -\d+(?:,\d+)? \+(\d+)", diff, re.M)}
+            spans = set()
+            for line in touched:
+                around = [d for d in decls if d["line"] <= line <= d["end"] and d["end"] - d["line"] <= 150]
+                if around:
+                    best = min(around, key=lambda d: d["end"] - d["line"])
+                    spans.add((best["line"], best["end"], best["name"]))
+            for lo, hi, name in sorted(spans):
+                text = read_spec(self.repo, self.index.files, f"{f}:{lo}-{hi}", self.cfg["max_file_chars"])
+                if used + len(text) > budget:
+                    break
+                out.append(text)
+                used += len(text)
+        return ("\nThe changed functions in full, as they are now (to check names and context the diff "
+                "doesn't show):\n" + "\n\n".join(out) + "\n") if out else ""
+
     def phrases_now(self, base: str) -> str:
         """Where the request's phrases and quoted strings appear in the changed files now, found
         mechanically: for "remove X" the proof that X is gone (or isn't), for "add X" that it's there."""
@@ -4088,7 +4121,7 @@ class Buckets:
             checks="\n".join(chk) or "(no checks configured)",
             shortcuts=("\nShortcuts found in the diff (must be replaced with real fixes):\n"
                        + "\n".join(f"- {h}" for h in shortcuts) + "\n") if shortcuts else "",
-            impact=impact_text(api) + self.phrases_now(base),
+            impact=impact_text(api) + self.phrases_now(base) + self.changed_code(base),
             diff=self.diff_text(base), rules=TASK_RULES.format(max_tasks=self.cfg["max_tasks"]))
 
         def validate(d):
