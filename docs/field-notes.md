@@ -469,6 +469,26 @@ Caching across a tool conversation works: turn 2 (turn 1 + the tool call + its r
 3,377 of 3,438 tokens and read 61 new ones; echoing the reasoning back made no difference (3,498
 cached, 31 new). So the planner's look-up rounds on Windows reread almost nothing.
 
+### 21. Double review, on the request one review got wrong (2026-10-11)
+
+The `tags` request from field notes 18 again (a scratch clone of buckets with `op_tags` removed;
+the Mac plans, both machines review each round at once, plus the mechanical weak-test list):
+
+| | Time | Rounds | Result |
+|---|---|---|---|
+| A, 18 (Windows plans and reviews alone) | 4m 32s | 1 | **wrong**: `git tag … 10` creates a tag named "10"; review said done |
+| B, 18 (the Mac alone) | 4m 41s | 2 | correct |
+| **Double review** | 6m 14s | 2 | **correct**: lists, keeps the newest `count` (checked on a repo with 12 tags; no tag created); tests check the returned values |
+
+- Round 1: both reviewers said not done for the same reason: `test_op_tags` only asserted that the
+  mocked `git` was called, which is what the weak-test list flagged ("all 1 assertion(s) only check that
+  mocks were called"). Round 2 added value assertions; both said done.
+- Cost of the second look: the two reviews ran at once (27 s and 22 s of answer after 1,500 tokens of
+  thinking each); the round took ~15–20 s longer than the Mac alone would have.
+- Every edit, including round 2's, was applied straight from the plan (0 s of coder time).
+- They never disagreed here, so the confirm step didn't run; the unit tests cover it (a false
+  "undefined" claim is dismissed by the reviewer who said done, a confirmed one wins).
+
 ## Lessons so far
 
 - A wrong review is worse than none: one false "undefined variable" turned a 3-minute success into a

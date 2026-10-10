@@ -256,6 +256,16 @@ with its notes so far. `0` turns the cap off.
 tests), and every check passes afterwards with no regressions, shortcuts or untouched callers, the
 run is done without a model review.
 
+**Double review:** when the planner and the worker are different machines, both review each round
+at the same time (the worker thinks no longer than the planner, so it costs no extra time). Both
+"done" is done; both "not done" merges their follow-up tasks; when they differ, the issues win,
+except a lone claim of a definite error ("`d` is undefined", "never called") while every check
+passes: the reviewer who said done is asked whether it's real, with where the names appear now
+(`git grep`), and the work is kept if it isn't. One such false claim once turned a correct change
+into a broken one. Reviewers also get a mechanical list of new tests that can pass whatever the
+code does: only `assert_called*`/`toHaveBeenCalled*` assertions, no assertions, or a mock of the
+very function the change edits. `offload.double_review: false` turns it off.
+
 Claude mode doesn't need the reading strategies: Claude explores the repo itself with read-only
 tools (the gathered facts are still passed to it).
 

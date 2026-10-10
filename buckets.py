@@ -266,7 +266,9 @@ FRIENDLY = [("route", "Reading your request"), ("pick-dirs", "Choosing folders t
             ("pick-files", "Choosing files to read"), ("survey", "Reading code"),
             ("research", "Planner is deciding what to look up"), ("condense", "Condensing notes"),
             ("plan", "Planner is planning"), ("answer", "Planner is writing the answer"),
-            ("review", "Planner is reviewing the work"), ("conflict", "Planner is working out the conflict")]
+            ("second-review", "The second reviewer is checking the work"),
+            ("confirm", "The other reviewer is checking a claim"), ("review", "Planner is reviewing the work"),
+            ("conflict", "Planner is working out the conflict")]
 
 
 def friendly(label: str) -> str:
@@ -4154,7 +4156,7 @@ class Buckets:
         if prompt_out is not None:
             prompt_out.append(prompt)
         if reviewer:
-            return ask_json(reviewer, self.run, f"review-{rnd}-{machine_label(reviewer).lower().replace(' ', '-')}",
+            return ask_json(reviewer, self.run, f"second-review-{rnd}-{machine_label(reviewer).lower().replace(' ', '-')}",
                             SYSTEM, prompt, REVIEW_SCHEMA, validate, max_tokens=16000, timeout=self.timeout,
                             quiet=True, **self.think_budget())
         if target:

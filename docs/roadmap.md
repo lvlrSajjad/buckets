@@ -119,6 +119,7 @@ reading ~15%, coding 0–25% (only when edits fall back to a coder). Ideas, by w
 
 | Item | Why | Size |
 |---|---|---|
+| **Mechanical moves: extract to hook / module / component** (next to build). The model only picks the line ranges and the parameters; the TypeScript index works out which moved names the rest still uses (the hook's return and the screen's destructuring) and the imports; buckets moves the lines byte for byte; `tsc`/lint/tests decide | A 3,687-line screen (`assessment-questionnaire-screen.tsx`, ~1,450 lines of logic) can't be split by retyping it: ~16k tokens of edit code, ~6 min of writing on the Mac, and one changed line breaks it. The model stitches, buckets moves | Medium-large: TS first (ts_index.cjs), Python (ast) after |
 | **Mechanical renames** through the TypeScript language service (`rope` for Python) | A rename across packages with no planner or coder at all | Large: needs a full type-checked program per repo |
 | **`git bisect run <check>`** when a check passed at a known commit | Pins a regression to the commit that caused it, mechanically | Medium: needs a "good" commit from the request or history |
 | **Affected tests only** during rounds (Vitest `related`, Jest `--findRelatedTests`), the full suite at the end | Faster rounds on big repos | Medium |

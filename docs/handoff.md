@@ -32,13 +32,10 @@ itself was left exactly as found (no branches, no `.buckets/`).
 
 1. ~~Windows server: MTP and caching~~ **done** (field notes 20): writes 35 → ~40 tok/s, drafts 97%
    accepted, multi-turn prompts reuse the cache.
-2. **Double review + evidence rules** (next to build). After each round both machines review at once
-   (the Mac as now, Windows as a second reviewer); any issue wins, except: when every check passes and
-   only one reviewer claims a definite error ("undefined", "never called"), confirm it (ask the other
-   reviewer, or a mechanical check) before rewriting working code. Add a **mock-ratio check** on new
-   tests (the function under test mocked; only `assert_called*`/`toHaveBeenCalled*` assertions) as
-   evidence for the reviewers. Test on the `tags` request (A created a tag named "10"; B was right) and
-   the `buckets review` request (field notes 19).
+2. ~~Double review + evidence rules~~ **done** (field notes 21): both machines review at once; a lone
+   definite-error claim while checks pass is confirmed by the other reviewer; weak new tests are listed
+   mechanically for the reviewers. Still to see live: a disagreement (the confirm step).
+2b. **Big-file refactor: mechanical extract** (agreed 2026-10-11). Baseline first: "move the logic of `packages/shared/app/screens/assessment-questionnaire/assessment-questionnaire-screen.tsx` (3,687 lines) into a `useAssessmentQuestionnaire` hook" in ecotrak-mobile, local (20 min cap) then `--claude`, throwaway branches deleted after. Then build extract-to-hook (roadmap, Mechanical hands) and rerun locally.
 3. **Prompt layout for cache reuse:** byte-stable front (system, tool schema in fixed order, guidance,
    map, facts), the step's instructions last; check `prompt_eval_cached_count`. Ollama: constant
    `num_ctx`, a longer `keep_alive` during a run.
