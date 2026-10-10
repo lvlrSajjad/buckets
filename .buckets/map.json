@@ -18,9 +18,9 @@
   },
   "README.md": {
    "declares": [],
-   "hash": "2e9c33e075c4",
+   "hash": "f9f26dbb397a",
    "imports": [],
-   "lines": 472,
+   "lines": 523,
    "purpose": "Empty the pool with many small buckets.",
    "source": "docstring"
   },
@@ -39,17 +39,17 @@
     "ReplyTooLong",
     "SchemaGaveUp"
    ],
-   "hash": "ad4cf99377a2",
+   "hash": "b7427fd28d02",
    "imports": [],
-   "lines": 5354,
+   "lines": 5449,
    "purpose": "buckets: empty the pool with many small buckets.",
    "source": "docstring"
   },
   "docs/field-notes.md": {
    "declares": [],
-   "hash": "18316ef19213",
+   "hash": "842eca181624",
    "imports": [],
-   "lines": 343,
+   "lines": 371,
    "purpose": "A record of building and using `buckets`: what broke, what we measured, and how each real run went, including the failures.",
    "source": "docstring"
   },
@@ -82,13 +82,13 @@
     "ClaudeMode",
     "FakeModels",
     "Research",
-    "CherryPickHelpers"
+    "FakeLlamaServer"
    ],
-   "hash": "89943e9d6074",
+   "hash": "eb83b8d49407",
    "imports": [
     "buckets.py"
    ],
-   "lines": 1845,
+   "lines": 1954,
    "purpose": "Tests for the parts of buckets that don't need a model: run with `python3 -m unittest -v`.",
    "source": "docstring"
   },
