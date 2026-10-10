@@ -19,27 +19,34 @@ First time? See "Set up on your own machines" below, then come back here.
    buckets --doctor
    ```
    Every line should say `ok`. If one says `BAD`, see "When something's wrong" below.
-4. **Go to a repo and say what you want, in plain words:**
+4. **Go to a repo and start a chat:**
    ```bash
    cd ~/code/my-repo
-   buckets "add tests for lint.ts"
+   buckets
    ```
-   It prints what it understood (question, change or cherry-pick; local or Claude) and starts
-   after 5 seconds. Questions get a report and change nothing. Changes need a clean working
-   tree (commit or stash first) and happen on a new `buckets/…` branch.
-5. **Do something else.** Local runs take 10–30 minutes; Claude-mode runs take a few. You'll get
-   a desktop notification when it ends (macOS). Along the way it shows numbered steps, what the coder is
-   doing right now ("editing ability.ts"), and a running clock on every wait.
-6. **Review, then keep or throw away the work:**
-   ```bash
-   buckets last       # the latest report again
-   buckets merge      # bring the branch into the branch you started from (fast-forward only)
-   buckets discard    # delete the branch (asks first)
+   Type what you want in plain words, one request per line: questions, code changes,
+   cherry-picks and git/GitHub chores. Each request prints what it understood (and where it
+   runs) before it starts. Questions get a report and change nothing; changes happen on a new
+   `buckets/…` branch; git chores show their steps and ask before changing anything. A single
+   request also works without the chat: `buckets "add tests for lint.ts"`.
+5. **Do something else, or keep the chat open.** A small, well-described local change takes about
+   5–10 minutes; bigger jobs take longer, and Claude-mode runs take a few minutes. You'll get a
+   desktop notification when a run takes over a minute (macOS). Along the way it shows numbered
+   steps, what's being read, what the coder is doing right now ("editing ability.ts") and a
+   running clock on every wait.
+6. **Review, then keep or throw away the work**, in the chat or the shell:
+   ```
+   > last        the latest report again
+   > merge       bring the branch into the branch you started from (fast-forward only)
+   > discard     delete the branch (asks first)
+   > push main   (or any other git chore, in plain words)
    ```
 
 Writing good requests:
 - Say **what** and **where**: "add `canAll` to `Ability` in `packages/core/src/ability.ts`" beats
-  "add a canAll method". Naming files saves the planner most of its reading time.
+  "add a canAll method". Named files and functions are found mechanically, with no model reading,
+  which is most of a run's time.
+- Follow-ups can build on the last run: "now add a test for that" (see Project memory).
 - Point at an example when one exists: "like the TypeORM adapter".
 - For anything big, ask for the plan first: `buckets --plan-only "…"`.
 - Repos under `~/Coding/ME/` always run locally (free). Elsewhere, heavy jobs go to Claude
@@ -61,33 +68,78 @@ has the plan, every model call and every coder session's log.
 ## How it works
 
 ```
-request ─▶ classify ─┬─ info ─▶ pick files ─▶ (survey in batches) ─▶ report
+request ─▶ classify ─┬─ git chore ─▶ typed steps (init, commit, push, PR, CI, merge…) ─▶ ask ─▶ run
                      │
-                     └─ code ─▶ baseline checks ─▶ pick files ─▶ (survey) ─▶ plan
-                                   ▲                                         │
-                                   │            one opencode session per task, one file each
-                                   │            (commit after each; out-of-scope edits reverted)
-                                   │                                         │
-                                   └── follow-up tasks ◀── review ◀── checks + git diff
+                     ├─ info ─▶ map + facts ─▶ pick files ─▶ read (long files: outline ─▶ exact parts) ─▶ report
+                     │
+                     └─ code ─▶ baseline checks ─▶ map + facts ─▶ pick files ─▶ read ─▶ plan
+                                   ▲                                                      │
+                                   │      per task: the planner's exact edits applied directly,
+                                   │      or one opencode session shown the code it changes
+                                   │      (one file each; commit after each; stray edits reverted)
+                                   │                                                      │
+                                   └── follow-up tasks ◀── review ◀── checks + git diff ◀─┘
                                         (max 3 rounds)        │
-                                                              └─ done ─▶ report
+                                                              └─ done ─▶ report ─▶ journal + map (.buckets/)
 ```
+
+Reading is the slow part on local hardware (the worker processes about 200 prompt tokens a second),
+so buckets does as much as it can mechanically: a project map instead of re-reading the repo, facts
+found by name, outlines instead of whole long files, edits applied without a coder session, and
+checks not repeated on code that was already checked.
 
 ## Usage
 
-Just say what you want. buckets reads the request and decides the rest:
+The chat is the easiest way in: `buckets` on its own, in the folder you want to work on. Each line
+is one request (with the same options you'd pass on the command line); `exit` or Ctrl-D leaves, and
+Ctrl-C stops the current request without leaving the chat.
+
+```
+$ cd ~/Coding/ME/buckets && buckets
+buckets 0.1.0 · buckets · what do you need?
+> how does the git assistant decide what to run?            a question: report only
+> in buckets.py, add an op_log method to GitAssistant …     a change: plan, code, check, review
+> now add a test for that                                   a follow-up to the last run
+> merge                                                     the run's branch into main
+> push main                                                 a git chore: steps, then "Go ahead?"
+```
+
+The same requests work one at a time from the shell, too:
 
 ```bash
 buckets "how does scope resolution work?"                       # a question: report only
 buckets "add tests for lint.ts"                                 # a change: plan, code, check, review
 buckets "add a Prisma adapter like packages/typeorm, plan first" # example + plan only
 buckets "cherry pick 5f58e84 and 9bbaf79 onto main"             # cherry-pick
+buckets "what's the CI status of PR 3?"                         # a git chore (read-only)
 ```
 
-Or run `buckets` on its own for a chat in the current folder: each line you type is one request
-(with the same options), and you leave with `exit` or Ctrl-D. `merge`, `last`, `discard` and `pr`
-work there as commands (typed with or without `buckets` in front), and "merge it" works too. Ctrl-C stops the current request,
-not the chat.
+Before a question or change starts, it prints what it understood and waits 5 seconds (Ctrl-C to stop):
+
+```
+code change · light (a specific method and its test) → local (free), all on Windows (qwen3.6:35b-a3b) · reading: direct
+```
+
+What it picks up from your words:
+
+| From the request | Effect |
+|---|---|
+| A question vs a change vs "cherry pick …" vs a git chore | report only / plan-code-check-review / cherry-pick / git steps |
+| How hard it is: light, heavy, very hard | which models run it, how long they may think (see Modes) |
+| Files and code names (`buckets.py`, `GitAssistant.fill_in`, `GIT_OPS`) | read exactly, with no model picking or reading; every named file gets a task |
+| "like commit 4f2a1c9", "like packages/typeorm" | that commit, file or folder is shown to the planner as the example to follow |
+| "plan first", "just show me the plan" | stops after printing the plan |
+| "onto release/1.3" | the target branch for a cherry-pick |
+| "that", "it", "the last change" | the recent runs in `.buckets/journal.md` |
+
+**Git and GitHub chores** (init, `.gitignore`, commit, branch, squash, rebase, sync, push, pull
+requests, CI status and failure logs, re-runs, comments, merges, branch cleanup, publishing a new
+repo, merging the latest buckets run) run as typed steps with the folder's GitHub account. They fill
+in defaults rather than asking: a new repository is named after the folder and is private unless you
+say otherwise, and the account is shown next to any step that publishes. Nothing that changes or
+publishes runs before you answer "Go ahead?": y, n, or say what to change and it plans again.
+An unanswered question (5 minutes) can still be answered with a follow-up within 15 minutes:
+"go ahead" runs those steps, "call it buckets-cli" re-plans with the change.
 
 ```
 $ cd ~/Coding/ME/my-tool && buckets
@@ -103,38 +155,18 @@ Go ahead? (⇡ = pushes or publishes to GitHub) [y/N, or say what to change] mak
 Go ahead? … y
 ```
 
-Git/GitHub chores fill in defaults rather than asking: the repository name is the folder's name,
-it's private unless you say otherwise, and the GitHub account is the one set up for the folder (it's
-shown next to the step). At "Go ahead?" you can answer y, n, or say what to change, and it plans again.
-If the question goes unanswered (5 minutes), a follow-up within 15 minutes builds on it:
-`buckets "go ahead"` runs those steps, and `buckets "call it buckets-cli"` re-plans with the change.
-
-Before starting it prints what it understood and waits 5 seconds (Ctrl-C to stop):
-
-```
-code change · heavy (needs changes across several modules) → Claude sonnet · example: packages/typeorm · plan only
-```
-
-What it picks up from your words:
-
-| From the request | Effect |
-|---|---|
-| A question vs a change vs "cherry pick …" | report only / plan-code-check-review / cherry-pick flow |
-| How hard it is: light, heavy, very hard | which models run it (see Modes) |
-| "like commit 4f2a1c9", "like packages/typeorm" | that commit, file or folder is shown to the planner as the example to follow |
-| "plan first", "just show me the plan" | stops after printing the plan |
-| "onto release/1.3" | the target branch for a cherry-pick |
-
-Other commands: `buckets last` (show the latest report), `buckets merge` (fast-forward the
-latest run's branch into the branch it started from, then delete it), `buckets discard` (delete
-it, after a y/N). `-v`/`--verbose` also shows token counts and timings; they're always in the
-run folder's `run.log`.
+Commands (in the chat, with or without `buckets` in front, or from the shell): `last` (show the
+latest report), `merge` (fast-forward the latest run's branch into the branch it started from, then
+delete it), `discard` (delete it, after a y/N), `pr` (open a pull request for the latest run),
+`setup`, `--doctor`. `-v`/`--verbose` also shows token counts and timings; they're always in the run
+folder's `run.log`.
 
 Flags still work and override the guess: `--ask`, `--do`, `--plan-only`, `--pick C1 C2 --onto B`,
 `--like REF`, `--local`, `--claude`, `--model haiku|sonnet|opus`, `-y` (skip the 5-second
 pause), `-f request.md`, `-C <repo>`, `--doctor`.
 
-Changes and cherry-picks need a clean working tree. They happen on a new `buckets/…` branch,
+Changes and cherry-picks need a clean working tree (buckets' own `.buckets/` notes don't count).
+They happen on a new `buckets/…` branch,
 with a commit per finished task, and buckets switches back to your branch at the end. Nothing
 touches your branch until you merge.
 
@@ -417,10 +449,11 @@ e.g. `{"~/code/oss/*": {"mode": "local"}}`.
 - **The script decides, not the models.** Routing, retries, the round limit, git and the
   checks are plain code. A check that passed before and fails now always means "not
   done", whatever the reviewer says.
-- **Reading is batched.** If the picked files don't fit one planner call
-  (`file_budget_tokens`), they're surveyed in batches and the planner works from the notes.
-  On the M2 Pro the planner reads about 70 tokens a second, so a full 64k prompt takes
-  about 15 minutes. Keep requests focused.
+- **Reading is the cost, so read less.** On local hardware, prompt reading dominates a run (about
+  200 tokens a second on the Windows worker, 70 on the M2 Pro: a full 64k prompt takes 5–15
+  minutes). So buckets reads mechanically wherever that's as accurate: the project map, facts found
+  by name, outlines of long files with only the needed parts read exactly, and planned edits applied
+  without a coder. What's still too big for one call is surveyed in batches. Keep requests focused.
 
 ## Known limits (opencode 2.0.26, Ollama 0.40.x)
 
