@@ -1,0 +1,104 @@
+{
+ "files": {
+  ".buckets.json": {
+   "declares": [],
+   "hash": "3418cd93311e",
+   "imports": [],
+   "lines": 1,
+   "purpose": "",
+   "source": ""
+  },
+  ".gitignore": {
+   "declares": [],
+   "hash": "c803d608f39d",
+   "imports": [],
+   "lines": 1,
+   "purpose": "",
+   "source": ""
+  },
+  "README.md": {
+   "declares": [],
+   "hash": "860ace507884",
+   "imports": [],
+   "lines": 417,
+   "purpose": "Empty the pool with many small buckets.",
+   "source": "docstring"
+  },
+  "buckets.py": {
+   "declares": [
+    "Buckets",
+    "GitAssistant",
+    "ProjectMemory",
+    "CodeIndex",
+    "Ticker",
+    "Run",
+    "ThinkingCut",
+    "ModelError",
+    "StreamCut",
+    "PromptTooBig",
+    "ReplyTooLong",
+    "SchemaGaveUp"
+   ],
+   "hash": "cbbcf0dcc5af",
+   "imports": [],
+   "lines": 5345,
+   "purpose": "buckets: empty the pool with many small buckets.",
+   "source": "docstring"
+  },
+  "docs/field-notes.md": {
+   "declares": [],
+   "hash": "18316ef19213",
+   "imports": [],
+   "lines": 343,
+   "purpose": "A record of building and using `buckets`: what broke, what we measured, and how each real run went, including the failures.",
+   "source": "docstring"
+  },
+  "docs/handoff.md": {
+   "declares": [],
+   "hash": "41941609ceda",
+   "imports": [],
+   "lines": 67,
+   "purpose": "Where buckets stands after the first build session, for whoever (or whichever session) picks it up next.",
+   "source": "docstring"
+  },
+  "docs/roadmap.md": {
+   "declares": [],
+   "hash": "10703e3221dc",
+   "imports": [],
+   "lines": 93,
+   "purpose": "What's left, roughly in the order I'd do it, with why and how big.",
+   "source": "docstring"
+  },
+  "test_buckets.py": {
+   "declares": [
+    "GitAssistantTests",
+    "FasterRuns",
+    "Escalation",
+    "TargetedReading",
+    "CodeIndexTests",
+    "Mechanical",
+    "ProjectMemoryTests",
+    "Offload",
+    "ClaudeMode",
+    "FakeModels",
+    "Research",
+    "CherryPickHelpers"
+   ],
+   "hash": "0136231833de",
+   "imports": [
+    "buckets.py"
+   ],
+   "lines": 1838,
+   "purpose": "Tests for the parts of buckets that don't need a model: run with `python3 -m unittest -v`.",
+   "source": "docstring"
+  },
+  "ts_index.cjs": {
+   "declares": [],
+   "hash": "ee3165fab74f",
+   "imports": [],
+   "lines": 423,
+   "purpose": "A syntax-only index of a TypeScript/JavaScript repository, for buckets.",
+   "source": "docstring"
+  }
+ }
+}

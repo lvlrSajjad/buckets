@@ -17,6 +17,7 @@ import argparse
 import ast
 import contextlib
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -338,6 +339,7 @@ class Run:
         self.dir = STATE_DIR / "runs" / f"{repo.name}-{stamp}"
         self.dir.mkdir(parents=True, exist_ok=True)
         self.n = 0
+        self.talked = False  # a local model answered during this run (so one is up)
 
     _lock = threading.Lock()
 
@@ -462,7 +464,12 @@ def dirty_tree(repo: Path) -> str:
 
 
 def changed_paths(repo: Path) -> list[str]:
-    """Paths that differ from HEAD, including untracked files, as repo-relative paths."""
+    """Paths that differ from HEAD, including untracked files, as repo-relative paths. buckets' own
+    notes (.buckets/) don't count: updating them mustn't block the next run."""
+    return [p for p in all_changed_paths(repo) if not p.startswith(MEMORY_DIR + "/")]
+
+
+def all_changed_paths(repo: Path) -> list[str]:
     raw = git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all")
     parts, out, i = raw.split("\0"), [], 0
     while i < len(parts):
@@ -799,6 +806,7 @@ def chat(cfg: dict, run: Run, label: str, system: str, user: str, *, schema: dic
             err = str(e)
         else:
             run.save(f"{label}.json", {"request": body, "thinking": thinking, "content": content, "stats": stats})
+            run.talked = True
             if stats.get("done_reason") == "length":
                 if body["think"]:
                     say(f"  {warn()} {friendly(label)}: ran out of room while thinking; trying again without")
@@ -924,7 +932,7 @@ def list_files(repo: Path, exclude: list[str]) -> dict[str, int]:
     out = {}
     for f in git(repo, "ls-files", "-co", "--exclude-standard").splitlines():
         p = repo / f
-        if os.path.basename(f) in LOCKFILES or p.suffix.lower() in BINARY_EXT:
+        if os.path.basename(f) in LOCKFILES or p.suffix.lower() in BINARY_EXT or f.startswith(MEMORY_DIR + "/"):
             continue
         if any(fnmatch.fnmatch(f, g) for g in exclude):
             continue
@@ -936,7 +944,7 @@ def list_files(repo: Path, exclude: list[str]) -> dict[str, int]:
             continue
         if b"\0" in data[:4096]:
             continue
-        out[f] = data.count(b"\n") + 1
+        out[f] = data.count(b"\n") + (0 if data.endswith(b"\n") or not data else 1)
     return out
 
 
@@ -2268,6 +2276,259 @@ def validate_plan(data: dict, repo: Path, max_tasks: int, prefix: str = "T") -> 
     return {"summary": str(data["summary"]), "tasks": validate_tasks(data["tasks"], repo, max_tasks, prefix)}
 
 
+# ---------------------------------------------------------------- project memory (.buckets/)
+
+
+MEMORY_DIR = ".buckets"
+JS_IMPORT = re.compile(r"""(?:from\s+|import\s*\(?\s*|require\s*\(\s*)['"](\.{1,2}/[^'"]+)['"]""")
+JS_EXT = ("", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", "/index.ts", "/index.tsx", "/index.js")
+
+
+def first_sentence(text: str, limit: int = 200) -> str:
+    text = " ".join(text.split())
+    m = re.match(r"(.+?[.!?])(\s|$)", text)
+    return (m.group(1) if m else text)[:limit]
+
+
+def described(repo: Path, path: str) -> str:
+    """What a file says it is, for free: a Python module docstring, or a JS/TS file's leading comment."""
+    try:
+        text = (repo / path).read_text(errors="replace")[:4000]
+    except OSError:
+        return ""
+    if path.endswith(".py"):
+        try:
+            doc = ast.get_docstring(ast.parse((repo / path).read_text(errors="replace")))
+        except (SyntaxError, ValueError):
+            doc = None
+        return first_sentence(doc) if doc else ""
+    if path.endswith((".md", ".rst", ".txt")):  # the first paragraph that isn't a heading, list or table
+        for para in re.split(r"\n\s*\n", text):
+            para = para.strip()
+            if para and not re.match(r"[#=\-*|>`<!\[]", para):
+                return first_sentence(para)
+        return ""
+    m = re.match(r"\s*(?:#![^\n]*\n\s*)?(?:/\*\*?(.*?)\*/|((?://[^\n]*\n\s*)+))", text, re.S)
+    if not m:
+        return ""
+    body = m.group(1) or m.group(2) or ""
+    body = re.sub(r"^\s*(\*|//)\s?", "", body, flags=re.M)
+    return "" if re.search(r"copyright|license|eslint|@ts-", body, re.I) else first_sentence(body)
+
+
+def file_imports(repo: Path, path: str, files) -> list[str]:
+    """Repo files this file imports: Python modules by name, JS/TS by relative path."""
+    out: list[str] = []
+    try:
+        text = (repo / path).read_text(errors="replace")
+    except OSError:
+        return out
+    if path.endswith(".py"):
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError):
+            return out
+        here = Path(path).parent
+
+        def add(mod: Path) -> None:
+            for cand in (f"{mod.as_posix()}.py", f"{mod.as_posix()}/__init__.py"):
+                cand = cand.removeprefix("./")
+                if cand in files and cand != path and cand not in out:
+                    out.append(cand)
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    add(Path(a.name.replace(".", "/")))
+                    add(here / a.name.replace(".", "/"))  # a script importing its neighbour
+            elif isinstance(node, ast.ImportFrom):
+                base = here if node.level else Path()
+                for _ in range(max(node.level - 1, 0)):
+                    base = base.parent
+                mod = base / node.module.replace(".", "/") if node.module else base
+                if node.module:
+                    add(mod)
+                for a in node.names:  # from . import util: a submodule
+                    add(mod / a.name)
+        return out
+    if path.endswith((".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")):
+        for spec in JS_IMPORT.findall(text):
+            base = os.path.normpath(os.path.join(os.path.dirname(path), spec))
+            hit = next((base + e for e in JS_EXT if base + e in files), None)
+            if hit and hit != path and hit not in out:
+                out.append(hit)
+    return out
+
+
+class ProjectMemory:
+    """`.buckets/` in the repo, so runs stop rediscovering the project:
+    - map.json / map.md: one line per file (what it is, what it declares, what it imports and what
+      imports it), kept in step with the files by content hash. The structure is mechanical; the
+      "what it is" comes from docstrings, or is written once by a model the first time a run
+      involves that file. Commit these: everyone's buckets gets the project knowledge.
+    - journal.md: the latest runs in a few lines each (what was asked, what changed, the outcome),
+      so "add a test for that" has a "that". Personal; git-ignored.
+    Both are cut to a token budget before a model sees them."""
+
+    def __init__(self, repo: Path):
+        self.repo, self.dir = repo, repo / MEMORY_DIR
+        try:
+            self.data = json.loads((self.dir / "map.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            self.data = {"files": {}}
+        self.files: dict = self.data.setdefault("files", {})
+
+    def refresh(self, files: dict[str, int], outline: dict) -> int:
+        """Bring the map in step with the files; returns how many entries changed (no model involved)."""
+        changed = 0
+        for f, n in files.items():
+            try:
+                digest = hashlib.sha1((self.repo / f).read_bytes()).hexdigest()[:12]
+            except OSError:
+                continue
+            old = self.files.get(f)
+            if old and old["hash"] == digest:
+                continue
+            # what matters most first: classes, then the largest functions (not the first names in the file)
+            top = [d for d in decls_of(self.repo, f, outline) if "." not in d["name"]]
+            top.sort(key=lambda d: (not d["signature"].startswith("class"), d["line"] - d["end"]))
+            decls = [d["name"] for d in top]
+            mine = described(self.repo, f)
+            learned = old and old.get("source") == "model" and old.get("purpose")
+            self.files[f] = {"hash": digest, "lines": n, "declares": decls[:12],
+                             "imports": file_imports(self.repo, f, files),
+                             "purpose": mine or (old["purpose"] if learned else ""),
+                             "source": "docstring" if mine else ("model" if learned else "")}
+            changed += 1
+        for gone in [f for f in self.files if f not in files]:
+            del self.files[gone]
+            changed += 1
+        if changed:
+            self.save()
+        return changed
+
+    def save(self) -> None:
+        self.dir.mkdir(exist_ok=True)
+        ignore = self.dir / ".gitignore"
+        if not ignore.exists():
+            ignore.write_text("journal.md\n")
+        (self.dir / "map.json").write_text(json.dumps(self.data, indent=1, sort_keys=True) + "\n")
+        (self.dir / "map.md").write_text("# Project map\n\nWritten by buckets: what each file is and how they "
+                                         "connect. Kept in step with the files by content hash.\n\n"
+                                         + self.render(10 ** 9) + "\n")
+
+    def render(self, budget: int = 1500, focus=()) -> str:
+        """The map within `budget` tokens: one line per file with what it declares and connects to;
+        shorter lines when that's too long; then one line per folder, with the focus files' folders
+        still listed file by file."""
+        used_by: dict[str, list[str]] = {}
+        for f, e in self.files.items():
+            for imp in e.get("imports", []):
+                used_by.setdefault(imp, []).append(f)
+
+        def line(f: str, full: bool) -> str:
+            e = self.files[f]
+            text = f"- {f} ({e['lines']} line{'s' if e['lines'] != 1 else ''})" + (f": {e['purpose']}" if e.get("purpose") else "")
+            if full:
+                if e.get("declares"):
+                    text += f" Declares {', '.join(e['declares'][:8])}{', …' if len(e['declares']) > 8 else ''}."
+                if e.get("imports"):
+                    text += f" Imports {', '.join(e['imports'][:4])}."
+                if used_by.get(f):
+                    text += f" Used by {', '.join(sorted(used_by[f])[:4])}{', …' if len(used_by[f]) > 4 else ''}."
+            return text
+
+        names = sorted(self.files)
+        for full in (True, False):
+            text = "\n".join(line(f, full) for f in names)
+            if est_tokens(text) <= budget:
+                return text
+        dirs: dict[str, list[str]] = {}
+        for f in names:
+            dirs.setdefault(os.path.dirname(f) or ".", []).append(f)
+        near = {os.path.dirname(f) or "." for f in focus}
+        out = []
+        for d, fs in sorted(dirs.items()):
+            if d in near:
+                out += [line(f, False) for f in fs]
+            else:
+                about = [self.files[f]["purpose"] for f in fs if self.files[f].get("purpose")][:2]
+                out.append(f"- {d}/ ({len(fs)} files, {sum(self.files[f]['lines'] for f in fs)} lines)"
+                           + (f": {' / '.join(about)}" if about else ""))
+        text = "\n".join(out)
+        return text[: budget * 3] + ("\n… (cut to fit)" if len(text) > budget * 3 else "")
+
+    def learn(self, b, files: list[str], limit: int = 6) -> None:
+        """One short model call: a sentence on what each involved, undescribed file is, from its
+        declarations and first lines (not the whole file)."""
+        todo = [f for f in dict.fromkeys(files) if f in self.files and not self.files[f].get("purpose")][:limit]
+        if not todo or not getattr(b.run, "talked", False):  # only when a model is known to be up
+            return
+        blocks = []
+        for f in todo:
+            head = "\n".join((self.repo / f).read_text(errors="replace").splitlines()[:25])[:1500]
+            e = self.files[f]
+            blocks.append(f"=== {f} ({e['lines']} lines; declares: {', '.join(e['declares'][:12]) or 'nothing'}) ===\n{head}")
+
+        def check(d):
+            got = {clean_path(str(x.get("file", ""))): str(x.get("purpose", "")).strip()
+                   for x in d.get("files") or [] if isinstance(x, dict)}
+            return {f: first_sentence(v, 240) for f, v in got.items() if f in todo and v}
+
+        say(f"  Noting what {len(todo)} file{'s are' if len(todo) != 1 else ' is'} for, in {MEMORY_DIR}/map.md")
+        got = ask_json(b.chores, b.run, "map", SYSTEM, PURPOSE_PROMPT.format(files="\n\n".join(blocks)),
+                       PURPOSE_SCHEMA, check, think=False, max_tokens=900, timeout=b.timeout)
+        for f, purpose in got.items():
+            self.files[f].update(purpose=purpose, source="model")
+        if got:
+            self.save()
+
+    def journal_entries(self) -> list[str]:
+        try:
+            text = (self.dir / "journal.md").read_text()
+        except OSError:
+            return []
+        return [e.strip() for e in re.split(r"(?m)^(?=## )", text) if e.startswith("## ")]
+
+    def note(self, kind: str, outcome: str, request: str, changed: list[str], summary: str) -> None:
+        when = datetime.now().strftime("%Y-%m-%d %H:%M")
+        entry = (f"## {when} · {kind} · {outcome}\nAsked: {' '.join(request.split())[:300]}\n"
+                 + (f"Changed: {', '.join(changed[:12])}{' …' if len(changed) > 12 else ''}\n" if changed else "")
+                 + (f"Result: {' '.join(summary.split())[:500]}\n" if summary.strip() else ""))
+        entries = (self.journal_entries() + [entry.strip()])[-20:]
+        self.dir.mkdir(exist_ok=True)
+        if not (self.dir / ".gitignore").exists():
+            (self.dir / ".gitignore").write_text("journal.md\n")
+        (self.dir / "journal.md").write_text("# buckets journal\n\nThe latest runs here, newest last.\n\n"
+                                             + "\n\n".join(entries) + "\n")
+
+    def recent(self, mentions=(), budget: int = 600) -> str:
+        """The last few runs, plus older ones that touched the files in `mentions`, within `budget`."""
+        entries = self.journal_entries()
+        if not entries:
+            return ""
+        keep = entries[-3:]
+        older = [e for e in entries[:-3] if any(m in e for m in mentions)]
+        picked = older[-3:] + keep
+        while picked and est_tokens("\n\n".join(picked)) > budget:
+            picked.pop(0)
+        return "\n\n".join(picked)
+
+
+PURPOSE_SCHEMA = {
+    "type": "object",
+    "properties": {"files": {"type": "array", "items": {
+        "type": "object", "properties": {"file": {"type": "string"}, "purpose": {"type": "string"}},
+        "required": ["file", "purpose"]}}},
+    "required": ["files"],
+}
+
+PURPOSE_PROMPT = """For each file below, write one sentence (at most 25 words) on what it is for in this
+project: its role, not a list of its functions. You see what it declares and its first lines.
+
+{files}"""
+
+
 # ---------------------------------------------------------------- the pipeline
 
 
@@ -2290,6 +2551,20 @@ class Buckets:
 
     def heading(self, n: int, title: str) -> None:
         heading(n, self.total, title)
+
+    @property
+    def memory(self) -> ProjectMemory | None:
+        """The repo's `.buckets/` notes, brought up to date with the files (off with "memory": false)."""
+        if not hasattr(self, "_memory"):
+            self._memory = None
+            if self.rc.get("memory", self.cfg.get("memory", True)):
+                fresh = not (self.repo / MEMORY_DIR / "map.json").exists()
+                self._memory = ProjectMemory(self.repo)
+                self._memory.refresh(self.index.files, self.index.outline())
+                if fresh and self._memory.files:
+                    say(f"  {ok()} started {MEMORY_DIR}/ here: a map of the project and a journal of runs "
+                        f"(commit map.md and map.json to share the map; the journal stays yours)")
+        return self._memory
 
     @property
     def index(self) -> CodeIndex:
@@ -2411,9 +2686,20 @@ class Buckets:
             say(f"  {ok()} gathered {len(shown)} code excerpt(s) and related tests mechanically, before planning")
         return self._facts
 
-    def context(self) -> str:
-        """Check output, mechanically gathered facts and `--like` examples, for the planner."""
+    def context(self, with_map: bool = True) -> str:
+        """Check output, mechanically gathered facts, `--like` examples and the project's notes
+        (map and recent work from .buckets/), for the planner."""
         parts = []
+        mem = self.memory
+        if mem:
+            named = paths_in_text(self.request, self.index.files)
+            recent = mem.recent(named + request_names(self.request), self.cfg.get("journal_tokens", 600))
+            if recent:
+                parts.append(f"Recent work in this repo (from {MEMORY_DIR}/journal.md; \"that\" or \"it\" in the "
+                             "request may refer to it):\n" + recent)
+            if with_map:
+                parts.append(f"Project map (from {MEMORY_DIR}/map.md):\n"
+                             + mem.render(self.cfg.get("map_tokens", 1500), named))
         if self.checks_seen:
             parts.append("Check output before any change:\n" + self.checks_seen)
         facts = self.facts()
@@ -2426,6 +2712,7 @@ class Buckets:
     def material(self, mode: str) -> str:
         """Pick files, read them, and survey in batches when they don't fit one call."""
         ctx = self.context()
+        self.involved = getattr(self, "involved", [])
         if ctx:
             self.run.save("context.md", ctx)
         files = list_files(self.repo, self.rc.get("exclude", []))
@@ -2457,15 +2744,18 @@ class Buckets:
         if named and self.difficulty == "light":
             picked = named[: self.cfg["max_files"]]  # the request says where; no need to ask
         else:
+            mem, bare = self.memory, self.context(with_map=False)
+            listing = (mem.render(self.cfg.get("pick_map_tokens", 4000), named) if mem else self.code_map(files))
             picked = ask_json(self.chores, self.run, "pick-files", SYSTEM,
                               FILES_PROMPT.format(goal=self.goal(mode), max_files=self.cfg["max_files"],
                                                   request=self.request, guidance=gd,
-                                                  context=f"\n{ctx[:12000]}\n" if ctx else "",
-                                                  map=self.code_map(files)),
+                                                  context=f"\n{bare[:12000]}\n" if bare else "",
+                                                  map=listing),
                               FILES_SCHEMA, check_files, think=False, max_tokens=1500, timeout=self.timeout)
         # Files named in check output are read whether or not the model picked them.
         named = [f for f in paths_in_text(self.checks_seen, files) if f not in picked]
         picked = (picked + named)[: max(self.cfg["max_files"], len(picked))]
+        self.involved = list(dict.fromkeys(self.involved + picked))
         long = [f for f in picked if self.too_long(f)]
         whole = [f for f in picked if f not in long]
         if whole:
@@ -2967,6 +3257,7 @@ class Buckets:
     def code_task(self, task: dict, commit: bool = True) -> dict:
         """One file's task: the planner's exact edits applied directly when they fit, else a coder
         session. Anything else the coder touches is put back as it was."""
+        self.involved = list(dict.fromkeys(getattr(self, "involved", []) + [task["file"]]))
         if task.get("edits"):
             done = self.apply_planned(task, commit)
             if done:
@@ -3894,6 +4185,27 @@ def finish(b, kind: str, done: bool | None, branch: str | None, merge_into: str 
             "merge_into": merge_into, "report": str(report), "finished": datetime.now().isoformat(timespec="seconds"),
             "minutes": round((time.time() - _T0) / 60, 1), "claude_usd": round(b.cost, 3)}
     (b.run.dir / "meta.json").write_text(json.dumps(meta, indent=2))
+    remember(b, kind, done, branch, merge_into, report)
+
+
+def remember(b, kind: str, done, branch, merge_into, report: Path) -> None:
+    """The run in the repo's journal, and a sentence on each file it involved that the map can't
+    describe yet. Never fails the run."""
+    try:
+        mem = b.memory
+        if not mem:
+            return
+        changed = [f for f in git(b.repo, "diff", "--name-only", f"{merge_into}...{branch}", check=False).split()
+                   if f] if branch and merge_into else []
+        text = report.read_text(errors="replace") if report.exists() else ""
+        m = re.search(r"^## Summary\s*\n(.+?)(?=^## |\Z)", text, re.S | re.M)
+        summary = m.group(1) if m else re.sub(r"^#.*$", "", text, flags=re.M)[:600]
+        outcome = {"info": "answered", "plan": "planned"}.get(kind) or ("done" if done else "not done")
+        mem.note(kind, outcome + (f" on {branch}" if branch else ""), b.request, changed, summary)
+        mem.refresh(b.index.files, b.index.outline()) if changed else None
+        mem.learn(b, changed + [t for t in getattr(b, "involved", []) if t not in changed])
+    except (ModelError, OSError, ValueError, RuntimeError) as e:
+        detail(f"project memory not updated: {e}")
 
 
 def runs_newest_first(repo: Path | None = None, kinds: tuple = ("info", "plan", "code", "pick")):
@@ -4281,6 +4593,9 @@ class GitAssistant:
                                                      for p in listed) or "(none)"))
         except json.JSONDecodeError:
             parts.append("Open PRs: (gh isn't available or not logged in for this folder)")
+        recent = ProjectMemory(self.repo).recent(budget=400) if (self.repo / MEMORY_DIR).is_dir() else ""
+        if recent:
+            parts.append("Recent buckets work here (\"it\" or \"that\" may refer to it):\n" + recent)
         run = next(runs_newest_first(self.repo, ("code", "pick")), None)
         if run and run.get("branch") and branch_exists(self.repo, run["branch"]):
             parts.append(f"Latest buckets run: {run['request'][:120]} · branch {run['branch']} · "
@@ -4386,6 +4701,9 @@ class GitAssistant:
                 return 2
             say(f"  {ok()} {i}. {describe_op(step)}" + (f"\n{indent(result)}" if result else ""))
         self.record(request, data, ran=True, done=True)
+        if changing and (self.repo / MEMORY_DIR).is_dir():
+            ProjectMemory(self.repo).note("git", "done", request.splitlines()[0], [],
+                                          "; ".join(describe_op(s) for s in ops)[:400])
         return 0
 
     # -- operations (each returns a short report, or "")

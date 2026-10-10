@@ -153,7 +153,7 @@ class RepoReading(unittest.TestCase):
         repo = make_repo({"a.ts": "x\ny\n", "pnpm-lock.yaml": "lock", "logo.png": "png",
                           "gen/out.ts": "z", "bin.dat": "a\0b"})
         files = buckets.list_files(repo, ["gen/*"])
-        self.assertEqual(files, {"a.ts": 3})
+        self.assertEqual(files, {"a.ts": 2})
 
     def test_batches_respect_budget(self):
         blocks = ["x" * 300, "y" * 300, "z" * 300]  # ~100 tokens each
@@ -1023,6 +1023,81 @@ class FasterRuns(unittest.TestCase):
         self.assertEqual(counter.read_text().count("x"), 2)
 
 
+class ProjectMemoryTests(unittest.TestCase):
+    def setUp(self):
+        self.repo = make_repo({
+            "pkg/__init__.py": "",
+            "pkg/core.py": '"""The core: parses requests. More text."""\nfrom . import util\n\n\nclass Parser:\n'
+                           '    def parse(self):\n        return util.clean()\n',
+            "pkg/util.py": "def clean():\n    return 1\n",
+            "web/app.ts": "// The web entry point.\nimport { x } from './lib';\nexport const y = x;\n",
+            "web/lib.ts": "export const x = 1;\n"})
+        self.b = buckets.Buckets(buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local"}), self.repo, "x")
+
+    def test_the_map_is_mechanical_and_follows_the_files(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            mem = self.b.memory
+        self.assertIn("started .buckets/ here", err.getvalue())
+        core = mem.files["pkg/core.py"]
+        self.assertEqual(core["purpose"], "The core: parses requests.")         # from the docstring
+        self.assertEqual(core["declares"], ["Parser"])
+        self.assertEqual(core["imports"], ["pkg/util.py"])
+        self.assertEqual(mem.files["web/app.ts"]["imports"], ["web/lib.ts"])
+        self.assertEqual(mem.files["web/app.ts"]["purpose"], "The web entry point.")
+        text = mem.render()
+        self.assertIn("- pkg/util.py (2 lines) Declares clean. Used by pkg/core.py.", text)
+        self.assertIn("pkg/core.py", (self.repo / ".buckets/map.md").read_text())
+        self.assertEqual((self.repo / ".buckets/.gitignore").read_text(), "journal.md\n")
+        self.assertEqual(buckets.changed_paths(self.repo), [])                  # its own notes don't block runs
+        # a model-written purpose survives until... the file changes and gets a docstring
+        mem.files["pkg/util.py"].update(purpose="Small helpers.", source="model")
+        mem.save()
+        (self.repo / "pkg/util.py").write_text("def clean():\n    return 2\n")
+        mem2 = buckets.ProjectMemory(self.repo)
+        self.assertEqual(mem2.refresh(self.b.index.files, {}), 1)
+        self.assertEqual(mem2.files["pkg/util.py"]["purpose"], "Small helpers.")
+
+    def test_the_map_fits_its_budget(self):
+        mem = buckets.ProjectMemory(self.repo)
+        mem.refresh(self.b.index.files, {})
+        self.assertIn("Declares", mem.render(10 ** 6))
+        self.assertNotIn("Declares", mem.render(60))                           # shorter lines first
+        folders = mem.render(25, focus=["web/app.ts"])
+        self.assertIn("- pkg/ (3 files", folders)                              # other folders, one line each
+        self.assertIn("- web/app.ts", folders)                                 # the focus folder, file by file
+
+    def test_the_journal_and_learning(self):
+        mem = buckets.ProjectMemory(self.repo)
+        mem.refresh(self.b.index.files, {})
+        for i in range(25):
+            mem.note("code", "done", f"request {i}", ["pkg/core.py"] if i == 10 else [], f"summary {i}")
+        entries = mem.journal_entries()
+        self.assertEqual(len(entries), 20)                                     # the latest 20 are kept
+        recent = mem.recent()
+        self.assertIn("request 24", recent)
+        self.assertNotIn("request 10", recent)
+        self.assertNotIn("request 4\n", "\n".join(entries))                  # dropped: only 20 are kept
+        self.assertIn("request 22", recent)
+        self.assertIn("request 10\n", mem.recent(["pkg/core.py"]))             # older, but it touched that file
+        self.b.run.talked = True
+        self.b.on_windows = True
+        def fake(cfg, run, label, system, user, schema, validate, **kw):
+            self.assertRegex(user, r"=== pkg/util.py \(\d+ lines; declares: clean\) ===")  # first lines, not the file
+            return validate({"files": [{"file": "pkg/util.py", "purpose": "Helpers for the core. Extra."}]})
+        with mock.patch.object(buckets, "ask_json", fake), contextlib.redirect_stderr(io.StringIO()):
+            mem.learn(self.b, ["pkg/util.py", "pkg/core.py"])                   # core already has a docstring
+        self.assertEqual(buckets.ProjectMemory(self.repo).files["pkg/util.py"]["purpose"], "Helpers for the core.")
+
+    def test_the_planner_gets_recent_work_and_the_map(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.b.memory.note("code", "done", "add Parser.parse", ["pkg/core.py"], "Parser parses now.")
+            ctx = self.b.context()
+        self.assertIn("Recent work in this repo", ctx)
+        self.assertIn("Asked: add Parser.parse", ctx)
+        self.assertIn("Project map (from .buckets/map.md)", ctx)
+        self.assertNotIn("Project map", self.b.context(with_map=False))
+
+
 class ReviewSkip(unittest.TestCase):
     BASE = {"typecheck": {"ok": False}, "test": {"ok": True}}
     NOW = {"typecheck": {"ok": True}, "test": {"ok": True}}
@@ -1358,9 +1433,14 @@ class EndToEnd(unittest.TestCase):
             branch = [l.strip() for l in buckets.git(repo, "branch").splitlines() if "buckets/" in l][0]
             self.assertIn("a + b", buckets.git(repo, "show", f"{branch}:calc.ts"))
             self.assertIn("a - b", (repo / "calc.ts").read_text())            # your branch untouched
-            self.assertEqual(fake.labels, ["intent", "files", "tasks", "done"])
+            # the last call notes what calc.ts is for, in the project map
+            self.assertEqual(fake.labels, ["intent", "files", "tasks", "done", "files"])
+            journal = (repo / ".buckets/journal.md").read_text()
+            self.assertIn("Asked: fix add so it returns the sum", journal)
+            self.assertIn("Changed: calc.ts", journal)
+            self.assertIn("calc.ts", json.loads((repo / ".buckets/map.json").read_text())["files"])
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(buckets.main(["-C", str(repo), "merge"]), 0)
+                self.assertEqual(buckets.main(["-C", str(repo), "merge"]), 0)   # .buckets/ doesn't block it
             self.assertIn("a + b", (repo / "calc.ts").read_text())
             self.assertNotIn("buckets/", buckets.git(repo, "branch"))
         finally:

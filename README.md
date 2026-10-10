@@ -315,6 +315,28 @@ once). Each call can only read the repo (Read, Grep, Glob), loads no MCP servers
 and has a spending cap (`claude.budget_usd`, default $3 per call). The report shows the
 run's Claude cost (an API-price estimate; on a subscription it counts toward usage limits).
 
+## Project memory (`.buckets/`)
+
+So runs don't rediscover the project every time, buckets keeps notes in the repo:
+
+- **`.buckets/map.md`** (with `map.json`): one line per file: what it's for, its main classes and
+  functions, what it imports and what imports it. The structure is mechanical (Python's `ast`, import
+  statements, line counts) and kept in step with the files by content hash. The "what it's for" comes
+  from the file itself when it can (a module docstring, a leading comment, a document's first
+  paragraph); otherwise, the first time a run involves the file, one short model call writes a
+  sentence from its declarations and first lines. **Commit these two** so everyone's buckets has
+  the project knowledge.
+- **`.buckets/journal.md`**: the latest 20 runs in a few lines each (asked, changed, result). It's
+  git-ignored: it's your history.
+
+The planner gets the map and the recent work that matters (the last 3 runs, plus older ones that
+touched the files the request names) within a token budget (`map_tokens` 1,500, `journal_tokens`
+600), and file picking uses the map instead of the full outline. For this repo that's about 360
+tokens instead of 8,700. Bigger repos fall back to one line per folder, with the folders the request
+touches listed file by file. The git assistant sees the recent work too ("push what you just did").
+Changes under `.buckets/` never count as uncommitted work. Turn it off with `"memory": false` in
+`.buckets.json`.
+
 ## Where things go
 
 - `~/.config/buckets/config.json`: machines, models, limits. Created on first run.
