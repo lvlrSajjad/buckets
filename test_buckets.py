@@ -2103,9 +2103,18 @@ class GitAssistantTests(unittest.TestCase):
 
     def test_op_tags(self):
         from unittest.mock import patch
-        with patch.object(self.g, "git", return_value="") as mock_git:
-            self.g.op_tags({}, False)
+        # Test default count (10)
+        mock_git = patch.object(self.g, "git", return_value="tag1\ntag2\ntag3").start()
+        result = self.g.op_tags({}, False)
         mock_git.assert_called_with("tag", "--sort=-creatordate", "--format=%(refname:short) %(creatordate:short)")
+        self.assertEqual(result, "tag1\ntag2\ntag3")
+        mock_git.stop()
+
+        # Test custom count
+        mock_git = patch.object(self.g, "git", return_value="t1\nt2\nt3\nt4\nt5").start()
+        result = self.g.op_tags({"count": 2}, False)
+        self.assertEqual(result, "t1\nt2")
+        mock_git.stop()
 
 
 if __name__ == "__main__":
