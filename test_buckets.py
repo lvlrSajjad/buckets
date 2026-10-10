@@ -851,6 +851,17 @@ class TargetedReading(unittest.TestCase):
         self.assertIn("the facts already show the code the request names", err.getvalue())
         self.assertIn("return 3", text)                                   # Box.size, from the facts
 
+    def test_a_long_class_comes_as_its_outline_and_last_member(self):
+        repo = make_repo({"k.py": "class K:\n    x = 1\n\n" + "".join(
+            f"    def m{i}(self):\n        return {i}\n\n" for i in range(80))})
+        b = buckets.Buckets(self.b.cfg, repo, "x")
+        where = buckets.locate(repo, b.index.files, b.index.outline(), "K")
+        text = b.part(where)
+        self.assertIn("`K` is 242 lines; its members", text)
+        self.assertIn("K.m40", text)                                      # in the outline
+        self.assertIn("        return 79", text)                          # the last member, in full
+        self.assertNotIn("        return 40", text)
+
     def test_the_coder_is_shown_its_code(self):
         task = buckets.validate_tasks([{"file": "src/big.py", "action": "edit", "instructions": "strip it",
                                         "done_when": "stripped", "where": "Box._open"}], self.repo, 8, "T")[0]
@@ -886,25 +897,42 @@ class FasterRuns(unittest.TestCase):
                                         "done_when": "done", "where": "", "edits": edits}], self.repo, 8, "T")[0]
 
     def test_apply_edits(self):
-        text = "def run(x):\n    y = x\n    return y + 1\n"
-        self.assertEqual(buckets.apply_edits(text, [{"find": "    y = x\n", "replace": "    y = x * 2\n"}]),
-                         "def run(x):\n    y = x * 2\n    return y + 1\n")
-        # copied with the excerpt's line numbers and without the indentation: still found
-        out = buckets.apply_edits(text, [{"find": "    2| y = x", "replace": "    2|     y = -x"}])
+        text = ("class Box:\n    def size(self):\n        return 3\n\n    def open(self, key):\n"
+                "        return key\n\n\ndef run(x):\n    y = x\n    return y + 1\n")
+        decls = buckets.py_decls_text
+        # after a method, written flush left: indented like its neighbours, a blank line between
+        out = buckets.apply_edits(text, [{"at": "Box.size", "mode": "after",
+                                          "code": "def area(self):\n    return 9"}], decls)
+        self.assertIn("        return 3\n\n    def area(self):\n        return 9\n\n    def open", out)
+        # a whole function replaced by name
+        out = buckets.apply_edits(text, [{"at": "run", "mode": "replace", "code": "def run(x):\n    return x"}], decls)
+        self.assertTrue(out.endswith("def run(x):\n    return x\n"))
+        # lines copied with the excerpt's numbers and without their indentation: still found
+        out = buckets.apply_edits(text, [{"at": "   10| y = x", "mode": "replace", "code": "   10|     y = -x"}], decls)
         self.assertIn("    y = -x\n", out)
-        with self.assertRaisesRegex(ValueError, "isn't in the file"):
-            buckets.apply_edits(text, [{"find": "z = 1", "replace": "z = 2"}])
+        # code that starts deeper than it later goes (the end of one method, then a new one): kept as written
+        out = buckets.apply_edits(text, [{"at": "        return 3", "mode": "replace",
+                                          "code": "        return 4\n\n    def zero(self):\n        return 0"}], decls)
+        self.assertIn("        return 4\n\n    def zero(self):\n        return 0\n", out)
+        # after a plain line (a dict entry): no blank line added
+        out = buckets.apply_edits("X = {\n    'a': 1,\n    'c': 3,\n}\n", [{"at": "    'a': 1,", "mode": "after",
+                                                                         "code": "    'b': 2,"}], decls)
+        self.assertEqual(out, "X = {\n    'a': 1,\n    'b': 2,\n    'c': 3,\n}\n")
+        with self.assertRaisesRegex(ValueError, "isn't a name or lines in the file"):
+            buckets.apply_edits(text, [{"at": "Box.nothing", "mode": "after", "code": "x = 1"}], decls)
         with self.assertRaisesRegex(ValueError, "appears 2 times"):
-            buckets.apply_edits("a\nb\na\n", [{"find": "a", "replace": "c"}])
+            buckets.apply_edits("a\nb\na\n", [{"at": "a\n", "mode": "replace", "code": "c"}])
 
     def test_planned_edits_skip_the_coder(self):
-        task = self.task([{"find": "    return y + 1", "replace": "    return y + 2"}])
+        task = self.task([{"at": "run", "mode": "after", "code": "def double(x):\n    return 2 * x"},
+                          {"at": "    return y + 1", "mode": "replace", "code": "    return y + 2"}])
         with mock.patch.object(buckets, "run_proc", side_effect=AssertionError("no coder")), \
                 contextlib.redirect_stderr(io.StringIO()) as err:
             result = self.b.code_task(task)
         self.assertEqual(result["status"], "done")
-        self.assertIn("applied the planned edit directly", err.getvalue())
-        self.assertIn("return y + 2", (self.repo / "src/m.py").read_text())
+        self.assertIn("applied the planned edits directly", err.getvalue())
+        text = (self.repo / "src/m.py").read_text()
+        self.assertIn("    return y + 2\n\n\ndef double(x):\n    return 2 * x\n\n\ndef other", text)
         self.assertEqual(buckets.git(self.repo, "status", "--porcelain").strip(), "")    # committed
 
     def test_edits_that_dont_fit_go_to_the_coder(self):
@@ -912,8 +940,8 @@ class FasterRuns(unittest.TestCase):
         def fake_proc(cmd, cwd, timeout, **kw):
             calls.append(cmd)
             return 0, "DONE: nothing", False
-        for edits in ([{"find": "nope", "replace": "x"}],                       # not in the file
-                      [{"find": "    return y + 1", "replace": "    return (y +"}]):  # doesn't parse
+        for edits in ([{"at": "nope", "mode": "after", "code": "x = 1"}],                  # not in the file
+                      [{"at": "run", "mode": "replace", "code": "def run(x):\n    return (x +"}]):  # doesn't parse
             with mock.patch.object(buckets, "run_proc", fake_proc), contextlib.redirect_stderr(io.StringIO()) as err:
                 self.b.code_task(self.task(edits))
             self.assertIn("the planned edits don't apply", err.getvalue())
@@ -922,7 +950,7 @@ class FasterRuns(unittest.TestCase):
         self.assertIn("return y + 1", (self.repo / "src/m.py").read_text())   # untouched
 
     def test_a_new_file_from_one_edit(self):
-        task = self.task([{"find": "", "replace": "def new():\n    return 3\n"}], "src/n.py", "create")
+        task = self.task([{"at": "", "mode": "replace", "code": "def new():\n    return 3\n"}], "src/n.py", "create")
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(self.b.code_task(task)["status"], "done")
         self.assertEqual((self.repo / "src/n.py").read_text(), "def new():\n    return 3\n")

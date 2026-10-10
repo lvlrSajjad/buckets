@@ -787,7 +787,8 @@ def chat(cfg: dict, run: Run, label: str, system: str, user: str, *, schema: dic
             body["messages"][1]["content"] = (user + "\n\nYour notes from thinking about this so far (cut short, "
                                               "but use them):\n" + notes + "\n\nNow give your answer. No more "
                                               "reasoning: reply with only the answer itself, and keep each task's "
-                                              "instructions under 300 words.")
+                                              "instructions under 300 words. Cover everything the request asks "
+                                              "for, including parts your notes hadn't reached yet.")
             continue
         except urllib.error.HTTPError as e:
             reason = e.read().decode(errors="replace")[:300]
@@ -965,13 +966,26 @@ def py_decls(path: Path) -> list[dict]:
     """Every class, function and method of a Python file (private ones too) with its qualified name
     ("GitAssistant.fill_in") and lines, decorators included: what a task or a read can point at."""
     try:
-        tree = ast.parse(path.read_text(errors="replace"))
-    except (SyntaxError, ValueError, OSError):
+        return py_decls_text(path.read_text(errors="replace"))
+    except OSError:
+        return []
+
+
+def py_decls_text(source: str) -> list[dict]:
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
         return []
     out = []
 
     def walk(body, prefix: str) -> None:
         for node in body:
+            if not prefix and isinstance(node, (ast.Assign, ast.AnnAssign)):  # GIT_OPS = {...}
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for t in targets:
+                    if isinstance(t, ast.Name) and node.end_lineno - node.lineno >= 2:
+                        out.append({"name": t.id, "line": node.lineno, "end": node.end_lineno,
+                                    "signature": f"{t.id} = …"})
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 start = min([node.lineno] + [d.lineno for d in node.decorator_list])
                 out.append({"name": prefix + node.name, "line": start, "end": node.end_lineno,
@@ -1115,7 +1129,7 @@ def enclosing(decls: list[dict], line: int) -> dict | None:
 
 
 REQUEST_NAMES = re.compile(r"`([A-Za-z_$][\w$]*)(?:\(\))?`|\b([A-Za-z_$][\w$]*)\(|"
-                           r"\b([A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+|[a-z]+(?:[A-Z][a-z0-9]*)+|[a-z]+_[a-z0-9_]+)\b")
+                           r"\b([A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+|[a-z]+(?:[A-Z][a-z0-9]*)+|[a-z]+_[a-z0-9_]+|[A-Z][A-Z0-9]*_[A-Z0-9_]+)\b")
 
 
 def request_names(text: str) -> list[str]:
@@ -1775,8 +1789,10 @@ TASK_SCHEMA = {
         "read_first": {"type": "array", "items": {"type": "string"}},
         "where": {"type": "string"},
         "edits": {"type": "array", "items": {
-            "type": "object", "properties": {"find": {"type": "string"}, "replace": {"type": "string"}},
-            "required": ["find", "replace"]}},
+            "type": "object", "properties": {"at": {"type": "string"},
+                                             "mode": {"type": "string", "enum": ["after", "before", "replace"]},
+                                             "code": {"type": "string"}},
+            "required": ["at", "mode", "code"]}},
     },
     "required": ["id", "file", "action", "instructions", "done_when", "where", "edits"],
 }
@@ -1929,12 +1945,16 @@ text and the files it opens itself, and it cannot run commands):
   ("GitAssistant.fill_in", "parse_args", "GitAssistantTests.test_x"), or a line range ("120-180").
   The coder is shown exactly that code instead of reading the whole file, so give the place that
   holds what it needs. Say in the instructions exactly what to change there. "" for a new file.
-- "edits": when you've seen the exact code and know the change, give it as edits and the system
-  applies them directly (much faster than a coder session; the coder takes over if they don't apply).
-  "find" is a few complete lines copied exactly from the code shown (without the line numbers), unique
-  in the file; "replace" is what they become. To add code, repeat the lines it goes after in "find"
-  and put them plus the new code in "replace". For a new file: one edit, "find" "", "replace" the
-  whole file. [] when you haven't seen the exact code; the instructions must still say what to do.
+- "edits": when you know the exact code, put it here too and the system applies it directly (much
+  faster than a coder session; the coder takes over if an edit doesn't apply). Each edit: "at" is a
+  name from the outline ("GitAssistant.op_gitignore", "parse_args") or a few complete lines copied
+  exactly from the code shown; "mode" is "after" (add the code after it), "before", or "replace"
+  (the code replaces it: for a name, the whole function or class); "code" is the new code, with its
+  indentation. Example: {{"at": "GitAssistant.op_gitignore", "mode": "after",
+  "code": "    def op_status(self, a, yes):\\n        return self.git(\\"status\\", \\"-sb\\")"}}.
+  A new file: one edit with "at" "" and "mode" "replace". The edits must do the WHOLE task (the
+  system marks it done once they apply); if you can't write all of it exactly, give [] and let the
+  coder do it from the instructions.
 - Order tasks so dependencies come first.
 - If the change alters behavior and the repo has tests, include a task that adds or updates tests.
 - Fix problems properly. Never plan `any`, `@ts-ignore`, lint-disable comments, or skipped,
@@ -2223,8 +2243,9 @@ def validate_tasks(tasks: list, repo: Path, max_tasks: int, prefix: str) -> list
                     "instructions": str(t["instructions"]).strip(),
                     "done_when": str(t["done_when"]).strip(), "read_first": reads[:6],
                     "where": str(t.get("where") or "").strip(),
-                    "edits": [{"find": str(e.get("find") or ""), "replace": str(e["replace"])}
-                              for e in t.get("edits") or [] if isinstance(e, dict) and "replace" in e]})
+                    "edits": [{"at": str(e.get("at") or ""), "code": str(e["code"]),
+                               "mode": e.get("mode") if e.get("mode") in ("after", "before") else "replace"}
+                              for e in t.get("edits") or [] if isinstance(e, dict) and "code" in e]})
     return out
 
 
@@ -2464,6 +2485,26 @@ class Buckets:
         budget = self.cfg.get("light_think_budget", 0)
         return {"think_budget": budget} if budget and self.difficulty == "light" else {}
 
+    def part(self, where: str, longest: int = 150) -> str:
+        """A part of a file, exactly. A class too long to show (asked for by name) comes as its first
+        lines, the outline of its members and its last member in full: where new members usually go."""
+        m = SPEC.match(where)
+        path, lo, hi = m.group(1), int(m.group(2)), int(m.group(3) or m.group(2))
+        if hi - lo <= longest:
+            return read_spec(self.repo, self.index.files, where, self.cfg["max_file_chars"])
+        decls = decls_of(self.repo, path, self.index.outline())
+        cls = next((d for d in decls if d["line"] == lo and d["end"] == hi), None)
+        members = [d for d in decls if cls and d["name"].startswith(cls["name"] + ".")
+                   and "." not in d["name"][len(cls["name"]) + 1:]]
+        if not members:
+            return read_spec(self.repo, self.index.files, f"{path}:{lo}-{lo + longest}", self.cfg["max_file_chars"])
+        last = members[-1]
+        return (read_spec(self.repo, self.index.files, f"{path}:{lo}-{min(lo + 6, members[0]['line'] - 1)}",
+                          self.cfg["max_file_chars"])
+                + f"\n  … `{cls['name']}` is {hi - lo + 1} lines; its members (name one to see it):\n"
+                + outline_text(members) + "\n"
+                + read_spec(self.repo, self.index.files, f"{path}:{last['line']}-{last['end']}", self.cfg["max_file_chars"]))
+
     def facts_cover(self, long: list[str], ctx: str) -> bool:
         """The mechanically gathered facts already show every part of the long files that the request
         names (and something of each), so asking the planner which parts to read would add nothing."""
@@ -2517,7 +2558,7 @@ class Buckets:
         for spec in wanted:
             where = locate(self.repo, files, outline, spec, long[0] if len(long) == 1 else "")
             (found if where else missing).append((spec, where))
-        texts = [read_spec(self.repo, files, where, self.cfg["max_file_chars"]) for _, where in found]
+        texts = [self.part(where) for _, where in found]
         if found:
             say(f"  {ok()} read exactly: {', '.join(spec for spec, _ in found)}")
         if missing:
@@ -2970,12 +3011,14 @@ class Buckets:
         before = path.read_text(errors="replace") if path.is_file() else None
         try:
             edits = task["edits"]
-            if task["action"] == "create" and len(edits) == 1 and not edits[0]["find"].strip():
-                after = edits[0]["replace"]
+            if task["action"] == "create" and len(edits) == 1 and not edits[0]["at"].strip():
+                after = edits[0]["code"]
             elif before is None:
                 raise ValueError("the file doesn't exist")
             else:
-                after = apply_edits(before, edits)
+                f, outline = task["file"], self.index.outline()
+                decls_for = py_decls_text if f.endswith(".py") else (lambda _text: decls_of(self.repo, f, outline))
+                after = apply_edits(before, edits, decls_for)
             if after == before:
                 raise ValueError("the edits change nothing")
             if task["file"].endswith(".py"):
@@ -3027,9 +3070,11 @@ class Buckets:
         under 150 lines, so a whole class doesn't crowd out the method that matters)."""
         f, outline = task["file"], self.index.outline()
         where = task.get("where", "").removeprefix(f + ":")
-        if where:
+        hit = locate(self.repo, {f: n}, outline, where, f) if where else None
+        size = (lambda m: int(m.group(3) or m.group(2)) - int(m.group(2)))(SPEC.match(hit)) if hit else 0
+        if where and size <= 150:
             specs, longest = [where], 10 ** 6
-        else:
+        else:  # no "where", or a whole long class: the places the instructions name
             text = task["instructions"]
             specs = [f"{a}-{b or a}" for a, b in re.findall(r"\blines? (\d+)(?:\s*[-–]\s*(\d+))?", text)]
             specs += re.findall(r"\b([A-Z]\w*\.[A-Za-z_]\w*)\b", text) + request_names(text)
@@ -3494,31 +3539,61 @@ def impact_text(api: dict | None) -> str:
 LINE_NUMBER = re.compile(r"^\s*\d+\| ?")
 
 
-def apply_edits(text: str, edits: list[dict]) -> str:
-    """The planner's find/replace edits, in order. Each `find` must match once: exactly, or line by
-    line ignoring indentation and trailing spaces. Line numbers copied from the excerpts are dropped."""
-    def plain(block: str) -> str:
-        lines = block.split("\n")
-        numbered = [l for l in lines if l.strip()]
-        return "\n".join(LINE_NUMBER.sub("", l) for l in lines) if numbered and all(
-            LINE_NUMBER.match(l) for l in numbered) else block
+def plain_code(block: str) -> str:
+    """Code as the planner wrote it, minus line numbers copied from the excerpts ("  12| x = 1")."""
+    lines = block.split("\n")
+    numbered = [l for l in lines if l.strip()]
+    if numbered and all(LINE_NUMBER.match(l) for l in numbered):
+        return "\n".join(LINE_NUMBER.sub("", l) for l in lines)
+    return block
 
+
+def reindent(code: str, like: str) -> list[str]:
+    """New code indented at least as deep as the line it goes next to (a method written flush left)."""
+    lines = code.strip("\n").split("\n")
+    first = next((l for l in lines if l.strip()), "")
+    have, want = len(first) - len(first.lstrip()), len(like) - len(like.lstrip())
+    return [(" " * (want - have) + l if l.strip() else l) for l in lines] if want > have else lines
+
+
+def apply_edits(text: str, edits: list[dict], decls_for=None) -> str:
+    """The planner's edits, in order. "at" is a declaration name (resolved with `decls_for` on the
+    text as it is now) or lines copied from the code, matched once ignoring indentation."""
     for i, e in enumerate(edits, 1):
-        find, new = plain(e["find"]), plain(e["replace"])
-        if not find.strip():
-            raise ValueError(f"edit {i} has nothing to find")
-        count = text.count(find)
-        if count == 1:
-            text = text.replace(find, new)
-            continue
-        if count > 1:
-            raise ValueError(f"edit {i}: the text to find appears {count} times")
-        lines, want = text.split("\n"), [l.strip() for l in find.strip("\n").split("\n")]
-        hits = [k for k in range(len(lines) - len(want) + 1)
-                if [l.strip() for l in lines[k:k + len(want)]] == want]
-        if len(hits) != 1:
-            raise ValueError(f"edit {i}: the text to find " + (f"appears {len(hits)} times" if hits else "isn't in the file"))
-        lines[hits[0]:hits[0] + len(want)] = new.strip("\n").split("\n") if new.strip() else []
+        lines, at, mode = text.split("\n"), plain_code(e["at"]).strip("\n"), e["mode"]
+        name = at.strip().strip("`").removesuffix("()")
+        span = None
+        if name and "\n" not in name and decls_for and re.fullmatch(r"[\w.$]+", name):
+            d = find_decl(decls_for(text), name)
+            # the name must really be on those lines (an index made before earlier edits can be stale)
+            if d and any(name.split(".")[-1] in l for l in lines[d["line"] - 1:d["end"]]):
+                span = (d["line"] - 1, d["end"])
+        by_name = span is not None
+        if span is None:
+            want = [l.strip() for l in at.split("\n")]
+            if not any(want):
+                raise ValueError(f"edit {i} says where only with an empty \"at\"")
+            hits = [k for k in range(len(lines) - len(want) + 1)
+                    if [l.strip() for l in lines[k:k + len(want)]] == want]
+            if len(hits) != 1:
+                raise ValueError(f"edit {i}: `{at[:60]}` " + (f"appears {len(hits)} times" if hits
+                                                              else "isn't a name or lines in the file"))
+            span = (hits[0], hits[0] + len(want))
+        lo, hi = span
+        new = reindent(plain_code(e["code"]), lines[lo]) if e["code"].strip() else []
+        gap = 0  # next to a declaration: the same spacing that follows it (or precedes it, at the end)
+        if by_name and new and mode != "replace":
+            while gap < 2 and hi + gap < len(lines) and not lines[hi + gap].strip() and hi + gap + 1 < len(lines):
+                gap += 1
+            while not gap and lo - 1 >= 0 and not lines[lo - 1].strip():
+                gap = 1 + (lo - 2 >= 0 and not lines[lo - 2].strip())
+            gap = max(gap, 1)
+        if mode == "replace":
+            lines[lo:hi] = new
+        elif mode == "after":
+            lines[hi:hi] = [""] * gap + new
+        else:
+            lines[lo:lo] = new + [""] * gap
         text = "\n".join(lines)
     return text
 

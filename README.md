@@ -173,10 +173,14 @@ Before either, buckets gathers **facts mechanically**: the code around every fai
 definitions and uses of code names in your request, and the closest tests. The planner also gets
 **`grep`** (exact, via `git grep`) alongside `read` and `uses`.
 
-**Planned edits skip the coder:** when the planner has seen the exact code, each task carries
-`edits` (lines to find, copied from the code shown, and what they become). buckets applies them
-directly, checks that a Python file still parses, and commits; only edits that don't apply (or
-don't parse) go to a coder session. When the facts gathered mechanically already show every part of
+**Planned edits skip the coder:** when the planner knows the exact code, each task carries
+`edits`: new code to put after, before or instead of a declaration it names (`GitAssistant.op_squash`)
+or of lines copied from the code shown. buckets finds the place itself (from the file as it is at
+that moment, so earlier edits don't throw it off), matches the indentation and spacing, checks that
+a Python file still parses, and commits; only edits that don't apply (or don't parse) go to a coder
+session. The edits must do the whole task, or be left empty. Outlines include module-level
+constants (`GIT_OPS = {…}`), and a class too long to show comes as its member outline plus its last
+member. When the facts gathered mechanically already show every part of
 a long file that the request names, the planner isn't asked which parts to read.
 
 **Checks aren't repeated on the same code:** results are cached by the commit's file tree for 12
