@@ -2101,6 +2101,12 @@ class GitAssistantTests(unittest.TestCase):
             self.g.op_remotes({}, False)
         mock_git.assert_called_with("remote", "-v")
 
+    def test_op_tags(self):
+        from unittest.mock import patch
+        with patch.object(self.g, "git", return_value="") as mock_git:
+            self.g.op_tags({}, False)
+        mock_git.assert_called_with("tag", "--sort=-creatordate", "--format=%(refname:short) %(creatordate:short)")
+
 
 if __name__ == "__main__":
     unittest.main()
