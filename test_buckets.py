@@ -1700,6 +1700,12 @@ class GitAssistantTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             buckets.validate_git_ops({"summary": "", "ops": [{"op": "rm_rf", "args": {}}]})
 
+    def test_op_status(self):
+        from unittest.mock import patch
+        with patch.object(self.g, "git", return_value="") as mock_git:
+            self.g.op_status({}, False)
+        mock_git.assert_called_with("status", "-sb")
+
 
 if __name__ == "__main__":
     unittest.main()
