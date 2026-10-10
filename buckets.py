@@ -5007,6 +5007,7 @@ def cmd_review(cfg: dict, repo: Path) -> int:
     related = [Path(os.path.expanduser(str(p))) for p in (rc.get("related") or {}).values()]
     run = Run(repo)
     say(f"{paint('buckets', 'bold')} {VERSION} · reviewing {paint(branch, 'cyan')} with Claude {cfg['claude']['model']}")
+    print(f"Reviewing run: {d['request'][:100]} · branch: {branch}")
     worktree = Path(tempfile.mkdtemp(prefix="buckets-review-")) / "tree"
     git(repo, "worktree", "add", "-q", "--detach", str(worktree), branch)  # read the branch, not your checkout
     try:
