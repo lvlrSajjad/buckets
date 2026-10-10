@@ -4796,6 +4796,8 @@ class GitAssistant:
     def op_branch(self, a, yes):
         self.git("switch", "-c", a["name"], *([a["from"]] if a.get("from") else []))
         return ""
+    def op_branches(self, a, yes):
+        return self.git("branch", "-vv")
 
     def op_switch(self, a, yes):
         self.git("switch", a["name"])
