@@ -4951,6 +4951,7 @@ GIT_OPS = {
     "log": ("show the last {count} commits (default 10): {count?}", False, False),
     "branches": ("list local branches with upstream and ahead/behind counts: {}", False, False),
     "remotes": ("list configured remotes and their URLs: {}", False, False),
+    "tags": ("list the newest tags with their dates: {count?}", False, False),
 }
 
 GIT_SCHEMA = {
@@ -5224,6 +5225,11 @@ class GitAssistant:
 
     def op_remotes(self, a, yes):
         return self.git("remote", "-v")
+
+    def op_tags(self, a, yes):
+        count = a.get("count", 10)
+        fmt = "%(refname:short) %(creatordate:short)"
+        return self.git("tag", "--sort=-creatordate", f"--format={fmt}")
 
     def op_switch(self, a, yes):
         self.git("switch", a["name"])
