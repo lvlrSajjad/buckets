@@ -418,7 +418,8 @@ ollama stop qwen3.6:35b-a3b *> $null   # both can't hold the 35B in 32 GB of RAM
 & C:\llama\llama-server.exe -m $model --alias "qwen3.6:35b-a3b" `
   -ngl 99 --n-cpu-moe 41 -b 4096 -ub 4096 --load-mode none `
   -c 65536 -np 1 -fa on -ctk q8_0 -ctv q8_0 `
-  --jinja --reasoning-format deepseek --no-reasoning-preserve `
+  --spec-type draft-mtp --spec-draft-n-max 2 `
+  --jinja --reasoning-format deepseek `
   --host 0.0.0.0 --port 8080
 ```
 
@@ -439,7 +440,9 @@ it (an `@ai-sdk/openai-compatible` provider with `baseURL` `http://<worker>:8080
 `opencode_model` names it, e.g. `llamacpp_windows/qwen3.6:35b-a3b`). Going back to Ollama is the
 same two settings. Tuning: `--n-cpu-moe` is how many layers keep their experts in RAM; on an 8 GB
 card, 32 is the edge (28 ran out of card memory and fell to 65 tokens/s), and 41 leaves the room
-4,096-token chunks need.
+4,096-token chunks need. `--spec-type draft-mtp` uses the model's built-in next-token heads (needs a
+build from 2026-05-16 or later): writing ~35 → ~40 tokens/s. Don't add `--no-reasoning-preserve`;
+it breaks prompt caching between turns.
 
 ## Where things go
 

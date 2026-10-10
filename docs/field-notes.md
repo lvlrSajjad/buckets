@@ -451,6 +451,24 @@ Attempt 3's planner didn't need a look-up (the first read already had `cmd_revie
 look-ups' own effect is shown by attempt 2's round 1, not attempt 3. A double review with an
 "evidence or it didn't happen" rule for "undefined"-style claims is the next guard.
 
+### 20. MTP and caching on the Windows server (2026-10-11)
+
+Start script now has `--spec-type draft-mtp --spec-draft-n-max 2` and no `--no-reasoning-preserve`
+(llama.cpp b11541). Same saved plan prompt (8.4k tokens, nonce in the system prompt, thinking off):
+
+| | reads | writes | MTP drafts accepted |
+|---|---|---|---|
+| before (field notes 16, 18) | ~650 tok/s | ~35 tok/s | — |
+| MTP, 2 drafts | ~625 tok/s | **39–42 tok/s** | 96–97% |
+
+Writing is ~15% faster, not the ~2x the acceptance rate suggests: with the experts in RAM, checking
+3 tokens per step pulls in more experts per step. MTP can't be turned off per request (the server
+ignores `speculative.*` in the body), so the "before" is the earlier measurement.
+
+Caching across a tool conversation works: turn 2 (turn 1 + the tool call + its result) reused
+3,377 of 3,438 tokens and read 61 new ones; echoing the reasoning back made no difference (3,498
+cached, 31 new). So the planner's look-up rounds on Windows reread almost nothing.
+
 ## Lessons so far
 
 - A wrong review is worse than none: one false "undefined variable" turned a 3-minute success into a

@@ -16,7 +16,7 @@ account (the repo's credential helper). Use it as a chat: `cd <repo> && buckets`
 
 | Role | Where | Model, speed |
 |---|---|---|
-| Reader and coder: routes, picks files, chooses parts, answers the planner's `ask` look-ups, codes | Windows (RTX 3070 8 GB, 32 GB RAM), llama.cpp server `192.168.1.111:8080`, starts at login (`C:\llama\start-buckets-server.ps1`) | Qwen3.6-35B-A3B (Ollama's GGUF `sha256-d372…`, experts in RAM, 4,096-token chunks): ~650 tok/s reading, ~35 writing |
+| Reader and coder: routes, picks files, chooses parts, answers the planner's `ask` look-ups, codes | Windows (RTX 3070 8 GB, 32 GB RAM), llama.cpp server `192.168.1.111:8080`, starts at login (`C:\llama\start-buckets-server.ps1`) | Qwen3.6-35B-A3B (Ollama's GGUF `sha256-d372…`, experts in RAM, 4,096-token chunks): ~625 tok/s reading, ~40 writing (MTP) |
 | Planner and reviewer (plans with look-up tools) | the Mac (M2 Pro 32 GB), Ollama `localhost:11434`, unloaded after each run | the same Qwen3.6-35B-A3B (copied from Windows): ~475 tok/s reading, ~48 writing (Ollama's MTP is on) |
 | Paid fallback | `claude` CLI (Team login) | Sonnet: `--claude`, the escalation ladder's last step, `buckets review` |
 | Installed, unused | Mac: `qwen3.6-planner` (27B); Windows Ollama: `qwen3:4b-instruct-2507`, `qwen3-coder:30b` | |
@@ -30,12 +30,8 @@ itself was left exactly as found (no branches, no `.buckets/`).
 
 ## The plan, in order (what to do next)
 
-1. **Windows server: MTP and caching** (waiting on the owner to restart the server). New start-script
-   flags: add `--spec-type draft-mtp --spec-draft-n-max 2`; remove `--no-reasoning-preserve` (it breaks
-   prompt caching in multi-turn coder sessions). The model file already has the MTP (`nextn`) tensors.
-   Measure before/after on the saved plan prompt (`runs/buckets-20261010-132712/08-plan.json`, nonce in
-   the system prompt to defeat the cache): expected writing 35 → ~42–45 tok/s, reading may drop. If the
-   flag is refused, the llama.cpp build predates 2026-05-16 (PR #22673): get a newer CUDA release.
+1. ~~Windows server: MTP and caching~~ **done** (field notes 20): writes 35 → ~40 tok/s, drafts 97%
+   accepted, multi-turn prompts reuse the cache.
 2. **Double review + evidence rules** (next to build). After each round both machines review at once
    (the Mac as now, Windows as a second reviewer); any issue wins, except: when every check passes and
    only one reviewer claims a definite error ("undefined", "never called"), confirm it (ask the other

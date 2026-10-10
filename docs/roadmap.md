@@ -51,6 +51,7 @@ From [research/2026-10-11-local-agentic-coding.md](research/2026-10-11-local-age
   models (Devstral Small 2, Qwen3.6-27B) would be slow here.
 - **MTP:** llama.cpp supports Qwen3.6's built-in MTP heads (`--spec-type draft-mtp --spec-draft-n-max
   2`, PR #22673, 2026-05-16); expect ~+20–30% writing with experts on CPU, slower prefill, single slot.
+  **Measured (field notes 20): +15% writing (35 → ~40), 97% of drafts accepted, reading ~unchanged.**
   Ollama already uses MTP (`draft_num_predict`).
 - **Caching:** Qwen3.6 is hybrid (Gated DeltaNet), so `--cache-reuse` can't work; only exact prefix
   matches and context checkpoints do. Keep prompts byte-stable at the front; keep reasoning in multi-turn
