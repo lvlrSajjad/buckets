@@ -4541,6 +4541,7 @@ GIT_OPS = {
     "status": ("the working tree: changed and untracked files, the branch and how far ahead or behind its upstream it is: {}", False, False),
     "log": ("show the last {count} commits (default 10): {count?}", False, False),
     "branches": ("list local branches with upstream and ahead/behind counts: {}", False, False),
+    "remotes": ("list configured remotes and their URLs: {}", False, False),
 }
 
 GIT_SCHEMA = {
@@ -4811,6 +4812,9 @@ class GitAssistant:
         return ""
     def op_branches(self, a, yes):
         return self.git("branch", "-vv")
+
+    def op_remotes(self, a, yes):
+        return self.git("remote", "-v")
 
     def op_switch(self, a, yes):
         self.git("switch", a["name"])
