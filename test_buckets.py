@@ -1270,6 +1270,32 @@ class BigRepoTools(unittest.TestCase):
                               "instructions": 'Remove the DetailRow with title "Original ETA".'})
         self.assertIn('61| <Row title={"Original ETA"} />', focus)
 
+    def test_long_agent_docs_and_skills_are_cut_to_what_the_request_needs(self):
+        doc = "# AGENTS\nIntro.\n" + "".join(f"## Topic {i}\n" + "filler words here. " * 40 + "\n" for i in range(30))
+        doc += "## Work orders\nThe work order details screen lives in screens/work-order-details.\n"
+        repo = make_repo({"AGENTS.md": doc, "CLAUDE.md": "@AGENTS.md\n",
+                          ".github/skills/work-order-details/SKILL.md": "# Skill\nHow details rows work.\n",
+                          ".github/skills/linting/SKILL.md": "# Lint\n"})
+        g = buckets.guidance(repo, {}, "Hide a field from the work order details")
+        self.assertIn("--- AGENTS.md (the parts that match this request) ---", g)
+        self.assertIn("The work order details screen lives in", g)              # the matching section
+        self.assertIn("Other sections, not shown: Topic 0", g)
+        self.assertIn("--- .github/skills/work-order-details/SKILL.md", g)    # the skill its words spell
+        self.assertNotIn("skills/linting", g)
+        self.assertLess(len(g), 9000)
+
+    def test_related_repos_are_searched_and_read_never_changed(self):
+        api = make_repo({"src/filter/workorder.list.config.ts": "export const C = [{ filterKey: 'priorityLevel' }]\n"})
+        repo = make_repo({"app/screens/work-order-filters/screen.tsx": "export const S = 1\n"})
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        b = buckets.Buckets(cfg, repo, "add the priority level to the work order filters")
+        b.rc["related"] = {"api": str(api)}
+        facts = b.facts()
+        self.assertIn("in `api` (a related repo", facts)
+        self.assertIn("api:src/filter/workorder.list.config.ts:1:", facts)
+        self.assertEqual(buckets.claude_command({"bin": "claude", "budget_usd": 1}, "sonnet", None, True, [api])[-2:],
+                         ["--add-dir", str(api)])
+
     def test_a_type_and_a_value_with_one_name_arent_an_api_change(self):
         b = buckets.Buckets.__new__(buckets.Buckets)
         surface = {"h.tsx": [{"kind": "interface", "name": "H", "signature": "interface H"},

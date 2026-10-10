@@ -945,8 +945,9 @@ def ask_json(cfg: dict, run: Run, label: str, system: str, user: str, schema: di
 READ_TOOLS = "Read,Grep,Glob"
 
 
-def claude_command(c: dict, model: str, schema: dict | None, tools: bool) -> list[str]:
-    """Headless Claude Code: read-only tools, no MCP servers or skills, a hard spending cap."""
+def claude_command(c: dict, model: str, schema: dict | None, tools: bool, add_dirs=()) -> list[str]:
+    """Headless Claude Code: read-only tools, no MCP servers or skills, a hard spending cap; related
+    repos added as directories it may read."""
     cmd = [c["bin"], "-p", "--model", model, "--output-format", "json", "--no-session-persistence",
            "--strict-mcp-config", "--disable-slash-commands", "--max-budget-usd", str(c["budget_usd"]),
            "--tools", READ_TOOLS if tools else ""]
@@ -954,6 +955,8 @@ def claude_command(c: dict, model: str, schema: dict | None, tools: bool) -> lis
         cmd += ["--allowedTools", READ_TOOLS]
     if schema:
         cmd += ["--json-schema", json.dumps(schema)]
+    if tools and add_dirs:
+        cmd += ["--add-dir", *map(str, add_dirs)]
     return cmd
 
 
@@ -975,11 +978,12 @@ def parse_claude(out: str, label: str, schema: dict | None):
 
 
 def claude_call(cfg: dict, run: Run, label: str, prompt: str, repo: Path, *, schema: dict | None = None,
-                model: str | None = None, tools: bool = True):
+                model: str | None = None, tools: bool = True, add_dirs=()):
     c = cfg["claude"]
     model = model or c["model"]
     with Ticker(f"  {friendly(label)} (Claude {model})"):
-        code, out, timed_out = run_proc(claude_command(c, model, schema, tools), repo, c["timeout_s"], input=prompt)
+        code, out, timed_out = run_proc(claude_command(c, model, schema, tools, add_dirs), repo, c["timeout_s"],
+                                        input=prompt)
     run.save(f"{label}-claude.json", f"{prompt}\n\n===== output =====\n{out}")
     if timed_out:
         raise ModelError(f"{label}: Claude timed out after {c['timeout_s']}s")
@@ -1254,13 +1258,60 @@ def render_map(files: dict[str, int]) -> str:
     return "\n".join(f"{f} ({n} lines)" for f, n in sorted(files.items()))
 
 
-def guidance(repo: Path, rc: dict) -> str:
+def doc_sections(text: str, request: str, budget: int) -> str:
+    """A long markdown doc cut to `budget` characters: its opening, then the sections whose heading or
+    text mention the request's phrases most (in any code spelling), in the doc's own order."""
+    if len(text) <= budget:
+        return text
+    parts = re.split(r"(?m)^(?=#{1,3} )", text)
+    head, sections = parts[0], parts[1:]
+    if not head.strip() and sections and sections[0].startswith("# "):  # the title and its intro are the opening
+        head = sections.pop(0)
+    if not sections:
+        return text[:budget]
+    terms = {x.lower() for r in word_runs(request) for i in range(len(r)) for j in range(i + 1, len(r) + 1)
+             for words in [r[i:j]] if len(words) > 1 or len(words[0]) >= 5 for x in spellings(words)}
+    terms |= {n.lower() for n in request_names(request)}
+
+    def score(sec: str) -> int:
+        low = sec.lower()
+        title = low.split("\n", 1)[0]
+        return sum(low.count(t) + 5 * (t in title) for t in terms)
+
+    ranked = sorted(range(len(sections)), key=lambda i: -score(sections[i]))
+    keep, used = set(), len(head[: budget // 3])
+    for i in ranked:
+        if score(sections[i]) == 0 or used + len(sections[i]) > budget:
+            continue
+        keep.add(i)
+        used += len(sections[i])
+    picked = [sections[i] for i in sorted(keep)]
+    titles = [sec.split("\n", 1)[0].strip("# ") for i, sec in enumerate(sections) if i not in keep]
+    return (head[: budget // 3] + "".join(picked)
+            + (f"\n(Other sections, not shown: {'; '.join(titles[:30])})" if titles else ""))
+
+
+def guidance(repo: Path, rc: dict, request: str = "") -> str:
+    """The repo's own guidance: its agent doc (AGENTS.md, CLAUDE.md…), cut to the parts that matter
+    for this request when it's long, the skill docs whose names the request spells (.github/skills/
+    work-order-details/ for "work order details"), the README's start, and .buckets.json notes."""
     parts = []
     for name in GUIDANCE_FILES:
         p = repo / name
         if p.exists():
-            parts.append(f"--- {name} ---\n{p.read_text(errors='replace')[:6000]}")
+            text = p.read_text(errors="replace")
+            if text.strip().startswith("@") and len(text) < 200:  # CLAUDE.md that just says @AGENTS.md
+                continue
+            parts.append(f"--- {name}{' (the parts that match this request)' if len(text) > 6000 else ''} ---\n"
+                         + doc_sections(text, request, 6000))
             break
+    if request:
+        wanted = {n.lower() for r in word_runs(request) for i in range(len(r)) for j in range(i + 1, len(r) + 1)
+                  for n in spellings(r[i:j])}
+        for doc in sorted(repo.glob("*/skills/*/SKILL.md")) + sorted(repo.glob("*/*/skills/*/SKILL.md")):
+            if doc.parent.name.lower() in wanted:
+                parts.append(f"--- {doc.relative_to(repo)} (the parts that match this request) ---\n"
+                             + doc_sections(doc.read_text(errors="replace"), request, 4000))
     readme = next((repo / n for n in ("README.md", "README.rst", "README") if (repo / n).exists()), None)
     if readme:
         parts.append(f"--- {readme.name} (start) ---\n{readme.read_text(errors='replace')[:3000]}")
@@ -1692,7 +1743,7 @@ def spellings(words: list[str]) -> list[str]:
     return list(dict.fromkeys(["-".join(words), "_".join(words), camel, camel[0].upper() + camel[1:]]))
 
 
-def request_leads(repo: Path, request: str, files, limit_files: int = 12) -> str:
+def request_leads(repo: Path, request: str, files, limit_files: int = 12, prefix: str = "") -> str:
     """Where the request's own words appear, found without a model: folder and file names that spell
     a phrase of it (work order details -> work-order-details/), and code or UI text that does
     (created at -> createdAt, created_at, "Created At")."""
@@ -1711,7 +1762,7 @@ def request_leads(repo: Path, request: str, files, limit_files: int = 12) -> str
             taken.update(hits)
             shown = sorted(hits, key=len)[:limit_files]
             out.append(f"Paths spelling \"{' '.join(words)}\" ({len(hits)} file{'s' if len(hits) != 1 else ''}): "
-                       + ", ".join(shown) + (" …" if len(hits) > limit_files else ""))
+                       + ", ".join(prefix + f for f in shown) + (" …" if len(hits) > limit_files else ""))
     for words in [p for p in phrases if len(p) <= 3 and p not in placed]:
         pattern = "|".join(re.escape(x) for x in spellings(list(words))) + "|" + "[[:space:]]+".join(map(re.escape, words))
         r = subprocess.run(["git", "grep", "-n", "-I", "-i", "-w", "-E", "-e", f"({pattern})"], cwd=repo,
@@ -1724,7 +1775,7 @@ def request_leads(repo: Path, request: str, files, limit_files: int = 12) -> str
             f, _, rest = l.partition(":")
             by_file.setdefault(f, []).append(rest)
         # hits in the request's place (the files its words name) first, then the busiest files
-        rows = [f"  {f}:{h.split(':', 1)[0]}: {h.split(':', 1)[1].strip()[:110]}"
+        rows = [f"  {prefix}{f}:{h.split(':', 1)[0]}: {h.split(':', 1)[1].strip()[:110]}"
                 for f in sorted(by_file, key=lambda f: (f not in taken, -len(by_file[f])))[:6] for h in by_file[f][:2]]
         out.append(f"Code and text matching \"{' '.join(words)}\" ({len(lines)} line{'s' if len(lines) != 1 else ''} in "
                    f"{len(by_file)} file{'s' if len(by_file) != 1 else ''}):\n" + "\n".join(rows))
@@ -2165,7 +2216,9 @@ Request:
 
 Already shown to you in full (don't ask for these again): {shown}
 
-{outlines}"""
+{outlines}
+
+Parts of related repos named in the facts can be read too, as "name:path:start-end"."""
 
 ANSWER_PROMPT = """Answer the request using the repository material below.
 Write a clear markdown report. Cite code as `path:line`. If the material doesn't contain the
@@ -2804,6 +2857,20 @@ class Buckets:
         return self._memory
 
     @property
+    def related(self) -> dict[str, Path]:
+        """Other repos this one depends on that runs may read, never change: `"related": {"ecotrak-api":
+        "~/Coding/ET/web_api/ecotrak-api"}` in .buckets.json or a config "repos" rule."""
+        return {name: Path(os.path.expanduser(str(p))).resolve() for name, p in (self.rc.get("related") or {}).items()
+                if Path(os.path.expanduser(str(p))).is_dir()}
+
+    def related_files(self, name: str) -> dict[str, int]:
+        if not hasattr(self, "_related_files"):
+            self._related_files = {}
+        if name not in self._related_files:
+            self._related_files[name] = list_files(self.related[name], [])
+        return self._related_files[name]
+
+    @property
     def index(self) -> CodeIndex:
         if not hasattr(self, "_index"):
             self._index = CodeIndex(self.repo, list_files(self.repo, self.rc.get("exclude", [])))
@@ -2826,6 +2893,7 @@ class Buckets:
     def claude(self, label: str, prompt: str, schema: dict | None = None, validate=None, **kw):
         """A Claude call with one retry when its JSON doesn't validate; adds to the run's cost."""
         try:
+            kw.setdefault("add_dirs", list(self.related.values()))
             data, cost = claude_call(self.cfg, self.run, label, prompt, self.repo, schema=schema, **kw)
         except SchemaGaveUp:
             # Long answers sometimes can't be forced into the schema; ask for plain JSON text instead.
@@ -2914,6 +2982,11 @@ class Buckets:
         leads = request_leads(self.repo, self.request, files)
         if leads:
             parts.append("Where the request's words appear (found mechanically):\n" + leads)
+        for name, path in self.related.items():  # read-only neighbours (the API this app calls…)
+            theirs = request_leads(path, self.request, self.related_files(name), prefix=f"{name}:")
+            if theirs:
+                parts.append(f"Where the request's words appear in `{name}` (a related repo at {path}; read-only, "
+                             f"read its parts as \"{name}:path:start-end\"):\n" + theirs)
         sources = list(dict.fromkeys(s for s in sources if not re.search(r"\.(test|spec)\.", s)))[:6]
         importers = self.index.importers(sources)
         for src in sources:
@@ -2969,7 +3042,7 @@ class Buckets:
             files = {f: n for f, n in files.items()
                      if any(f == d or f.startswith(d + "/") or d == "." for d in keep)}
             say(f"  narrowed to {len(files)} files in: {', '.join(keep)}")
-        gd = guidance(self.repo, self.rc)
+        gd = guidance(self.repo, self.rc, self.request)
         if self.mode != "claude" and self.reading() == "research":
             head = f"{ctx}\n\n" if ctx else ""
             return head + self.research(mode, files, gd)
@@ -3130,11 +3203,18 @@ class Buckets:
                           FOCUS_PROMPT.format(goal=self.goal(mode), request=self.request, reads=n,
                                               shown=", ".join(shown) or "nothing", outlines=maps),
                           FOCUS_SCHEMA, check, think=False, max_tokens=1500, timeout=self.timeout)
-        found, missing = [], []
+        found, missing, theirs = [], [], []
         for spec in wanted:
+            name = spec.split(":", 1)[0]
+            if name in self.related and ":" in spec:  # a related repo's part: read it there
+                text = read_spec(self.related[name], self.related_files(name), spec.split(":", 1)[1],
+                                 self.cfg["max_file_chars"])
+                (theirs if not text.startswith("!!") else missing).append((spec, f"(from the related repo `{name}`)\n{text}"))
+                continue
             where = locate(self.repo, files, outline, spec, long[0] if len(long) == 1 else "")
             (found if where else missing).append((spec, where))
-        texts = [self.part(where) for _, where in found]
+        texts = [self.part(where) for _, where in found] + [t for _, t in theirs]
+        found += theirs
         if found:
             say(f"  {ok()} read exactly: {', '.join(spec for spec, _ in found)}")
         if missing:
@@ -3477,7 +3557,7 @@ class Buckets:
             material = self.material("info")
             self.heading(3, "Writing the answer")
             report = chat(self.planner, self.run, "answer", SYSTEM,
-                          ANSWER_PROMPT.format(request=self.request, guidance=guidance(self.repo, self.rc),
+                          ANSWER_PROMPT.format(request=self.request, guidance=guidance(self.repo, self.rc, self.request),
                                                material=material),
                           max_tokens=16000, timeout=self.timeout)
         path = self.run.dir / "report.md"
@@ -3512,7 +3592,7 @@ class Buckets:
         prompt = PLAN_PROMPT.format(rules=TASK_RULES.format(max_tasks=self.cfg["max_tasks"]),
                                     max_tasks=self.cfg["max_tasks"], request=self.request,
                                     checks=", ".join(checks) or "none", baseline=baseline_text,
-                                    guidance=guidance(self.repo, self.rc), material=material)
+                                    guidance=guidance(self.repo, self.rc, self.request), material=material)
         validate = lambda d: validate_plan(d, self.repo, self.cfg["max_tasks"])
         target = (self.escalate("research ended without a confirmed cause")
                   if getattr(self, "research_unsure", False)
