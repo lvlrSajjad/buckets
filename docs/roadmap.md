@@ -34,6 +34,34 @@ behind these are in [field-notes.md](field-notes.md).
   to 6 minutes before the last three of these.
 - Coders and look-ups run with `opencode run --standalone`, so Ctrl-C stops their edits.
 
+## Done (2026-10-10, big repo)
+
+- Request words → paths and code (mechanical), stretches of long components around the request's
+  terms, coder focus on quoted text, review evidence for "remove" requests, safe monorepo fixers,
+  checks that write aren't detected, request-shaped AGENTS.md and skill docs, related repos
+  (read-only, `--add-dir` for Claude), `buckets review` (Claude reads the change and the code around
+  it), suggestions to use Claude (heavy local runs) and to have Claude review (risky local results).
+  See field notes 17.
+
+## Next (from the big-repo tests)
+
+- **Edit anchors:** the planner keeps naming the file's path as `at`; a worked example in the plan
+  prompt, or falling back to the quoted lines, would let more edits apply with no coder.
+- **"Show more matches":** when the first page of the request-words search isn't enough, let the
+  planner ask for the next page of a phrase (lists are capped at 12 paths / 6 files).
+- **A reading loop on llama.cpp:** think, read a part, keep thinking, with the server's prompt cache
+  making each extra read cost only its new tokens (a session per job instead of fresh calls).
+- **Prompt order for the cache:** stable parts first (guidance, map, facts), the step's own
+  instructions last, so planning, review and follow-ups reuse the server's cached prefix.
+- **Writing speed:** the 35B has multi-token-prediction layers (`nextn` tensors, unused today); if
+  llama.cpp can use them for speculative decoding, writing could go well past 35 tokens/s.
+- **buckets as an MCP tool for Claude Code:** Claude explores and plans, buckets runs the plan
+  locally (`--plan-file` exists), returns a run id, Claude checks back and reviews.
+- **The 186 accessibility lint warnings** in ecotrak-mobile are eslint-fixable with no model; the
+  431 hook-dependency warnings need Claude planning, a folder at a time.
+- **pick-dirs** still runs on vague requests (~10 s); the request-words search could choose the
+  folders when it already found a clear place.
+
 ## Git and GitHub assistant (added 2026-10-09)
 
 - **`pr_fix`: fix red PRs with real code failures:** check out the PR branch, feed the parsed CI

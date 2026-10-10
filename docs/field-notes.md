@@ -361,8 +361,57 @@ default) 233–271. `--n-cpu-moe 28` overflowed the card: 65 tokens/s. On a real
 Plain `-ngl 8` (whole layers on the card, like a naive split) wrote at 12.8 tokens/s, so Ollama was
 already smarter than that.
 
+### 17. A 2,000-file React Native monorepo (ecotrak-mobile), local vs Claude (2026-10-10)
+
+ecotrak-mobile: 2,123 files (1,400 TypeScript) in `apps/` and `packages/`, with the backend
+(`ecotrak-api`, NestJS, 3,182 files) next to it. Checks set in the config's `repos` rule: `tsc` (10 s),
+eslint errors only (34 s), jest (1,545 tests, 6 s), all in `packages/shared`. Every change ran on a
+throwaway `buckets/…` branch; `main` was never touched.
+
+| Test | Planner | Time | Result |
+|---|---|---|---|
+| "Does work order details have a created date / created at field?" | local | 1m 55s → **1m 45s** | wrong files, "can't confirm" → **correct** (`work-order-details.ts:108 createdAt`) after the request-words search |
+| Hide 2 rows, vague ("the work order details") | local | 13m 17s → 11m 12s → **4m 55s** | detour via an invented file → half-done while the review said done → **clean 24-line diff** |
+| Hide 2 rows, files named | local | 5m 01s | correct (older code, without the coder focus fixes) |
+| 10 `react-hooks/exhaustive-deps` warnings (`time-track`) | local | 15 min cap | 10 → 1 warnings, but **changed behaviour** (an on-mount fetch now re-runs on date changes; an effect resets on data loads). Not mergeable |
+| "Show createdAt as a row in work order details, both apps" | local | 20 min cap | not done: invented a third hook file, type and import errors, the Mac advisor too slow to help |
+| Same | **Claude** (Sonnet plans and reviews) | **1m 59s, $0.51** | done; reused `utils/details-dates.ts` (next to `formatWorkOrderCompletedDate`), all 3 edits applied with no coder |
+| "Pick a search param missing from the filters and add it" | **Claude** | 8m 11s, $1.19 | works end to end (Project), **but slot 32 collides with the team filter** (`work-order-sp-name-filter.ts`); every check passed |
+| Same, backend readable (`related`) | **Claude** | 5m 21s, $1.07 | correct: slot 33, reuses the projects dropdown, typed. The plan never mentions the backend: the better result was most likely run-to-run variation |
+| `buckets review` of the slot-32 branch | **Claude** | **36 s, $0.28** | **caught the collision** with both locations, plus a type mismatch, a possible permission gate and the missing locales (from AGENTS.md), and a manual test plan |
+
+What the first runs got wrong, and the fix each led to:
+- File picking chose the API service and the store, never the screens: **request words → paths
+  and code** (`work order details` → `work-order-details/`, `created at` → `createdAt`), ~1 s.
+- A 1,500-line screen is one function, so "the part it needs" was its first 150 lines: **the
+  stretches around the request's rarer terms** instead.
+- The planner's edits named the file's path as their anchor; a coder searched 17 times (6.5 min)
+  and removed half a row: **coders get the lines their quoted text is on**; path anchors dropped.
+- The review said done with "Tracking Code" still in the file: **the review gets where the
+  request's phrases still appear**, found mechanically.
+- The auto-detected `lint` check was `eslint --fix && prettier` in each workspace (it would rewrite
+  files): **checks that write aren't detected**. `--doctor` ignored config `repos` rules.
+- Prettier on a never-formatted 1,800-line file would reformat all of it; keeping only "nearby"
+  changes misaligned and **lost code** in a throwaway copy, so it was dropped: **formatters run only
+  on files that were formatted at the start**, and leftover blank lines are removed mechanically.
+- An "API change" on every run: an interface and a const share the name `HomeHeader`.
+- AGENTS.md is 70k characters and buckets read its first 6k: **long agent docs and matching skill
+  docs are cut to the sections that mention the request**.
+
+Speeds: the worker reads ~650 tokens/s on llama.cpp (see 16); the request-words search costs
+~1 s in one repo and ~8 s with the 3,182-file backend as a related repo.
+
 ## Lessons so far
 
+- On a big repo, time follows how much code a change touches, not the repo's size, once the
+  request's own words are searched mechanically (a vague request: 13 min → 5 min, the same as
+  naming the files).
+- Local planning is reliable for finding, answering, and changes in places it can find; it is not
+  for changes that must fit existing patterns across files, or judgment calls like hook
+  dependencies. Claude planning did those in 2–8 min for $0.50–1.20, with the local side still
+  reading, editing and checking.
+- Checks can't see design mistakes (a reused filter slot passed types, lint and tests). A Claude
+  review that reads the code around the change caught it for $0.28.
 - The coder is the cheap part either way; mode only changes who plans and reviews.
 - The Mac planner's time goes to reading new code (~85 tokens/s) and thinking (~9 tokens/s).
   Name the files in the request, and use `--plan-only` before long runs.

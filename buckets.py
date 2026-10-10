@@ -26,6 +26,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import tempfile
 import sys
 import threading
 import time
@@ -3913,6 +3914,7 @@ class Buckets:
         failing_before = {n for n, r in now.items() if not r["ok"]}
         errors_before: set = set()
         for rnd in range(1, self.cfg["max_rounds"] + 1):
+            self.rounds_used = rnd
             if tasks:
                 self.heading(code_step, "Coding" + (f" the follow-ups (round {rnd})" if rnd > 1 else "")
                              + f": {len(tasks)} task{'s' if len(tasks) != 1 else ''} on {machine_label(self.cfg['coder'])}")
@@ -4609,6 +4611,10 @@ def finish(b, kind: str, done: bool | None, branch: str | None, merge_into: str 
     if branch:
         say(f"  next: {paint('buckets merge', 'bold')} to bring it into {merge_into}, or {paint('buckets discard', 'bold')}"
             f"; look first with {paint(f'git diff {merge_into}...{branch}', 'dim')}")
+        why = review_reasons(b, done, branch, merge_into)
+        if why:
+            say(f"  {paint('suggestion:', 'bold', 'yellow')} a Claude review is worth it before merging ({why}): "
+                f"{paint('buckets review', 'bold')} (about $0.20–0.50; it reads the code around the change too)")
     meta = {"repo": str(b.repo), "kind": kind, "request": b.request, "done": done, "branch": branch,
             "merge_into": merge_into, "report": str(report), "finished": datetime.now().isoformat(timespec="seconds"),
             "minutes": round((time.time() - _T0) / 60, 1), "claude_usd": round(b.cost, 3)}
@@ -4634,6 +4640,26 @@ def remember(b, kind: str, done, branch, merge_into, report: Path) -> None:
         mem.learn(b, changed + [t for t in getattr(b, "involved", []) if t not in changed])
     except (ModelError, OSError, ValueError, RuntimeError) as e:
         detail(f"project memory not updated: {e}")
+
+
+def review_reasons(b, done, branch: str, merge_into: str) -> str:
+    """Why a local run's change deserves a second look by a stronger model, or "": the signs that
+    went with the mistakes local planning made on a 2,000-file app (an invented file, a filter slot
+    that clashed with another, several files that had to fit together)."""
+    if getattr(b, "mode", "") == "claude" or not claude_ready(b.cfg):
+        return ""
+    added = git(b.repo, "diff", "--name-only", "--diff-filter=A", f"{merge_into}...{branch}", check=False).split()
+    files = git(b.repo, "diff", "--name-only", f"{merge_into}...{branch}", check=False).split()
+    reasons = []
+    if not done:
+        reasons.append("it isn't done")
+    if added:
+        reasons.append(f"it adds {len(added)} new file{'s' if len(added) != 1 else ''}")
+    if len(files) >= 3:
+        reasons.append(f"{len(files)} files that have to fit together")
+    if getattr(b, "rounds_used", 1) > 1 and done:
+        reasons.append("it took more than one round")
+    return ", ".join(reasons)
 
 
 def runs_newest_first(repo: Path | None = None, kinds: tuple = ("info", "plan", "code", "pick")):
@@ -4691,6 +4717,57 @@ def merge_run(repo: Path) -> str:
                            f"git merge {branch}")
     git(repo, "branch", "-q", "-d", branch)
     return f"merged {branch} into {into} and deleted the branch (nothing pushed){note}"
+
+
+CLAUDE_REVIEW_PROMPT = """A smaller local model made the change below for this request. Review it the way a
+careful senior engineer on this codebase would. You're in the repository root with read-only tools
+(Read, Grep, Glob): read the code around the change, not just the diff. Check that it fits what is
+already there: existing helpers and patterns it should have reused, keys, ids, slots or names it
+collides with, every place that should have changed (both apps, both variants, translations, types),
+and behaviour it changes by accident. The checks (types, lint, tests) already pass or fail on their
+own; look for what they can't see.
+
+Reply in markdown: a first line "Verdict: looks good" or "Verdict: needs changes", then each problem
+with `path:line`, what's wrong and how to fix it, then anything worth testing by hand. Be concise;
+don't restate the diff.
+
+Request:
+{request}
+
+The change ({branch} against {base}):
+{diff}"""
+
+
+def cmd_review(cfg: dict, repo: Path) -> int:
+    """`buckets review`: Claude reviews the latest run's branch, reading the code around the change."""
+    d = next((d for d in runs_newest_first(repo, ("code", "pick")) if d.get("branch")
+              and branch_exists(repo, d["branch"])), None)
+    if not d:
+        die("no buckets branch to review in this repo")
+    if not claude_ready(cfg):
+        die("Claude isn't set up here (run `claude auth login`)")
+    base, branch = d["merge_into"], d["branch"]
+    diff = git(repo, "diff", f"{base}...{branch}")
+    if not diff.strip():
+        die(f"{branch} has no changes against {base}")
+    budget = cfg["diff_budget_chars"]
+    diff = diff if len(diff) <= budget else diff[:budget] + f"\n… (cut off; {len(diff) - budget} more characters)"
+    rc = {**path_rules(cfg, repo), **repo_config(repo)}
+    related = [Path(os.path.expanduser(str(p))) for p in (rc.get("related") or {}).values()]
+    run = Run(repo)
+    say(f"{paint('buckets', 'bold')} {VERSION} · reviewing {paint(branch, 'cyan')} with Claude {cfg['claude']['model']}")
+    worktree = Path(tempfile.mkdtemp(prefix="buckets-review-")) / "tree"
+    git(repo, "worktree", "add", "-q", "--detach", str(worktree), branch)  # read the branch, not your checkout
+    try:
+        text, cost = claude_call(cfg, run, "review", CLAUDE_REVIEW_PROMPT.format(
+            request=d["request"], branch=branch, base=base, diff=diff), worktree,
+            add_dirs=[p for p in related if p.is_dir()])
+    finally:
+        git(repo, "worktree", "remove", "--force", str(worktree), check=False)
+    report = run.save("review.md", f"# Claude review of {branch}\n\n{text}\n")
+    print(text)
+    say(f"{ok()} reviewed · Claude {money(cost)} · {report}")
+    return 0
 
 
 def cmd_merge(repo: Path) -> int:
@@ -5589,6 +5666,11 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_setup(args.yes)
     if words == ["pr"] and not args.file:
         args.request = ["open a pull request for the latest buckets run"]
+    if words == ["review"] and not args.file:
+        here = git_toplevel(args.repo)
+        if here is None:
+            die("run this inside the repo")
+        return cmd_review(cfg, here)
     if words in (["last"], ["merge"], ["discard"]) and not args.file:
         here = git_toplevel(args.repo)
         if words == ["last"]:
@@ -5653,7 +5735,7 @@ def main(argv: list[str] | None = None) -> int:
                               f" · {repo.name} · {elapsed()}")
 
 
-CHAT_COMMANDS = {"merge": "merge", "last": "last", "discard": "discard", "pr": "pr", "setup": "setup",
+CHAT_COMMANDS = {"merge": "merge", "last": "last", "discard": "discard", "pr": "pr", "setup": "setup", "review": "review",
                  "doctor": "--doctor", "--doctor": "--doctor"}
 
 
@@ -5764,6 +5846,11 @@ def run_request(b, cfg: dict, args, repo: Path) -> int:
         if b.mode != "claude" and intent != "pick":
             parts.append(f"reading: {b.reading()}")
         countdown("  " + " · ".join(parts), 0 if args.yes else 5)
+        if (b.mode != "claude" and intent == "code" and route and route["difficulty"] != "light"
+                and claude_ready(cfg)):
+            say(f"  {paint('suggestion:', 'bold', 'yellow')} {route['difficulty'].replace('_', ' ')} changes went much "
+                f"better with Claude planning in tests (local planning struggled with changes that must fit existing "
+                f"patterns across files); add {paint('--claude', 'bold')} to use it (about $0.50–1.50)")
 
         if intent == "info":
             b.answer()

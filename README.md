@@ -163,7 +163,16 @@ Go ahead? … y
 Commands (in the chat, with or without `buckets` in front, or from the shell): `last` (show the
 latest report), `merge` (fast-forward the latest run's branch into the branch it started from, then
 delete it), `discard` (delete it, after a y/N), `pr` (open a pull request for the latest run),
-`setup`, `--doctor`. `-v`/`--verbose` also shows token counts and timings; they're always in the run
+`review` (Claude reviews the latest run's branch, reading the code around the change, ~$0.20–0.50),
+`setup`, `--doctor`.
+
+**When to use Claude.** Measured on a 2,000-file React Native app (field notes 17): local runs are
+reliable for questions, finding things, and changes in places they can find; they are not for
+changes that must fit existing patterns across several files, or for judgment calls. buckets says
+so as it goes: a local run of a heavy change suggests adding `--claude` (Claude plans and reviews;
+the local models still read, edit and check; $0.50–1.50 a run), and a local result that adds files,
+spans 3+ files, needed more than one round or isn't done suggests `buckets review` before merging.
+That review caught a reused filter slot that every check had passed. `-v`/`--verbose` also shows token counts and timings; they're always in the run
 folder's `run.log`.
 
 Flags still work and override the guess: `--ask`, `--do`, `--plan-only`, `--pick C1 C2 --onto B`,
@@ -373,6 +382,18 @@ tokens instead of 8,700. Bigger repos fall back to one line per folder, with the
 touches listed file by file. The git assistant sees the recent work too ("push what you just did").
 Changes under `.buckets/` never count as uncommitted work. Turn it off with `"memory": false` in
 `.buckets.json`.
+
+**The repo's own docs.** buckets passes the agent doc (`AGENTS.md`, `CLAUDE.md`,
+`.github/copilot-instructions.md`); a long one is cut to its opening plus the sections that mention
+the request (a 70k-character AGENTS.md costs ~3k tokens), and skill docs whose folder name the
+request spells (`.github/skills/work-order-details/SKILL.md` for "work order details") are included
+the same way.
+
+**Related repos (read-only).** A mobile app's feature often depends on the API it calls. With
+`"related": {"ecotrak-api": "~/Coding/ET/web_api/ecotrak-api"}` (in `.buckets.json` or a config
+`repos` rule), the search for the request's words runs there too (results labelled
+`ecotrak-api:…`), the planner can read its parts as `ecotrak-api:path:start-end`, and Claude gets read
+access to it. Runs never change a related repo.
 
 ## llama.cpp on the worker (faster reading)
 

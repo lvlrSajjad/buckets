@@ -1296,6 +1296,48 @@ class BigRepoTools(unittest.TestCase):
         self.assertEqual(buckets.claude_command({"bin": "claude", "budget_usd": 1}, "sonnet", None, True, [api])[-2:],
                          ["--add-dir", str(api)])
 
+    def test_a_claude_review_is_suggested_when_the_change_has_the_risk_signs(self):
+        repo = make_repo({"a.ts": "1\n", "b.ts": "1\n"})
+        buckets.git(repo, "switch", "-q", "-c", "buckets/x")
+        for f in ("a.ts", "b.ts", "c.ts"):
+            (repo / f).write_text("2\n")
+        commit_all(repo, "change")
+        main = "master" if buckets.branch_exists(repo, "master") else "main"
+        b = buckets.Buckets(buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False}), repo, "x")
+        with mock.patch.object(buckets, "claude_ready", lambda cfg: True):
+            why = buckets.review_reasons(b, True, "buckets/x", main)
+            self.assertEqual(why, "it adds 1 new file, 3 files that have to fit together")
+            b.mode = "claude"
+            self.assertEqual(buckets.review_reasons(b, True, "buckets/x", main), "")       # Claude planned it already
+        with mock.patch.object(buckets, "claude_ready", lambda cfg: False):
+            b.mode = "local"
+            self.assertEqual(buckets.review_reasons(b, False, "buckets/x", main), "")      # no Claude to suggest
+
+    def test_buckets_review_reads_the_branch_in_its_own_worktree(self):
+        repo = make_repo({"a.ts": "1\n"})
+        start = buckets.git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        buckets.git(repo, "switch", "-q", "-c", "buckets/x")
+        (repo / "a.ts").write_text("2\n")
+        commit_all(repo, "change")
+        buckets.git(repo, "switch", "-q", start)
+        run = buckets.Run(repo)
+        (run.dir / "meta.json").write_text(json.dumps({"repo": str(repo), "kind": "code", "request": "make a 2",
+                                                       "done": True, "branch": "buckets/x", "merge_into": start}))
+        seen = {}
+        def fake(cfg, run, label, prompt, where, **kw):
+            seen.update(prompt=prompt, a=(where / "a.ts").read_text())
+            return "Verdict: looks good", 0.12
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {})
+        with mock.patch.object(buckets, "claude_call", fake), mock.patch.object(buckets, "claude_ready", lambda c: True), \
+                contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(buckets.cmd_review(cfg, repo), 0)
+        self.assertEqual(seen["a"], "2\n")                     # it read the branch's code, not the checkout's
+        self.assertIn("make a 2", seen["prompt"])
+        self.assertIn("-1\n+2", seen["prompt"])
+        self.assertIn("Verdict: looks good", out.getvalue())
+        self.assertEqual(buckets.git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip(), start)
+        self.assertNotIn("buckets-review", buckets.git(repo, "worktree", "list"))
+
     def test_a_type_and_a_value_with_one_name_arent_an_api_change(self):
         b = buckets.Buckets.__new__(buckets.Buckets)
         surface = {"h.tsx": [{"kind": "interface", "name": "H", "signature": "interface H"},
