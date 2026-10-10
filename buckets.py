@@ -4072,6 +4072,7 @@ GIT_OPS = {
     "repo_create": ("create the GitHub repository for this folder under the folder's GitHub account and push it "
                     "(needs a commit first): {name?: defaults to the folder name, visibility?: private|public "
                     "(default private), description?}", True, True),
+    "status": ("the working tree: changed and untracked files, the branch and how far ahead or behind its upstream it is: {}", False, False),
 }
 
 GIT_SCHEMA = {
@@ -4387,6 +4388,9 @@ class GitAssistant:
         branch = a.get("branch") or self.current()
         self.git("push", "-q", "-u", self.remote, branch)
         return ""
+
+    def op_status(self, a, yes):
+        return self.git("status", "-sb")
 
     def op_pr_create(self, a, yes):
         head = a.get("head") or self.current()
