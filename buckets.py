@@ -110,6 +110,7 @@ DEFAULT_CONFIG = {
         "escalate_unsure_research": True,  # research ends with no confirmed cause: the advisor plans
         "escalate_repeated_failure": True,  # the coder fails a task twice: the advisor rewrites it
         "escalate_review_disagreement": True,  # reviewer and checks disagree: the advisor reviews
+        "double_review": True,      # the worker reviews too, at the same time; a lone "undefined"-style claim is confirmed
         "second_opinion": ["*auth*", "*password*", "*secret*", "*token*", "*crypto*", "*payment*",
                            "*billing*", "*migration*"],  # changed files like these get an advisor review
         "max_escalations": 2,       # per run
@@ -2448,6 +2449,23 @@ Rules:
 {rules}
 Reply with done, a short summary, the issues you found, and the follow-up tasks (empty when done)."""
 
+DEFINITE_CLAIM = re.compile(r"\b(undefined|not defined|never defined|isn't defined|never called|not called anywhere|"
+                            r"doesn't exist|does not exist|NameError|not imported|missing import|unresolved|"
+                            r"has no attribute|no such (?:function|method|attribute|variable))\b", re.I)
+
+CONFIRM_PROMPT = """Every check passes, but the other reviewer claims these definite errors in the same change:
+{claims}
+
+Where the names they mention appear in the changed files now (git grep):
+{evidence}
+
+Check each claim against the code shown above. A claim is real only if the code shows it: a name
+set earlier in the function, imported, or defined elsewhere is not undefined. Reply with the numbers
+of the claims that are real (an empty list if none) and one sentence on why."""
+
+CONFIRM_SCHEMA = {"type": "object", "properties": {"real": {"type": "array", "items": {"type": "integer"}},
+                                                   "why": {"type": "string"}}, "required": ["real", "why"]}
+
 CODER_PROMPT = """You are working in a git repository. Complete exactly one small task, then stop.
 
 Overall goal (context only, don't do more than your task): {request}
@@ -4106,7 +4124,10 @@ class Buckets:
         return {"removed": removed, "changed": changed, "added": added, "untouched": untouched}
 
     def review(self, plan: dict, results: list, base: str, baseline: dict, now: dict, rnd: int,
-               shortcuts: list[str], api: dict | None = None, target=None, note: str = "") -> dict:
+               shortcuts: list[str], api: dict | None = None, target=None, note: str = "",
+               reviewer: dict | None = None, prompt_out: list | None = None) -> dict:
+        """One model's verdict. `reviewer` reviews instead of the planner (quietly: it runs beside
+        the planner's review); `prompt_out` receives the prompt, for a follow-up question."""
         res = "\n".join(f"- {r['id']} {r['action']} {r['file']}: {r['status']} {r['note']}" for r in results)
         chk = []
         for name, r in now.items():
@@ -4121,7 +4142,7 @@ class Buckets:
             checks="\n".join(chk) or "(no checks configured)",
             shortcuts=("\nShortcuts found in the diff (must be replaced with real fixes):\n"
                        + "\n".join(f"- {h}" for h in shortcuts) + "\n") if shortcuts else "",
-            impact=impact_text(api) + self.phrases_now(base) + self.changed_code(base),
+            impact=impact_text(api) + self.phrases_now(base) + self.weak_tests_text(base) + self.changed_code(base),
             diff=self.diff_text(base), rules=TASK_RULES.format(max_tasks=self.cfg["max_tasks"]))
 
         def validate(d):
@@ -4130,6 +4151,12 @@ class Buckets:
                     "tasks": validate_tasks(d.get("tasks") or [], self.repo, self.cfg["max_tasks"], f"R{rnd + 1}T")}
 
         prompt = note + prompt
+        if prompt_out is not None:
+            prompt_out.append(prompt)
+        if reviewer:
+            return ask_json(reviewer, self.run, f"review-{rnd}-{machine_label(reviewer).lower().replace(' ', '-')}",
+                            SYSTEM, prompt, REVIEW_SCHEMA, validate, max_tokens=16000, timeout=self.timeout,
+                            quiet=True, **self.think_budget())
         if target:
             return self.ask_escalated(target, f"review-{rnd}-escalated", prompt, REVIEW_SCHEMA, validate)
         if self.mode == "claude":
@@ -4137,6 +4164,103 @@ class Buckets:
                                + prompt, REVIEW_SCHEMA, validate)
         return ask_json(self.planner, self.run, f"review-{rnd}", SYSTEM, prompt, REVIEW_SCHEMA, validate,
                         max_tokens=16000, timeout=self.timeout, **self.think_budget())
+
+    def weak_tests_text(self, base: str) -> str:
+        found = weak_tests(git(self.repo, "diff", "-U0", f"{base}..HEAD"))
+        return ("\nNew tests, checked mechanically (tests like these pass whatever the code does):\n"
+                + "\n".join(f"- {f}" for f in found) + "\n") if found else ""
+
+    def second_reviewer(self) -> dict | None:
+        """The worker's model, when the planner is on another machine and the worker answers: it reviews
+        at the same time, so a second look costs no extra time."""
+        if self.mode == "claude" or getattr(self, "on_windows", False):
+            return None
+        if not self.cfg.get("offload", {}).get("double_review"):
+            return None
+        t = self.cfg.get("thinker")
+        if not t or t["url"].rstrip("/") == self.planner["url"].rstrip("/") or not self.thinker_up:
+            return None
+        # The round waits for both, so it thinks no longer than the planner does.
+        return {**t, "think_budget": self.planner.get("think_budget") or t.get("think_budget", 0)}
+
+    def double_review(self, plan: dict, results: list, base: str, baseline: dict, now: dict, rnd: int,
+                      shortcuts: list[str], api: dict | None = None) -> dict:
+        """The planner and the worker review at once. Any issue wins, except a lone claim of a definite
+        error ("undefined", "never called") while every check passes: the other reviewer confirms it
+        first, since one such false claim once broke working code (field notes 19)."""
+        second = self.second_reviewer()
+        if not second:
+            return self.review(plan, results, base, baseline, now, rnd, shortcuts, api)
+        self.review_base = base
+        out: dict = {}
+        prompts: list = []
+
+        def work() -> None:
+            try:
+                out["second"] = self.review(plan, results, base, baseline, now, rnd, shortcuts, api, reviewer=second)
+            except (ModelError, OSError) as e:
+                out["second"] = e
+        thread = threading.Thread(target=work, daemon=True)
+        thread.start()
+        first = self.review(plan, results, base, baseline, now, rnd, shortcuts, api, prompt_out=prompts)
+        thread.join()
+        other = out.get("second")
+        if not isinstance(other, dict):
+            say(f"  {warn()} the second review on {machine_label(second)} didn't come back ({str(other)[:120]})")
+            return first
+        return self.merge_reviews(first, other, second, now, prompts[0] if prompts else "", rnd)
+
+    def merge_reviews(self, first: dict, other: dict, second: dict, now: dict, prompt: str, rnd: int) -> dict:
+        home, away = self.home, machine_label(second)
+        if first["done"] == other["done"]:
+            say(f"  Both reviews ({home} and {away}) say " + ("done" if first["done"] else "not done"))
+            if first["done"]:
+                return first
+            files = {t["file"] for t in first["tasks"]}
+            extra = [t for t in other["tasks"] if t["file"] not in files]
+            tasks = (first["tasks"] + extra)[:self.cfg["max_tasks"]]
+            return {**first, "issues": first["issues"] + [f"({away}) {i}" for i in other["issues"]
+                                                          if i not in first["issues"]],
+                    "tasks": [{**t, "id": f"R{rnd + 1}T{n}"} for n, t in enumerate(tasks, 1)]}
+        dissent, agree = (first, other) if not first["done"] else (other, first)
+        who, judge = (home, second) if dissent is first else (away, self.planner)
+        say(f"  The reviews differ: {who} found problems, the other says done")
+        definite = [i for i in dissent["issues"] if DEFINITE_CLAIM.search(i)]
+        if not all(r["ok"] for r in now.values()) or not definite or len(definite) < len(dissent["issues"]):
+            return dissent  # any issue wins unless it is only claims the other side should confirm
+        real = self.confirm_claims(judge, prompt, agree, definite, rnd)
+        if real:
+            return {**dissent, "issues": real + [i for i in dissent["issues"] if i not in definite]}
+        say(f"  {ok()} {who}'s claim{'s' if len(definite) > 1 else ''} didn't hold up; keeping the work")
+        return {**agree, "summary": agree["summary"] + f" (A second reviewer's claim was checked and didn't "
+                                                       f"hold up: {'; '.join(definite)[:300]})"}
+
+    def confirm_claims(self, judge: dict, prompt: str, verdict: dict, claims: list[str], rnd: int) -> list[str]:
+        """Ask the reviewer who said done whether the other's definite-error claims are real, with where
+        the names they mention appear now. Its own review is the conversation so far, so the long
+        prompt comes from its cache. Anything unclear counts the claims as real."""
+        touched = [f for f in git(self.repo, "diff", "--name-only", f"{getattr(self, 'review_base', 'HEAD~1')}..HEAD").split() if (self.repo / f).is_file()]
+        names = sorted({n for c in claims for n in re.findall(r"`([A-Za-z_][\w.]*)`", c)})[:6]
+        lines = []
+        for n in names:
+            hits = git(self.repo, "grep", "-n", "-w", "-e", n.split(".")[-1], "--", *touched).splitlines() if touched else []
+            lines.append(f"`{n}`:\n" + ("\n".join(f"  {h[:160]}" for h in hits[:8]) or "  (not found in the changed files)"))
+        messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": json.dumps(verdict)},
+                    {"role": "user", "content": CONFIRM_PROMPT.format(
+                        claims="\n".join(f"{n}. {c}" for n, c in enumerate(claims, 1)),
+                        evidence="\n".join(lines) or "(no names quoted)")}]
+        try:
+            content, notes, _, cut = chat_turn(judge, self.run, f"confirm-{rnd}", messages, schema=CONFIRM_SCHEMA,
+                                               think=True, think_budget=judge.get("think_budget") or 2000,
+                                               max_tokens=4000, timeout=self.timeout)
+            d = extract_json(content)
+            picked = {int(x) for x in d["real"]}
+            detail(f"confirm-{rnd}: {d.get('why', '')[:200]}")
+        except (ModelError, OSError, ValueError, KeyError, TypeError) as e:
+            say(f"  {warn()} couldn't confirm the claims ({str(e)[:100]}); treating them as real")
+            return claims
+        return [c for n, c in enumerate(claims, 1) if n in picked]
 
     def gate(self, verdict: dict, shortcuts: list, api, now: dict, baseline: dict) -> dict:
         """The mechanical gates a reviewer can't overrule: shortcuts and regressed checks."""
@@ -4191,7 +4315,7 @@ class Buckets:
                                       "shortcuts or untouched callers; the checks define this job, so no model "
                                       "review was needed."}
             else:
-                verdict = self.review(plan, results, base, baseline, now, rnd, shortcuts, api)
+                verdict = self.double_review(plan, results, base, baseline, now, rnd, shortcuts, api)
             said_done = verdict["done"]
             verdict = self.gate(verdict, shortcuts, api, now, baseline)
             offload = self.cfg.get("offload", {})
@@ -4465,6 +4589,62 @@ def checks_settle_job(results: list, baseline: dict, now: dict, shortcuts: list,
             and any(not r["ok"] for r in baseline.values())
             and bool(now) and all(r["ok"] for r in now.values())
             and not shortcuts and not (api and api.get("untouched")))
+
+
+TEST_PATH = re.compile(r"(^|/)(test_[^/]+\.py|[^/]+_test\.py|[^/]+\.(test|spec)\.[jt]sx?|__tests__/[^/]+\.[jt]sx?)$")
+TEST_START = re.compile(r"^\s*(?:async\s+)?def\s+(test\w*)\s*\(|^\s*(?:it|test)(?:\.\w+)?\(\s*['\"`]([^'\"`]+)")
+ASSERTION = re.compile(r"\bself\.assert\w+|^\s*assert\b|\bexpect\(|\.assert_\w+\(|\bcall_count\b")
+CALL_ASSERTION = re.compile(r"\.assert_(?:called\w*|any_call|not_called|has_calls)\(|\bcall_count\b|"
+                            r"\.toHaveBeenCalled\w*\(|\.toBeCalled\w*\(|\.toHaveBeenNthCalledWith\(")
+MOCKED = re.compile(r"""patch(?:\.object)?\(\s*(?:[\w.]+\s*,\s*)?['"]([\w.]+)['"]|jest\.spyOn\(\s*\w+\s*,\s*['"](\w+)['"]|"""
+                    r"""jest\.mock\(\s*['"]([^'"]+)['"]""")
+DEFINED = re.compile(r"^\s*(?:async\s+)?def\s+(\w+)|^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)|"
+                     r"^\s*(?:export\s+)?const\s+(\w+)\s*=")
+
+
+def weak_tests(diff: str) -> list[str]:
+    """New tests that can pass whatever the code does: ones whose only assertions check that mocks
+    were called, ones without assertions, and ones that mock the very function this change edits.
+    Mechanical, so the reviewers get it as evidence rather than a verdict."""
+    tests: list[tuple[str, str, list[str]]] = []
+    edited: set[str] = set()
+    file = ""
+    for line in diff.splitlines():
+        if line.startswith("+++ "):
+            file = line[6:] if line.startswith("+++ b/") else ""
+            continue
+        is_test = bool(TEST_PATH.search(file))
+        if line.startswith("@@"):
+            head = DEFINED.search(line.split("@@")[-1]) if not is_test else None
+            if head:
+                edited.add(next(g for g in head.groups() if g))
+            continue
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+        text = line[1:]
+        if not is_test:
+            m = DEFINED.search(text)
+            if m:
+                edited.add(next(g for g in m.groups() if g))
+            continue
+        m = TEST_START.search(text)
+        if m:
+            tests.append((file, m.group(1) or m.group(2), []))
+        elif tests and tests[-1][0] == file:
+            tests[-1][2].append(text)
+    found = []
+    for path, name, body in tests:
+        asserts = [b for b in body if ASSERTION.search(b)]
+        calls = [b for b in asserts if CALL_ASSERTION.search(b)]
+        mocked = {next(g for g in m.groups() if g).split(".")[-1] for b in body for m in MOCKED.finditer(b)}
+        where = f"`{name}` (`{path}`)"
+        if not asserts:
+            found.append(f"{where} has no assertions")
+        elif len(calls) == len(asserts):
+            found.append(f"{where}: all {len(asserts)} assertion(s) only check that mocks were called, not results")
+        for n in sorted(mocked & edited):
+            found.append(f"{where} mocks `{n}`, which this change edits, so it doesn't run the new code")
+    return found
 
 
 def impact_text(api: dict | None) -> str:

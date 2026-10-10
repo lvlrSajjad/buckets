@@ -1470,6 +1470,102 @@ class ReviewSkip(unittest.TestCase):
         self.assertFalse(buckets.checks_settle_job([], self.BASE, self.NOW, [], None))
 
 
+class DoubleReview(unittest.TestCase):
+    """Two machines review each round; a lone "undefined"-style claim while the checks pass is confirmed
+    before it can send working code back for rewriting."""
+
+    def setUp(self):
+        self.repo = make_repo({"src/m.py": "def run(x):\n    return x + 1\n"})
+        self.base = buckets.git(self.repo, "rev-parse", "HEAD").strip()
+        (self.repo / "src/m.py").write_text("def run(x):\n    d = x * 2\n    return d + 1\n")
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qam", "change"], cwd=self.repo, check=True)
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {
+            "mode": "local", "memory": False, "lookups": False,
+            "planner": {"url": "http://mac:11434", "model": "m"},
+            "thinker": {"url": "http://win:8080", "model": "m", "api": "llamacpp"}})
+        self.b = buckets.Buckets(cfg, self.repo, "make run double first")
+        self.b._thinker_up = True
+        self.plan = {"summary": "s"}
+
+    def verdict(self, done, issues=(), files=()):
+        return {"done": done, "summary": "ok" if done else "not yet", "issues": list(issues),
+                "tasks": [{"id": "R2T1", "file": f, "action": "edit", "instructions": "i", "done_when": "w"} for f in files]}
+
+    def run_review(self, mac, win, now, confirm=None):
+        turns = []
+        def fake_ask(cfg, run, label, system, user, schema, validate, **kw):
+            return validate(win if "win" in cfg["url"] else mac)
+        def fake_turn(cfg, run, label, messages, **kw):
+            turns.append((cfg["url"], [m["role"] for m in messages], messages[-1]["content"]))
+            return json.dumps(confirm), "", [], False
+        with mock.patch.object(buckets, "ask_json", fake_ask), mock.patch.object(buckets, "chat_turn", fake_turn), \
+                contextlib.redirect_stderr(io.StringIO()):
+            got = self.b.double_review(self.plan, [], self.base, now, now, 1, [], None)
+        return got, turns
+
+    def test_both_done(self):
+        got, turns = self.run_review(self.verdict(True), self.verdict(True), {"test": {"ok": True}})
+        self.assertTrue(got["done"])
+        self.assertEqual(turns, [])
+
+    def test_a_lone_false_undefined_claim_is_dismissed(self):
+        mac = self.verdict(False, ["`d` is undefined in `run`"], ["src/m.py"])
+        got, turns = self.run_review(mac, self.verdict(True), {"test": {"ok": True}}, {"real": [], "why": "set on line 2"})
+        self.assertTrue(got["done"])
+        self.assertIn("didn't hold up", got["summary"])
+        url, roles, ask = turns[0]
+        self.assertEqual(url, "http://win:8080")                        # the reviewer who said done judges
+        self.assertEqual(roles, ["system", "user", "assistant", "user"])  # its own review is the context
+        self.assertIn("src/m.py:2:    d = x * 2", ask)                  # with where `d` appears now
+
+    def test_a_confirmed_claim_wins(self):
+        mac = self.verdict(False, ["`d` is undefined in `run`"], ["src/m.py"])
+        got, _ = self.run_review(mac, self.verdict(True), {"test": {"ok": True}}, {"real": [1], "why": "w"})
+        self.assertFalse(got["done"])
+        self.assertEqual(got["tasks"][0]["file"], "src/m.py")
+
+    def test_other_issues_win_without_asking(self):
+        win = self.verdict(False, ["the request also asked for a docstring"], ["src/m.py"])
+        got, turns = self.run_review(self.verdict(True), win, {"test": {"ok": True}})
+        self.assertFalse(got["done"])
+        self.assertEqual(turns, [])
+        mac = self.verdict(False, ["`d` is undefined"], ["src/m.py"])     # failing checks: no confirming either
+        got, turns = self.run_review(mac, self.verdict(True), {"test": {"ok": False, "output": "F", "tail": "F"}})
+        self.assertFalse(got["done"])
+        self.assertEqual(turns, [])
+
+    def test_both_not_done_merges_tasks(self):
+        mac = self.verdict(False, ["a"], ["src/m.py"])
+        win = self.verdict(False, ["b"], ["src/m.py", "src/n.py"])
+        got, _ = self.run_review(mac, win, {"test": {"ok": True}})
+        self.assertEqual([t["file"] for t in got["tasks"]], ["src/m.py", "src/n.py"])
+        self.assertEqual([t["id"] for t in got["tasks"]], ["R2T1", "R2T2"])
+        self.assertIn("b", got["issues"][1])
+
+    def test_one_review_when_there_is_no_second_machine(self):
+        self.b.cfg["thinker"]["url"] = "http://mac:11434"
+        self.assertIsNone(self.b.second_reviewer())
+        self.b.cfg["thinker"]["url"] = "http://win:8080"
+        self.b.mode = "claude"
+        self.assertIsNone(self.b.second_reviewer())
+
+    def test_weak_tests(self):
+        diff = ("+++ b/src/m.py\n@@ -1,2 +1,3 @@ def run(x):\n+    d = x * 2\n"
+                "+++ b/test_m.py\n@@ -0,0 +1,12 @@\n"
+                "+    def test_calls(self):\n+        with mock.patch('src.m.run') as r:\n+            go()\n"
+                "+        r.assert_called_once_with(2)\n"
+                "+    def test_value(self):\n+        self.assertEqual(run(1), 3)\n"
+                "+    def test_nothing(self):\n+        run(1)\n"
+                "+++ b/src/a.test.ts\n@@ -0,0 +1,3 @@\n"
+                "+it('saves', () => {\n+  save();\n+  expect(api.post).toHaveBeenCalledWith('x');\n")
+        found = "\n".join(buckets.weak_tests(diff))
+        self.assertIn("`test_calls` (`test_m.py`): all 1 assertion(s) only check that mocks were called", found)
+        self.assertIn("`test_calls` (`test_m.py`) mocks `run`, which this change edits", found)
+        self.assertIn("`test_nothing` (`test_m.py`) has no assertions", found)
+        self.assertIn("`saves` (`src/a.test.ts`): all 1", found)
+        self.assertNotIn("test_value", found)
+
+
 class Offload(unittest.TestCase):
     MODELS = {"planner": {"model": "advisor-m"}, "reader": {"model": "reader-m"},
               "thinker": {"model": "thinker-m", "opencode_model": "prov/thinker-m"},
