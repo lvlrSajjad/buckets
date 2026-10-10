@@ -3856,7 +3856,11 @@ def plain_code(block: str) -> str:
 
 def reindent(code: str, like: str) -> list[str]:
     """New code indented at least as deep as the line it goes next to (a method written flush left)."""
-    lines = code.strip("\n").split("\n")
+    lines = code.split("\n")
+    while lines and not lines[0].strip():  # blank (or whitespace-only) lines at the edges: spacing is ours
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
     first = next((l for l in lines if l.strip()), "")
     have, want = len(first) - len(first.lstrip()), len(like) - len(like.lstrip())
     return [(" " * (want - have) + l if l.strip() else l) for l in lines] if want > have else lines

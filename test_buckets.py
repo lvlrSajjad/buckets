@@ -929,8 +929,8 @@ class FasterRuns(unittest.TestCase):
               "class T:\n    def setUp(self):\n        self.x = 1\n\n    def test_a(self):\n        f(\n"
               "            1,\n        )\n\n\nX = 1\n")
         out = buckets.apply_edits(py, [{"at": "OPS", "mode": "append", "code": "\"c\": (3, False),"},
-                                       {"at": "T", "mode": "append",
-                                        "code": "def test_b(self):\n    self.assertEqual(self.x, 1)"}],
+                                       {"at": "T", "mode": "append",   # a whitespace-only first line, as models write
+                                        "code": "    \ndef test_b(self):\n    self.assertEqual(self.x, 1)\n  \n"}],
                                   buckets.py_decls_text)
         self.assertIn("        2, False),\n    \"c\": (3, False),\n}", out)        # comma added, before the brace
         self.assertIn("            1,\n        )\n\n    def test_b(self):\n        self.assertEqual(self.x, 1)\n\n\nX = 1",

@@ -18,9 +18,9 @@
   },
   "README.md": {
    "declares": [],
-   "hash": "860ace507884",
+   "hash": "2e9c33e075c4",
    "imports": [],
-   "lines": 417,
+   "lines": 472,
    "purpose": "Empty the pool with many small buckets.",
    "source": "docstring"
   },
@@ -39,9 +39,9 @@
     "ReplyTooLong",
     "SchemaGaveUp"
    ],
-   "hash": "cbbcf0dcc5af",
+   "hash": "ad4cf99377a2",
    "imports": [],
-   "lines": 5345,
+   "lines": 5354,
    "purpose": "buckets: empty the pool with many small buckets.",
    "source": "docstring"
   },
@@ -84,11 +84,11 @@
     "Research",
     "CherryPickHelpers"
    ],
-   "hash": "0136231833de",
+   "hash": "89943e9d6074",
    "imports": [
     "buckets.py"
    ],
-   "lines": 1838,
+   "lines": 1845,
    "purpose": "Tests for the parts of buckets that don't need a model: run with `python3 -m unittest -v`.",
    "source": "docstring"
   },
