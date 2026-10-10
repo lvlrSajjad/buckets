@@ -333,6 +333,34 @@ these runs and are unit-tested; none has fired in a live run yet.
   Raw log tails were noise; now only `##[error]`/error lines with one line of context are shown.
 - "Re-run their failed CI jobs" → 3 `ci_rerun` steps (marked ⇡), 30 s.
 
+### 16. Speed day (2026-10-10): read less, then read faster
+
+Same kind of job three times (add a git operation plus its test, in buckets itself, all on Windows):
+
+| Run | Time | Rounds | Notes |
+|---|---|---|---|
+| fix #2, whole-file reading | 23+ min, stopped | 2+ | wrong function edited; the coder re-read 4,400 lines |
+| fix #2, outline + exact parts | 6 min 15 s | 1 | |
+| fix #3, + planned edits | 9 min 48 s | 2 | an edit anchor missed by one character; the test task was dropped |
+| `log` op, + append edits, named-file check, project map | **4 min 37 s** | 1 | both edits applied with no coder; 27 s of it was the model loading after boot |
+
+Where reading time went before: the worker reads prompts at ~200 tokens/s, so a 13k-token file
+picker cost 66 s and a 45k-token whole-file survey 5 min. Thinking was capped at 1,500 tokens for
+light jobs (~40 s); it hit the cap every time.
+
+A 4B (`qwen3:4b-instruct-2507`, 2.5 GB, fully on the RTX 3070) replayed today's real chore prompts:
+~3,000 tokens/s reading (14× the 35B), but routing agreed 13/17, git steps 1/7 (it invented steps),
+file picking in castellan 25–70% overlap. It can't stay loaded beside the 35B (4 GB + 4.5 GB > 8 GB);
+the 35B reloads in ~30 s after each swap, and giving the 35B fewer card layers so both fit cut its
+writing from 38 to 12 tokens/s. Kept installed, unused.
+
+llama.cpp's server with the 35B's experts in RAM (`--n-cpu-moe 41`) and 4,096-token chunks read the
+`llama-bench` 8k prompt at 1,067 tokens/s (Ollama 197); 2,048-token chunks 674–752; 512 (the
+default) 233–271. `--n-cpu-moe 28` overflowed the card: 65 tokens/s. On a real buckets plan prompt
+(8.4k tokens) the server reads ~650 tokens/s and writes ~35; a one-file opencode edit took ~20 s.
+Plain `-ngl 8` (whole layers on the card, like a naive split) wrote at 12.8 tokens/s, so Ollama was
+already smarter than that.
+
 ## Lessons so far
 
 - The coder is the cheap part either way; mode only changes who plans and reviews.

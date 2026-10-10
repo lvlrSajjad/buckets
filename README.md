@@ -11,8 +11,13 @@ judgments, and always answer in JSON that the script validates.
 
 First time? See "Set up on your own machines" below, then come back here.
 
-1. **Worker machine** (the one running the models, if it isn't this one): turn it on and make
-   sure Ollama is running there. Leave it plugged in.
+1. **Worker machine** (the one running the models, if it isn't this one): turn it on and leave
+   it plugged in. If its models run on llama.cpp's server (the faster setup below), start that:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File C:\llama\start-buckets-server.ps1
+   ```
+   and leave its window open (or have Windows start it at login, see "llama.cpp on the worker").
+   Otherwise make sure Ollama is running there.
 2. **This machine:** make sure Ollama is running if the advisor lives here.
 3. **Check everything is ready:**
    ```bash
@@ -56,7 +61,7 @@ Writing good requests:
 
 | `--doctor` says | Do this |
 |---|---|
-| `BAD coder server` | The worker machine is asleep, off, or on another network. Wake it; check Ollama is running there. |
+| `BAD coder server` | The worker machine is asleep, off, or on another network. Wake it; check its llama.cpp server window (or Ollama) is running there. |
 | `BAD planner server` | Start Ollama on the advisor's machine (or rerun `buckets setup` without an advisor). |
 | `BAD … model …` | Pull it on the machine `--doctor` names: `ollama pull <model>`. |
 | `BAD claude CLI logged in` | Run the `auth login` command it prints. Only needed for `--claude`. |
@@ -368,6 +373,52 @@ tokens instead of 8,700. Bigger repos fall back to one line per folder, with the
 touches listed file by file. The git assistant sees the recent work too ("push what you just did").
 Changes under `.buckets/` never count as uncommitted work. Turn it off with `"memory": false` in
 `.buckets.json`.
+
+## llama.cpp on the worker (faster reading)
+
+On a machine with a small graphics card, llama.cpp's own server reads several times faster than
+Ollama for a mixture-of-experts model like Qwen 3.6 35B-A3B: it keeps every layer's attention and
+the model's working memory on the card, leaves the experts in RAM, and works through prompts in
+4,096-token chunks, copying the experts to the card once per chunk. Measured on the RTX 3070 laptop
+(8 GB) with 32 GB of RAM:
+
+| | Reads | Writes | One-file coder edit |
+|---|---|---|---|
+| Ollama | ~197 tokens/s | ~38 tokens/s | 47–78 s |
+| llama.cpp server | ~650 tokens/s (1,067 in `llama-bench`) | ~35 tokens/s | ~20 s |
+
+Setup on the worker (Windows): put llama.cpp's CUDA build in `C:\llama`, then a start script that
+uses the model file Ollama already has (`ollama show <model> --modelfile` prints its path):
+
+```powershell
+# C:\llama\start-buckets-server.ps1
+$model = "C:\Users\<you>\.ollama\models\blobs\sha256-…"
+ollama stop qwen3.6:35b-a3b *> $null   # both can't hold the 35B in 32 GB of RAM
+& C:\llama\llama-server.exe -m $model --alias "qwen3.6:35b-a3b" `
+  -ngl 99 --n-cpu-moe 41 -b 4096 -ub 4096 --load-mode none `
+  -c 65536 -np 1 -fa on -ctk q8_0 -ctv q8_0 `
+  --jinja --reasoning-format deepseek --no-reasoning-preserve `
+  --host 0.0.0.0 --port 8080
+```
+
+Allow the port once (Administrator PowerShell):
+`New-NetFirewallRule -DisplayName "llama-server (buckets)" -Direction Inbound -Protocol TCP -LocalPort 8080 -Action Allow -Profile Private`.
+To start it at login, put a shortcut in the Startup folder:
+
+```powershell
+$s = (New-Object -ComObject WScript.Shell).CreateShortcut("$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\buckets-server.lnk")
+$s.TargetPath = "powershell.exe"
+$s.Arguments = "-ExecutionPolicy Bypass -WindowStyle Minimized -File C:\llama\start-buckets-server.ps1"
+$s.Save()
+```
+
+Then point the worker's roles at it in `~/.config/buckets/config.json`: for `reader`, `thinker` and
+`coder`, `"url": "http://<worker>:8080"` and `"api": "llamacpp"`, and give opencode a provider for
+it (an `@ai-sdk/openai-compatible` provider with `baseURL` `http://<worker>:8080/v1`; the coder's
+`opencode_model` names it, e.g. `llamacpp_windows/qwen3.6:35b-a3b`). Going back to Ollama is the
+same two settings. Tuning: `--n-cpu-moe` is how many layers keep their experts in RAM; on an 8 GB
+card, 32 is the edge (28 ran out of card memory and fell to 65 tokens/s), and 41 leaves the room
+4,096-token chunks need.
 
 ## Where things go
 
