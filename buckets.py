@@ -1790,7 +1790,7 @@ TASK_SCHEMA = {
         "where": {"type": "string"},
         "edits": {"type": "array", "items": {
             "type": "object", "properties": {"at": {"type": "string"},
-                                             "mode": {"type": "string", "enum": ["after", "before", "replace"]},
+                                             "mode": {"type": "string", "enum": ["append", "after", "before", "replace"]},
                                              "code": {"type": "string"}},
             "required": ["at", "mode", "code"]}},
     },
@@ -1948,9 +1948,10 @@ text and the files it opens itself, and it cannot run commands):
 - "edits": when you know the exact code, put it here too and the system applies it directly (much
   faster than a coder session; the coder takes over if an edit doesn't apply). Each edit: "at" is a
   name from the outline ("GitAssistant.op_gitignore", "parse_args") or a few complete lines copied
-  exactly from the code shown; "mode" is "after" (add the code after it), "before", or "replace"
-  (the code replaces it: for a name, the whole function or class); "code" is the new code, with its
-  indentation. Example: {{"at": "GitAssistant.op_gitignore", "mode": "after",
+  exactly from the code shown; "mode" is "append" (add the code at the end of the named class, dict
+  or list: a new method, test or entry; the system finds the end), "after" (add the code after it),
+  "before", or "replace" (the code replaces it: for a name, the whole function or class); "code" is
+  the new code, with its indentation. Example: {{"at": "GitAssistant.op_gitignore", "mode": "after",
   "code": "    def op_status(self, a, yes):\\n        return self.git(\\"status\\", \\"-sb\\")"}}.
   A new file: one edit with "at" "" and "mode" "replace". The edits must do the WHOLE task (the
   system marks it done once they apply); if you can't write all of it exactly, give [] and let the
@@ -2244,7 +2245,7 @@ def validate_tasks(tasks: list, repo: Path, max_tasks: int, prefix: str) -> list
                     "done_when": str(t["done_when"]).strip(), "read_first": reads[:6],
                     "where": str(t.get("where") or "").strip(),
                     "edits": [{"at": str(e.get("at") or ""), "code": str(e["code"]),
-                               "mode": e.get("mode") if e.get("mode") in ("after", "before") else "replace"}
+                               "mode": e.get("mode") if e.get("mode") in ("append", "after", "before") else "replace"}
                               for e in t.get("edits") or [] if isinstance(e, dict) and "code" in e]})
     return out
 
@@ -2499,10 +2500,13 @@ class Buckets:
         if not members:
             return read_spec(self.repo, self.index.files, f"{path}:{lo}-{lo + longest}", self.cfg["max_file_chars"])
         last = members[-1]
+        setup = [m for m in members[:-1] if m["name"].split(".")[-1] in ("setUp", "setup", "__init__", "beforeEach")]
         return (read_spec(self.repo, self.index.files, f"{path}:{lo}-{min(lo + 6, members[0]['line'] - 1)}",
                           self.cfg["max_file_chars"])
                 + f"\n  … `{cls['name']}` is {hi - lo + 1} lines; its members (name one to see it):\n"
                 + outline_text(members) + "\n"
+                + "".join(read_spec(self.repo, self.index.files, f"{path}:{m['line']}-{m['end']}",
+                                    self.cfg["max_file_chars"]) + "\n" for m in setup[:1])
                 + read_spec(self.repo, self.index.files, f"{path}:{last['line']}-{last['end']}", self.cfg["max_file_chars"]))
 
     def facts_cover(self, long: list[str], ctx: str) -> bool:
@@ -2946,6 +2950,17 @@ class Buckets:
         else:
             plan = ask_json(self.planner, self.run, "plan", SYSTEM, prompt, PLAN_SCHEMA, validate,
                             max_tokens=16000, timeout=self.timeout, **self.think_budget())
+        missing = [f for f in paths_in_text(self.request, self.index.files)
+                   if plan["tasks"] and f not in {t["file"] for t in plan["tasks"]}]
+        if missing:
+            say(f"  {warn()} the plan has no task for {', '.join(missing)}, which the request names; asking for the rest")
+            again = ask_json(self.planner, self.run, "plan-complete", SYSTEM,
+                             prompt + "\n\nYour plan so far:\n" + json.dumps(plan, indent=1)
+                             + f"\n\nIt has no task for {', '.join(missing)}, which the request names. Reply with "
+                               "the complete plan: the tasks above and the missing ones.",
+                             PLAN_SCHEMA, validate, think=False, max_tokens=16000, timeout=self.timeout)
+            if len(again["tasks"]) > len(plan["tasks"]):
+                plan = again
         self.run.save("plan.json", plan)
         return plan
 
@@ -3556,6 +3571,32 @@ def reindent(code: str, like: str) -> list[str]:
     return [(" " * (want - have) + l if l.strip() else l) for l in lines] if want > have else lines
 
 
+CLOSER = re.compile(r"[\]\)\}][\]\)\};,]*")
+
+
+def append_into(lines: list[str], span: tuple[int, int], code: str) -> list[str]:
+    """New code at the end of a block: before the closing bracket of a dict, list or braced class,
+    or after the last line of a Python class; indented like the block's body, a comma added after
+    the last entry, a blank line between members."""
+    lo, hi = span
+    body = [k for k in range(lo + 1, hi) if lines[k].strip()]
+    header = next((k for k in range(lo, hi) if not lines[k].lstrip().startswith("@")), lo)
+    first = next((k for k in body if k > header), None)
+    like = lines[first] if first is not None else " " * 4 + lines[header]
+    new = reindent(code, like)
+    # a bracket-closed block (dict, list, braced class); a Python class (header ends with ":") never is,
+    # even when its last method ends with a lone ")"
+    closed = CLOSER.fullmatch(lines[hi - 1].strip()) is not None and not lines[header].rstrip().endswith(":")
+    member = re.match(r"\s*(class|def|async def|function|export|public|private|protected|static|\w+\s*\()",
+                      new[0] if new else "") is not None
+    if closed:
+        last = max((k for k in body if k < hi - 1), default=None)
+        if last is not None and not member and not lines[last].rstrip().endswith((",", "{", "[", "(")):
+            lines[last] = lines[last].rstrip() + ","
+        return lines[:hi - 1] + ([""] if member and last is not None else []) + new + lines[hi - 1:]
+    return lines[:hi] + [""] + new + lines[hi:]
+
+
 def apply_edits(text: str, edits: list[dict], decls_for=None) -> str:
     """The planner's edits, in order. "at" is a declaration name (resolved with `decls_for` on the
     text as it is now) or lines copied from the code, matched once ignoring indentation."""
@@ -3569,6 +3610,11 @@ def apply_edits(text: str, edits: list[dict], decls_for=None) -> str:
             if d and any(name.split(".")[-1] in l for l in lines[d["line"] - 1:d["end"]]):
                 span = (d["line"] - 1, d["end"])
         by_name = span is not None
+        if mode == "append":
+            if span is None:
+                raise ValueError(f"edit {i}: append needs the name of a class, dict or list, not `{at[:60]}`")
+            text = "\n".join(append_into(lines, span, plain_code(e["code"])))
+            continue
         if span is None:
             want = [l.strip() for l in at.split("\n")]
             if not any(want):
@@ -3887,23 +3933,33 @@ def last_branch(repo: Path) -> dict:
     return d
 
 
-def cmd_merge(repo: Path) -> int:
-    d = last_branch(repo)
+def merge_run(repo: Path) -> str:
+    """Fast-forward the latest run's branch into the branch it started from and delete it."""
+    d = next((d for d in runs_newest_first(repo, ("code", "pick")) if d.get("branch")
+              and branch_exists(repo, d["branch"])), None)
+    if not d:
+        raise RuntimeError("no buckets branch to merge in this repo")
     branch, into = d["branch"], d["merge_into"]
     if changed_paths(repo):
-        die(dirty_tree(repo))
-    if not d.get("done"):
-        say(f"{warn()} that run finished but wasn't done; merging anyway because you asked")
+        raise RuntimeError(dirty_tree(repo))
+    note = "" if d.get("done") else " (that run finished but wasn't done; merged anyway because you asked)"
     if git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() != into:
         git(repo, "checkout", "-q", into)
     r = subprocess.run(["git", "merge", "--ff-only", branch], cwd=repo, capture_output=True, text=True)
     if r.returncode != 0:
-        say(f"{warn()} {into} has moved since the run, so it can't fast-forward. Merge it yourself: "
-            f"{paint(f'git merge {branch}', 'bold')}")
-        return 1
+        raise RuntimeError(f"{into} has moved since the run, so it can't fast-forward; merge it yourself: "
+                           f"git merge {branch}")
     git(repo, "branch", "-q", "-d", branch)
-    say(f"{ok()} merged {paint(branch, 'cyan')} into {into} and deleted the branch (nothing pushed)")
-    return 0
+    return f"merged {branch} into {into} and deleted the branch (nothing pushed){note}"
+
+
+def cmd_merge(repo: Path) -> int:
+    try:
+        say(f"{ok()} {merge_run(repo)}")
+        return 0
+    except RuntimeError as e:
+        say(f"{warn()} {e}")
+        return 1
 
 
 def cmd_discard(repo: Path, yes: bool) -> int:
@@ -4067,6 +4123,8 @@ GIT_OPS = {
     "pr_merge": ("merge a PR: {number, method: squash|merge|rebase}", True, True),
     "branch_delete": ("delete a branch: {name, remote?, force?}", True, False),
     "prune_merged": ("delete local branches already merged into a base: {base?}", True, False),
+    "run_merge": ("bring the latest buckets run's branch into the branch it started from (fast-forward) and "
+                  "delete it, like `buckets merge`: {}", True, False),
     "init": ("make this folder a git repository: {branch?}", True, False),
     "gitignore": ("add entries to .gitignore: {entries: [..]}", True, False),
     "repo_create": ("create the GitHub repository for this folder under the folder's GitHub account and push it "
@@ -4475,6 +4533,9 @@ class GitAssistant:
             self.git("push", "-q", self.remote, "--delete", name)
         return ""
 
+    def op_run_merge(self, a, yes):
+        return merge_run(self.repo)
+
     def op_init(self, a, yes):
         if self.is_repo():
             return "already a git repository"
@@ -4834,6 +4895,10 @@ def main(argv: list[str] | None = None) -> int:
                               f" · {repo.name} · {elapsed()}")
 
 
+CHAT_COMMANDS = {"merge": "merge", "last": "last", "discard": "discard", "pr": "pr", "setup": "setup",
+                 "doctor": "--doctor", "--doctor": "--doctor"}
+
+
 def chat_loop(argv: list[str]) -> int:
     """`buckets` on its own: ask, answer, ask again, in this folder. Each line is one request (the same
     as `buckets "<line>"` with the same options), so follow-ups like "name it buckets" or "yes go
@@ -4860,9 +4925,14 @@ def chat_loop(argv: list[str]) -> int:
             continue
         if line.lower() in ("exit", "quit", "bye", "q", ":q"):
             return 0
+        # Typed like the shell command (buckets merge, buckets "fix x"): the same thing here.
+        line = re.sub(r"^buckets\s+", "", line).strip()
+        if len(line) > 1 and line[0] == line[-1] and line[0] in "\"'":
+            line = line[1:-1].strip()
+        words = [line.lower()] if line.lower() in CHAT_COMMANDS else ["--", line]
         _T0 = time.time()
         try:
-            main(argv + ["--", line])
+            main(argv + [CHAT_COMMANDS.get(line.lower(), w) for w in words])
         except SystemExit:  # die() ends the request, not the chat
             pass
         except KeyboardInterrupt:

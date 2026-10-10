@@ -85,7 +85,8 @@ buckets "cherry pick 5f58e84 and 9bbaf79 onto main"             # cherry-pick
 ```
 
 Or run `buckets` on its own for a chat in the current folder: each line you type is one request
-(with the same options), and you leave with `exit` or Ctrl-D. Ctrl-C stops the current request,
+(with the same options), and you leave with `exit` or Ctrl-D. `merge`, `last`, `discard` and `pr`
+work there as commands (typed with or without `buckets` in front), and "merge it" works too. Ctrl-C stops the current request,
 not the chat.
 
 ```
@@ -174,8 +175,9 @@ definitions and uses of code names in your request, and the closest tests. The p
 **`grep`** (exact, via `git grep`) alongside `read` and `uses`.
 
 **Planned edits skip the coder:** when the planner knows the exact code, each task carries
-`edits`: new code to put after, before or instead of a declaration it names (`GitAssistant.op_squash`)
-or of lines copied from the code shown. buckets finds the place itself (from the file as it is at
+`edits`: new code to append at the end of a class, dict or list it names (a new method, test or
+`GIT_OPS` entry; buckets finds the end and adds the comma), or to put after, before or instead of a
+declaration it names (`GitAssistant.op_squash`) or of lines copied from the code shown. buckets finds the place itself (from the file as it is at
 that moment, so earlier edits don't throw it off), matches the indentation and spacing, checks that
 a Python file still parses, and commits; only edits that don't apply (or don't parse) go to a coder
 session. The edits must do the whole task, or be left empty. Outlines include module-level

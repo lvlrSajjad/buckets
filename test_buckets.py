@@ -1,4 +1,5 @@
 """Tests for the parts of buckets that don't need a model: run with `python3 -m unittest -v`."""
+import ast
 import contextlib
 import io
 import json
@@ -922,6 +923,52 @@ class FasterRuns(unittest.TestCase):
             buckets.apply_edits(text, [{"at": "Box.nothing", "mode": "after", "code": "x = 1"}], decls)
         with self.assertRaisesRegex(ValueError, "appears 2 times"):
             buckets.apply_edits("a\nb\na\n", [{"at": "a\n", "mode": "replace", "code": "c"}])
+
+    def test_append_at_the_end_of_a_class_dict_or_braced_block(self):
+        py = ("OPS = {\n    \"a\": (1, True),\n    \"b\": (\n        2, False)\n}\n\n\n"
+              "class T:\n    def setUp(self):\n        self.x = 1\n\n    def test_a(self):\n        f(\n"
+              "            1,\n        )\n\n\nX = 1\n")
+        out = buckets.apply_edits(py, [{"at": "OPS", "mode": "append", "code": "\"c\": (3, False),"},
+                                       {"at": "T", "mode": "append",
+                                        "code": "def test_b(self):\n    self.assertEqual(self.x, 1)"}],
+                                  buckets.py_decls_text)
+        self.assertIn("        2, False),\n    \"c\": (3, False),\n}", out)        # comma added, before the brace
+        self.assertIn("            1,\n        )\n\n    def test_b(self):\n        self.assertEqual(self.x, 1)\n\n\nX = 1",
+                      out)                                                       # after the call's ")", not inside
+        ast.parse(out)
+        ts = "export class Box {\n  open(): void {\n    go();\n  }\n}\n"
+        decls = lambda _t: [{"name": "Box", "line": 1, "end": 5, "signature": "class Box"}]
+        out = buckets.apply_edits(ts, [{"at": "Box", "mode": "append", "code": "close(): void {\n  stop();\n}"}], decls)
+        self.assertEqual(out, "export class Box {\n  open(): void {\n    go();\n  }\n\n  close(): void {\n"
+                              "    stop();\n  }\n}\n")
+        with self.assertRaisesRegex(ValueError, "append needs the name"):
+            buckets.apply_edits(py, [{"at": "X = 1", "mode": "append", "code": "y"}], buckets.py_decls_text)
+
+    def test_a_file_the_request_names_gets_a_task(self):
+        (self.repo / "test_m.py").write_text("def test_run():\n    pass\n")
+        b = buckets.Buckets(self.b.cfg, self.repo, "make run double x in src/m.py and add a test in test_m.py")
+        b.on_windows, b.material = True, lambda mode: "material"
+        task = {"file": "src/m.py", "action": "edit", "instructions": "x", "done_when": "y", "where": "", "edits": []}
+        labels = []
+        def fake(cfg, run, label, system, user, schema, validate, **kw):
+            labels.append(label)
+            tasks = [task] if label == "plan" else [task, {**task, "file": "test_m.py"}]
+            return validate({"summary": "s", "tasks": tasks})
+        with mock.patch.object(buckets, "ask_json", fake), contextlib.redirect_stderr(io.StringIO()) as err:
+            plan = b.plan({}, {})
+        self.assertEqual(labels, ["plan", "plan-complete"])
+        self.assertEqual([t["file"] for t in plan["tasks"]], ["src/m.py", "test_m.py"])
+        self.assertIn("no task for test_m.py", err.getvalue())
+
+    def test_merge_from_the_chat_and_the_git_assistant(self):
+        lines = iter(["buckets merge", 'buckets "fix it"', "last", "exit"])
+        seen = []
+        with mock.patch("builtins.input", lambda prompt="": next(lines)), \
+                mock.patch.object(buckets, "main", lambda argv: seen.append(argv)), \
+                contextlib.redirect_stderr(io.StringIO()):
+            buckets.chat_loop([])
+        self.assertEqual(seen, [["merge"], ["--", "fix it"], ["last"]])
+        self.assertIn("run_merge", buckets.GIT_OPS)
 
     def test_planned_edits_skip_the_coder(self):
         task = self.task([{"at": "run", "mode": "after", "code": "def double(x):\n    return 2 * x"},
