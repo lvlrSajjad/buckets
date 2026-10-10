@@ -5229,7 +5229,11 @@ class GitAssistant:
     def op_tags(self, a, yes):
         count = a.get("count", 10)
         fmt = "%(refname:short) %(creatordate:short)"
-        return self.git("tag", "--sort=-creatordate", f"--format={fmt}")
+        result = self.git("tag", "--sort=-creatordate", f"--format={fmt}")
+        if result:
+            lines = result.splitlines()
+            return '\n'.join(lines[:count])
+        return result
 
     def op_switch(self, a, yes):
         self.git("switch", a["name"])
