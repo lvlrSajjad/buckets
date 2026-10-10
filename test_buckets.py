@@ -1248,6 +1248,28 @@ class BigRepoTools(unittest.TestCase):
         self.assertTrue(buckets.drop_leftover_blanks(repo, base, "s.tsx"))
         self.assertEqual((repo / "s.tsx").read_text(), "<A>\n  <B />\n\n\n  <C />\n</A>\n")  # its own blanks kept
 
+    def test_the_review_sees_where_the_requests_phrases_still_are(self):
+        repo = make_repo({"s.tsx": '<Row title={"Original ETA"} />\n<Row title={"Tracking Code"} />\n'})
+        base = buckets.git(repo, "rev-parse", "HEAD").strip()
+        (repo / "s.tsx").write_text('<Row title={"Tracking Code"} />\n')
+        commit_all(repo, "half done")
+        b = buckets.Buckets(buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False}), repo,
+                            "Hide the Original ETA and Tracking Code fields")
+        self.assertIn('"tracking code" still in s.tsx:1', b.phrases_now(base))
+        self.assertNotIn("original eta", b.phrases_now(base))
+
+    def test_edit_anchors_given_as_paths_and_coders_shown_quoted_text(self):
+        src = '<A>\n  <Row title={"x"} />\n</A>\n'
+        with self.assertRaisesRegex(ValueError, "empty"):
+            buckets.apply_edits(src, [{"at": "app/screens/s.tsx", "mode": "after", "code": "y"}], buckets.py_decls_text)
+        self.assertEqual(buckets.apply_edits(src, [{"at": 'app/s.tsx:  <Row title={"x"} />', "mode": "replace",
+                                                    "code": '  <Row title={"z"} />'}], None), src.replace('"x"', '"z"'))
+        repo = make_repo({"s.tsx": "".join(f"<Row n={i} />\n" for i in range(60)) + '<Row title={"Original ETA"} />\n'})
+        b = buckets.Buckets(buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False}), repo, "x")
+        focus = b.task_focus({"file": "s.tsx", "action": "edit", "where": "", "edits": [],
+                              "instructions": 'Remove the DetailRow with title "Original ETA".'})
+        self.assertIn('61| <Row title={"Original ETA"} />', focus)
+
     def test_a_type_and_a_value_with_one_name_arent_an_api_change(self):
         b = buckets.Buckets.__new__(buckets.Buckets)
         surface = {"h.tsx": [{"kind": "interface", "name": "H", "signature": "interface H"},

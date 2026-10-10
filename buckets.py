@@ -2193,7 +2193,7 @@ text and the files it opens itself, and it cannot run commands):
 - "edits": when you know the exact code, put it here too and the system applies it directly (much
   faster than a coder session; the coder takes over if an edit doesn't apply). Each edit: "at" is a
   name from the outline ("GitAssistant.op_gitignore", "parse_args") or a few complete lines copied
-  exactly from the code shown; "mode" is "append" (add the code at the end of the named class, dict
+  exactly from the code shown, never the file's path; "mode" is "append" (add the code at the end of the named class, dict
   or list: a new method, test or entry; the system finds the end), "after" (add the code after it),
   "before", or "replace" (the code replaces it: for a name, the whole function or class); "code" is
   the new code, with its indentation. Example: {{"at": "GitAssistant.op_gitignore", "mode": "after",
@@ -3627,6 +3627,29 @@ class Buckets:
         say(f"  {ok()} {task['id']} {task['file']} ({int(time.time() - start)}s): {paint(note, 'dim')}")
         return {**task, "status": "done", "note": f"DONE: {note}"}
 
+    def phrases_now(self, base: str) -> str:
+        """Where the request's phrases and quoted strings appear in the changed files now, found
+        mechanically: for "remove X" the proof that X is gone (or isn't), for "add X" that it's there."""
+        changed = [f for f in git(self.repo, "diff", "--name-only", f"{base}..HEAD").split() if (self.repo / f).is_file()]
+        terms = sorted({" ".join(r[i:j]) for r in word_runs(self.request) for i in range(len(r))
+                        for j in range(i + 2, min(len(r), i + 4) + 1)}
+                       | {a or b for a, b in re.findall(r'"([^"]{3,})"|`([^`]{3,})`', self.request)})
+        if not changed or not terms:
+            return ""
+        rows, texts = [], {f: (self.repo / f).read_text(errors="replace").splitlines() for f in changed}
+        for t in terms:
+            rx = re.compile(re.escape(t).replace(r"\ ", r"[\s_-]*"), re.I)
+            hits = [(f, i, line) for f, lines in texts.items() for i, line in enumerate(lines, 1) if rx.search(line)]
+            if len(hits) > 6:  # the files' own subject (work order details in its own screen), not a thing to find
+                terms = [x for x in terms if x != t]
+                continue
+            rows += [f"- \"{t}\" still in {f}:{i}: {line.strip()[:120]}" for f, i, line in hits]
+        if not rows:
+            return ("\nThe request's phrases (" + ", ".join(f'"{t}"' for t in terms[:8]) + ") no longer appear in "
+                    "the changed files (checked mechanically).\n")
+        return ("\nWhere the request's phrases appear in the changed files now (checked mechanically):\n"
+                + "\n".join(rows[:30]) + "\n")
+
     def task_focus(self, task: dict) -> str:
         """The code a task is about, read now (earlier tasks may have moved it), so the coder starts at
         its place instead of reading a long file to find it: the task's "where", or else the places its
@@ -3666,6 +3689,11 @@ class Buckets:
             text = task["instructions"]
             specs = [f"{a}-{b or a}" for a, b in re.findall(r"\blines? (\d+)(?:\s*[-–]\s*(\d+))?", text)]
             specs += re.findall(r"\b([A-Z]\w*\.[A-Za-z_]\w*)\b", text) + request_names(text)
+            # Quoted UI text or strings ("Original ETA"): the lines they're on, with some context
+            lines = (self.repo / f).read_text(errors="replace").splitlines()
+            for q in [a or b for a, b in re.findall(r'"([^"\n]{3,80})"|\'([^\'\n]{3,80})\'', text)][:6]:
+                where_q = [i for i, l in enumerate(lines, 1) if q in l][:2]
+                specs += [f"{max(1, i - 6)}-{min(n, i + 8)}" for i in where_q]
             longest = 150
         spots: list[tuple[int, int]] = []
         for spec in specs:
@@ -3767,7 +3795,7 @@ class Buckets:
             checks="\n".join(chk) or "(no checks configured)",
             shortcuts=("\nShortcuts found in the diff (must be replaced with real fixes):\n"
                        + "\n".join(f"- {h}" for h in shortcuts) + "\n") if shortcuts else "",
-            impact=impact_text(api),
+            impact=impact_text(api) + self.phrases_now(base),
             diff=self.diff_text(base), rules=TASK_RULES.format(max_tasks=self.cfg["max_tasks"]))
 
         def validate(d):
@@ -4183,6 +4211,8 @@ def apply_edits(text: str, edits: list[dict], decls_for=None) -> str:
     text as it is now) or lines copied from the code, matched once ignoring indentation."""
     for i, e in enumerate(edits, 1):
         lines, at, mode = text.split("\n"), plain_code(e["at"]).strip("\n"), e["mode"]
+        if "\n" not in at:  # "at" written as the file's path ("src/a.tsx", "src/a.tsx:Box.open"): not a place in it
+            at = re.sub(r"^\s*[\w@.\-]+(?:/[\w@.\-]+)+\.\w+(?::|\s+|$)", "", at, count=1)
         name = at.strip().strip("`").removesuffix("()")
         span = None
         if name and "\n" not in name and decls_for and re.fullmatch(r"[\w.$]+", name):
