@@ -1935,6 +1935,12 @@ class GitAssistantTests(unittest.TestCase):
             self.g.op_log({}, False)
         mock_git.assert_called_with("log", "--oneline", "-n", "10")
 
+    def test_op_branches(self):
+        from unittest.mock import patch
+        with patch.object(self.g, "git", return_value="") as mock_git:
+            self.g.op_branches({}, False)
+        mock_git.assert_called_with("branch", "-vv")
+
 
 if __name__ == "__main__":
     unittest.main()
