@@ -1098,6 +1098,101 @@ class ProjectMemoryTests(unittest.TestCase):
         self.assertNotIn("Project map", self.b.context(with_map=False))
 
 
+class FakeLlamaServer:
+    """A stand-in for llama.cpp's server: /v1/models, and /v1/chat/completions streamed as SSE with
+    reasoning_content, content and timings. Ollama's /api/tags isn't there (404)."""
+
+    def __init__(self, thoughts: int = 5):
+        import http.server
+        import threading as th
+        self.bodies = []
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                if self.path != "/v1/models":
+                    self.send_error(404)
+                    return
+                payload = json.dumps({"object": "list", "data": [{"id": "big:35b"}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                outer.bodies.append(body)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                chunks = []
+                if body["chat_template_kwargs"]["enable_thinking"]:
+                    chunks += [{"choices": [{"delta": {"reasoning_content": f"step {i}. "}}]} for i in range(thoughts)]
+                answer = json.dumps({"ok": True})
+                chunks += [{"choices": [{"delta": {"content": answer[:5]}}]},
+                           {"choices": [{"delta": {"content": answer[5:]}, "finish_reason": "stop"}],
+                            "timings": {"prompt_n": 120, "prompt_ms": 100.0, "predicted_n": 7,
+                                        "predicted_ms": 200.0, "cache_n": 30}}]
+                for c in chunks:
+                    self.wfile.write(f"data: {json.dumps(c)}\n\n".encode())
+                self.wfile.write(b"data: [DONE]\n\n")
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        th.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+
+
+class LlamaCppServer(unittest.TestCase):
+    def setUp(self):
+        self.run = buckets.Run(make_repo({"a.py": "x = 1\n"}))
+
+    def test_a_call_with_thinking_and_a_schema(self):
+        fake = FakeLlamaServer()
+        try:
+            cfg = {"url": fake.url, "model": "big:35b", "api": "llamacpp", "num_ctx": 65536, "think": True}
+            schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+            with contextlib.redirect_stderr(io.StringIO()):
+                got = buckets.ask_json(cfg, self.run, "plan", "sys", "go", schema, lambda d: d)
+                self.assertEqual(got, {"ok": True})
+                self.assertEqual(buckets.server_models(fake.url), {"big:35b"})
+        finally:
+            fake.close()
+        sent = fake.bodies[0]
+        self.assertTrue(sent["stream"])
+        self.assertTrue(sent["chat_template_kwargs"]["enable_thinking"])
+        self.assertNotIn("response_format", sent)                # no grammar while it may think
+        saved = json.loads(next(self.run.dir.glob("*plan.json")).read_text())
+        self.assertEqual(saved["thinking"], "step 0. step 1. step 2. step 3. step 4. ")
+        self.assertEqual(saved["stats"]["prompt_eval_count"], 120)
+        self.assertEqual(saved["stats"]["prompt_eval_duration"], 100_000_000)  # ms -> ns, like Ollama's
+        self.assertEqual(saved["stats"]["prompt_eval_cached_count"], 30)
+
+    def test_the_thinking_budget_and_the_schema_after_a_cut(self):
+        fake = FakeLlamaServer(thoughts=50)
+        try:
+            cfg = {"url": fake.url, "model": "big:35b", "api": "llamacpp", "num_ctx": 65536, "think": True,
+                   "think_budget": 10}
+            schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                got = buckets.ask_json(cfg, self.run, "plan", "sys", "go", schema, lambda d: d)
+        finally:
+            fake.close()
+        self.assertEqual(got, {"ok": True})
+        self.assertIn("thought for 10 tokens (the budget)", err.getvalue())
+        again = fake.bodies[-1]
+        self.assertFalse(again["chat_template_kwargs"]["enable_thinking"])
+        self.assertEqual(again["response_format"]["json_schema"]["schema"], schema)   # enforced now
+        self.assertIn("Your notes from thinking", again["messages"][1]["content"])
+        buckets.unload(cfg)                                      # a no-op for llama.cpp, no error
+
+
 class ReviewSkip(unittest.TestCase):
     BASE = {"typecheck": {"ok": False}, "test": {"ok": True}}
     NOW = {"typecheck": {"ok": True}, "test": {"ok": True}}

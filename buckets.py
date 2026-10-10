@@ -740,10 +740,7 @@ def _stream_chat(url: str, body: dict, label: str, timeout: float, quiet: bool =
                 thinking.append(m["thinking"])
                 ntok += 1
                 nthink += 1
-                if think_budget and nthink >= think_budget and not content:
-                    raise ThinkingCut("".join(thinking), nthink)  # leaving the `with` closes the request
-                if nthink % 100 == 0 and not content and thinking_loops("".join(thinking)):
-                    raise ThinkingCut("".join(thinking), nthink, looped=True)
+                guard_thinking(thinking, nthink, content, think_budget)  # leaving the `with` closes the request
             if m.get("content"):
                 content.append(m["content"])
                 ntok += 1
@@ -755,6 +752,74 @@ def _stream_chat(url: str, body: dict, label: str, timeout: float, quiet: bool =
     if not final:
         raise StreamCut(f"{label}: the reply stopped early (did the model server crash?)")
     return "".join(content), "".join(thinking), {k: v for k, v in final.items() if k != "message"}
+
+
+def guard_thinking(thinking: list[str], nthink: int, content: list[str], think_budget: int) -> None:
+    """Stop thinking at the budget, or as soon as it goes in circles."""
+    if think_budget and nthink >= think_budget and not content:
+        raise ThinkingCut("".join(thinking), nthink)
+    if nthink % 100 == 0 and not content and thinking_loops("".join(thinking)):
+        raise ThinkingCut("".join(thinking), nthink, looped=True)
+
+
+def openai_body(body: dict) -> dict:
+    """buckets' (Ollama-shaped) request as llama.cpp's server takes it. A JSON schema is enforced only
+    without thinking: as a grammar it would apply from the first token and leave no room to think
+    (the reply is still checked against the schema, with a retry)."""
+    out = {"model": body["model"], "messages": body["messages"], "stream": True,
+           "max_tokens": body["options"]["num_predict"], "temperature": body["options"].get("temperature", 0.3),
+           "chat_template_kwargs": {"enable_thinking": bool(body["think"])}}
+    if body.get("format") and not body["think"]:
+        out["response_format"] = {"type": "json_schema", "json_schema": {"name": "answer", "schema": body["format"]}}
+    return out
+
+
+def _stream_chat_llamacpp(url: str, body: dict, label: str, timeout: float, quiet: bool = False,
+                          think_budget: int = 0) -> tuple[str, str, dict]:
+    """The same call against llama.cpp's server (OpenAI-style, streamed): its reasoning and content,
+    with its timings mapped onto Ollama's stats, so the rest of buckets doesn't care which it was."""
+    req = urllib.request.Request(url.rstrip("/") + "/v1/chat/completions",
+                                 data=json.dumps(openai_body(body)).encode(),
+                                 headers={"Content-Type": "application/json"})
+    content, thinking, ntok, nthink, finish, timings = [], [], 0, 0, None, {}
+    tick = Ticker(f"  {friendly(label)}: reading") if not quiet else contextlib.nullcontext()
+    with tick, urllib.request.urlopen(req, timeout=timeout) as resp:
+        for raw in resp:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            msg = json.loads(data)
+            if "error" in msg:
+                err = msg["error"].get("message", str(msg["error"])) if isinstance(msg["error"], dict) else str(msg["error"])
+                if "context" in err and "exceed" in err:
+                    raise ModelError(f"{label}: {err}")
+                raise StreamCut(f"{label}: {err[:300]}")
+            timings = msg.get("timings") or timings
+            for choice in msg.get("choices") or []:
+                delta = choice.get("delta") or {}
+                if delta.get("reasoning_content"):
+                    thinking.append(delta["reasoning_content"])
+                    ntok += 1
+                    nthink += 1
+                    guard_thinking(thinking, nthink, content, think_budget)
+                if delta.get("content"):
+                    content.append(delta["content"])
+                    ntok += 1
+                finish = choice.get("finish_reason") or finish
+            if not quiet:
+                tick.text = f"  {friendly(label)}: {'writing' if content else 'thinking'} ({ntok} tokens)"
+    if finish is None:
+        raise StreamCut(f"{label}: the reply stopped early (did the model server crash?)")
+    ms = lambda k: int(float(timings.get(k, 0)) * 1e6)  # noqa: E731
+    stats = {"done_reason": "length" if finish == "length" else "stop", "load_duration": 0,
+             "prompt_eval_count": timings.get("prompt_n", 0), "prompt_eval_duration": ms("prompt_ms"),
+             "prompt_eval_cached_count": timings.get("cache_n", 0),
+             "eval_count": timings.get("predicted_n", ntok), "eval_duration": ms("predicted_ms"),
+             "total_duration": ms("prompt_ms") + ms("predicted_ms")}
+    return "".join(content), "".join(thinking), stats
 
 
 def chat(cfg: dict, run: Run, label: str, system: str, user: str, *, schema: dict | None = None,
@@ -776,10 +841,11 @@ def chat(cfg: dict, run: Run, label: str, system: str, user: str, *, schema: dic
     if schema:
         body["format"] = schema
     budget = (cfg.get("think_budget", 0) if think_budget is None else think_budget) if think else 0
+    stream = _stream_chat_llamacpp if cfg.get("api") == "llamacpp" else _stream_chat
     for attempt in range(1, 4):
         try:
-            content, thinking, stats = _stream_chat(cfg["url"], body, label, timeout, quiet,
-                                                    budget if body["think"] else 0)
+            content, thinking, stats = stream(cfg["url"], body, label, timeout, quiet,
+                                              budget if body["think"] else 0)
         except ThinkingCut as cut:
             # Thinking without a cap can run for many minutes on the Mac. Stop at the budget and ask
             # for the answer, handing the notes over; the shared prompt prefix comes from the cache.
@@ -4081,7 +4147,10 @@ def planner_on_worker(offload: dict) -> bool:
 
 
 def unload(model_cfg: dict) -> None:
-    """Ask Ollama to drop a model from memory now (it reloads in ~20–30 s next time)."""
+    """Ask Ollama to drop a model from memory now (it reloads in ~20–30 s next time). A llama.cpp
+    server holds one model for as long as it runs, so there's nothing to drop."""
+    if model_cfg.get("api") == "llamacpp":
+        return
     try:
         body = json.dumps({"model": model_cfg["model"], "keep_alive": 0}).encode()
         req = urllib.request.Request(model_cfg["url"].rstrip("/") + "/api/generate", data=body,
@@ -4092,10 +4161,20 @@ def unload(model_cfg: dict) -> None:
 
 
 def server_models(url: str) -> set[str] | None:
-    try:
-        with urllib.request.urlopen(url.rstrip("/") + "/api/tags", timeout=5) as r:
-            names = {m["name"] for m in json.load(r)["models"]}
-    except (urllib.error.URLError, OSError, ValueError):
+    """The models a server offers: Ollama's list, or a llama.cpp server's (its --alias); None when
+    nothing answers."""
+    names = None
+    for path, read in (("/api/tags", lambda d: {m["name"] for m in d["models"]}),
+                       ("/v1/models", lambda d: {m["id"] for m in d["data"]})):
+        try:
+            with urllib.request.urlopen(url.rstrip("/") + path, timeout=5) as r:
+                names = read(json.load(r))
+                break
+        except urllib.error.HTTPError:
+            continue  # not this kind of server; try the other
+        except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError):
+            return None
+    if names is None:
         return None
     return names | {n.removesuffix(":latest") for n in names}
 
@@ -4119,7 +4198,7 @@ def doctor(cfg: dict, repo: Path | None) -> int:
     for role in ("planner", "coder"):
         c = cfg[role]
         models = server_models(c["url"])
-        line(models is not None, f"{role} server {c['url']}")
+        line(models is not None, f"{role} server {c['url']}" + (" (llama.cpp)" if c.get("api") == "llamacpp" else ""))
         if models is not None:
             line(c["model"] in models, f"{role} model {c['model']}")
     cl = shutil.which(cfg["claude"]["bin"])
