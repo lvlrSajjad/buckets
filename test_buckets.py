@@ -1834,5 +1834,12 @@ class GitAssistantTests(unittest.TestCase):
         mock_git.assert_called_with("status", "-sb")
 
 
+    def test_op_log(self):
+        from unittest.mock import patch
+        with patch.object(self.g, "git", return_value="log output") as mock_git:
+            self.g.op_log({}, False)
+        mock_git.assert_called_with("log", "--oneline", "-n", "10")
+
+
 if __name__ == "__main__":
     unittest.main()
