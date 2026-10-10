@@ -4443,6 +4443,7 @@ GIT_OPS = {
                     "(needs a commit first): {name?: defaults to the folder name, visibility?: private|public "
                     "(default private), description?}", True, True),
     "status": ("the working tree: changed and untracked files, the branch and how far ahead or behind its upstream it is: {}", False, False),
+    "log": ("show the last {count} commits (default 10): {count?}", False, False),
 }
 
 GIT_SCHEMA = {
@@ -4767,6 +4768,10 @@ class GitAssistant:
 
     def op_status(self, a, yes):
         return self.git("status", "-sb")
+
+    def op_log(self, a, yes):
+        count = a.get("count", 10)
+        return self.git("log", "--oneline", "-n", str(count))
 
     def op_pr_create(self, a, yes):
         head = a.get("head") or self.current()
