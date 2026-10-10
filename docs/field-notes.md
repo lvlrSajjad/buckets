@@ -401,8 +401,42 @@ What the first runs got wrong, and the fix each led to:
 Speeds: the worker reads ~650 tokens/s on llama.cpp (see 16); the request-words search costs
 ~1 s in one repo and ~8 s with the 3,182-file backend as a related repo.
 
+### 18. The Mac as a second 35B, and who should plan (2026-10-10 night)
+
+The Windows laptop's 35B file (21.7 GB, Ollama's GGUF) was copied to the Mac and registered in its
+Ollama with the same settings (`RENDERER`/`PARSER qwen3.5`, `draft_num_predict 2`: Ollama already
+uses the model's multi-token-prediction layers, which llama.cpp leaves unused).
+
+| | Reads | Writes | Notes |
+|---|---|---|---|
+| Mac M2 Pro, 35B-A3B (Ollama, Metal) | ~475 tok/s | **~48 tok/s** | 100% on the GPU even at 64k context; loads in ~10 s |
+| Windows, 35B-A3B (llama.cpp, experts in RAM) | ~650 tok/s | ~35 tok/s | |
+| Mac, 27B dense (the old advisor) | ~85 tok/s | ~9 tok/s | |
+
+The copy itself: laptop → Mac ran at ~27 KB/s on every port tried (8090, 11434, 8080) while ping
+was 3–8 ms, Mac → laptop ~5 MB/s, and the Mac's internet ~2 MB/s. Not the Mac's VPN (V2Box), not
+MTU 1280 → 1500, not Large Send Offload; SMB (port 445) with a local sharing user ran at
+30–40 MB/s. Something on Windows slows its other outgoing ports; buckets' heavy traffic is
+Mac → laptop (prompts), so it's barely affected, but it's worth finding.
+
+A/B, the same request on buckets (add a read-only `tags` git operation with `{count?}`):
+
+| | A: Windows plans and reviews | B: the Mac plans and reviews (Windows reads and codes) |
+|---|---|---|
+| Time | 4m 32s, 1 round | 4m 41s, 2 rounds (the "tests before" cached) |
+| Result | **wrong and dangerous**: `git tag … 10` creates a tag named "10"; the review said done | **correct**: lists, then keeps the newest `count`; tests default and custom count |
+| Planning (think + answer) | 58 s + 35 s | 48 s + 23 s |
+| Choosing parts | 16 s on Windows | 32 s on the Mac (now moved to the reader) |
+
+Same model on both, so one sample doesn't make the Mac "smarter"; what it shows is that two
+independent reviews of one change disagree, and the disagreement is where the bug was. Both tests
+only mocked `git`, which is how A's bug passed. Made the default: the Mac plans and reviews,
+Windows routes, reads, chooses parts and codes; the Mac's model is unloaded after each run.
+
 ## Lessons so far
 
+- Two looks at the same change catch more than one: the review that caught a dangerous bug was the
+  second, independent one (field notes 18). Mocked tests only check which arguments were passed.
 - On a big repo, time follows how much code a change touches, not the repo's size, once the
   request's own words are searched mechanically (a vague request: 13 min → 5 min, the same as
   naming the files).

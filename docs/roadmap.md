@@ -43,6 +43,18 @@ behind these are in [field-notes.md](field-notes.md).
   it), suggestions to use Claude (heavy local runs) and to have Claude review (risky local results).
   See field notes 17.
 
+## Two brains (the Mac and Windows both run the 35B)
+
+Where a run's time goes now (field notes 18, B): planning and review thinking ~45%, tests ~20%,
+reading ~15%, coding 0–25% (only when edits fall back to a coder). Ideas, by what they buy:
+- **Double review** (quality, ~no time): both review each round at once; any issue wins.
+- **Overlap** (time): review reads the diff while the tests run; the planner starts thinking on the
+  facts while the reader is still choosing parts.
+- **Look-ups while thinking** (time, with a reading loop): the planner asks "read X, answer Y", the
+  other machine answers, the planner keeps going.
+- **Parallel coding lanes** (time, when coders run): independent tasks on both machines at once.
+- **Two plans compared** (quality): agreement → go; disagreement → a third look or a Claude review.
+
 ## Next (from the big-repo tests)
 
 - **Edit anchors:** the planner keeps naming the file's path as `at`; a worked example in the plan

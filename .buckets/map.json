@@ -10,17 +10,17 @@
   },
   ".gitignore": {
    "declares": [],
-   "hash": "c803d608f39d",
+   "hash": "282f4c2c12cb",
    "imports": [],
-   "lines": 1,
+   "lines": 2,
    "purpose": "",
    "source": ""
   },
   "README.md": {
    "declares": [],
-   "hash": "f9f26dbb397a",
+   "hash": "a532b0ad9f16",
    "imports": [],
-   "lines": 523,
+   "lines": 544,
    "purpose": "Empty the pool with many small buckets.",
    "source": "docstring"
   },
@@ -39,33 +39,33 @@
     "ReplyTooLong",
     "SchemaGaveUp"
    ],
-   "hash": "b7427fd28d02",
+   "hash": "34634faffac8",
    "imports": [],
-   "lines": 5449,
+   "lines": 5872,
    "purpose": "buckets: empty the pool with many small buckets.",
    "source": "docstring"
   },
   "docs/field-notes.md": {
    "declares": [],
-   "hash": "842eca181624",
+   "hash": "1c0acf5876b2",
    "imports": [],
-   "lines": 371,
+   "lines": 420,
    "purpose": "A record of building and using `buckets`: what broke, what we measured, and how each real run went, including the failures.",
    "source": "docstring"
   },
   "docs/handoff.md": {
    "declares": [],
-   "hash": "41941609ceda",
+   "hash": "5918719ea2bd",
    "imports": [],
-   "lines": 67,
-   "purpose": "Where buckets stands after the first build session, for whoever (or whichever session) picks it up next.",
+   "lines": 65,
+   "purpose": "Where buckets stands after the second build day, for whoever (or whichever session) picks it up next.",
    "source": "docstring"
   },
   "docs/roadmap.md": {
    "declares": [],
-   "hash": "10703e3221dc",
+   "hash": "b2b7d82c424d",
    "imports": [],
-   "lines": 93,
+   "lines": 121,
    "purpose": "What's left, roughly in the order I'd do it, with why and how big.",
    "source": "docstring"
   },
@@ -73,6 +73,7 @@
    "declares": [
     "GitAssistantTests",
     "FasterRuns",
+    "BigRepoTools",
     "Escalation",
     "TargetedReading",
     "CodeIndexTests",
@@ -81,14 +82,13 @@
     "Offload",
     "ClaudeMode",
     "FakeModels",
-    "Research",
-    "FakeLlamaServer"
+    "Research"
    ],
-   "hash": "eb83b8d49407",
+   "hash": "b69cb1250a24",
    "imports": [
     "buckets.py"
    ],
-   "lines": 1954,
+   "lines": 2106,
    "purpose": "Tests for the parts of buckets that don't need a model: run with `python3 -m unittest -v`.",
    "source": "docstring"
   },

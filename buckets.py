@@ -3200,7 +3200,7 @@ class Buckets:
             return [str(x).strip() for x in d.get("read") or [] if str(x).strip()][:n]
 
         shown = re.findall(r"^=== (.+?) ===$", ctx, re.M)
-        wanted = ask_json(self.planner, self.run, "focus", SYSTEM,
+        wanted = ask_json(self.chores, self.run, "focus", SYSTEM,  # reading with a tiny answer: the fast reader
                           FOCUS_PROMPT.format(goal=self.goal(mode), request=self.request, reads=n,
                                               shown=", ".join(shown) or "nothing", outlines=maps),
                           FOCUS_SCHEMA, check, think=False, max_tokens=1500, timeout=self.timeout)

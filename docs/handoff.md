@@ -1,4 +1,4 @@
-# Handoff (2026-10-10, evening)
+# Handoff (2026-10-11)
 
 Where buckets stands after the second build day, for whoever (or whichever session) picks it up
 next. Details live in [../README.md](../README.md), [field-notes.md](field-notes.md) (every
@@ -18,8 +18,9 @@ shell: `merge`, `discard`, `last`, `pr`, `review`, `setup`, `--doctor`.
 
 | Role | Where | Model |
 |---|---|---|
-| Worker: routes, reads, plans, reviews, codes | Windows laptop (RTX 3070 8 GB, 32 GB RAM), **llama.cpp server** at `192.168.1.111:8080` | `qwen3.6:35b-a3b` (Ollama's GGUF, experts in RAM, 4,096-token chunks): ~650 tok/s reading, ~35 tok/s writing |
-| Advisor (escalations only) | the Mac, Ollama at `localhost:11434` | `qwen3.6-planner` (27B, 64k context): ~85 tok/s reading, ~9 tok/s writing |
+| Reader and coder: routes, picks files, chooses parts, codes | Windows laptop (RTX 3070 8 GB, 32 GB RAM), **llama.cpp server** at `192.168.1.111:8080` | `qwen3.6:35b-a3b` (Ollama's GGUF, experts in RAM, 4,096-token chunks): ~650 tok/s reading, ~35 tok/s writing |
+| Planner and reviewer | the Mac (M2 Pro, 32 GB), Ollama at `localhost:11434` | the same `qwen3.6:35b-a3b`, copied from Windows: ~475 tok/s reading, ~48 tok/s writing; ~21 GB while loaded, unloaded after each run |
+| Unused, installed | the Mac | `qwen3.6-planner` (27B, the old advisor: ~85 / ~9 tok/s) |
 | Claude (`--claude`, the ladder's last step, `buckets review`) | `claude` CLI, Team login | Sonnet by default |
 | Unused, installed | Windows Ollama | `qwen3:4b-instruct-2507` (fast but too inaccurate for chores; field notes 16) |
 
@@ -60,6 +61,9 @@ adds files, spans 3+ files, needed rounds, or isn't done.
    keep the Project filter (`buckets/look-at-the-current-work-order-s-1010-1832`, slot 33) if the
    owner wants it. `.buckets/` there is ignored through `.git/info/exclude`.
 2. **castellan PRs** #1–#3 (from the first day): CI re-runs were triggered; check their state.
-3. The roadmap's "Next (from the big-repo tests)": edit anchors, more matches, a reading loop on
+3. **Two brains** (roadmap): a double review first (both machines review each round at once), then
+   parallel coding lanes, look-ups answered while the other thinks, plans compared.
+4. **Windows → Mac is slow on most ports** (~27 KB/s; SMB is fast): field notes 18.
+5. The roadmap's "Next (from the big-repo tests)": edit anchors, more matches, a reading loop on
    the llama.cpp prompt cache, speculative decoding with the model's MTP layers, an MCP tool for
    Claude Code.
