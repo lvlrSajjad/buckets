@@ -36,6 +36,7 @@ itself was left exactly as found (no branches, no `.buckets/`).
    definite-error claim while checks pass is confirmed by the other reviewer; weak new tests are listed
    mechanically for the reviewers. Still to see live: a disagreement (the confirm step).
 2b. **Big-file refactor: mechanical extract** (agreed 2026-10-11). Baseline first: "move the logic of `packages/shared/app/screens/assessment-questionnaire/assessment-questionnaire-screen.tsx` (3,687 lines) into a `useAssessmentQuestionnaire` hook" in ecotrak-mobile, local (20 min cap) then `--claude`, throwaway branches deleted after. Then build extract-to-hook (roadmap, Mechanical hands) and rerun locally.
+2c. **Merge ecotrak / ecotrak-techs screen variants** (owner's harder test, 2026-10-11): needs 2b's mechanical moves plus a declaration matcher (prototype: `node tools/variant-decls.cjs`, `python3 tools/variant-rank.py <ts> tools/variant-decls.cjs <screens dir>`). Ladder: rfp-details → inventory-details → create-invoice (shared parts only).
 3. **Prompt layout for cache reuse:** byte-stable front (system, tool schema in fixed order, guidance,
    map, facts), the step's instructions last; check `prompt_eval_cached_count`. Ollama: constant
    `num_ctx`, a longer `keep_alive` during a run.
