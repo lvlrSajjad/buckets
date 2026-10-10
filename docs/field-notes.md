@@ -433,8 +433,28 @@ independent reviews of one change disagree, and the disagreement is where the bu
 only mocked `git`, which is how A's bug passed. Made the default: the Mac plans and reviews,
 Windows routes, reads, chooses parts and codes; the Mac's model is unloaded after each run.
 
+### 19. Look-ups while planning, and a review that broke correct code (2026-10-11)
+
+Planning became a conversation with tools: `read` and `search` answered here, exactly; `ask` sent to
+Windows, which reads the named files and answers with `path:line` (real lines attached). The same
+request three times on buckets ("make `buckets review` say which run it's reviewing, add a test"):
+
+| Attempt | Setup | Time | Result |
+|---|---|---|---|
+| 1 | old single-shot planner (look-ups not loaded) | 9m 44s, 3 rounds | **not done**: edited `Buckets.review()` instead of `cmd_review`; the test never passed |
+| 2 | look-ups (4 reads, 1 ask; Windows answered in 12 s) | 14m 30s, 2 rounds | round 1 **correct** at 3m 07s; then the review claimed `d` was undefined (it was set above the hunk), round 2 rewrote it to read an empty run folder and mocked the test to pass. **Wrong** |
+| 3 | + review sees whole changed functions, + loop check ignores quoted code | **4m 58s, 1 round** | **correct** (`d["request"][:100]`), real test; merged |
+
+Two causes in attempt 2: the loop detector cut the review's thinking at 400 tokens because it quoted
+the same line of code twice, and the diff's three context lines didn't show where `d` was set.
+Attempt 3's planner didn't need a look-up (the first read already had `cmd_review`), so the
+look-ups' own effect is shown by attempt 2's round 1, not attempt 3. A double review with an
+"evidence or it didn't happen" rule for "undefined"-style claims is the next guard.
+
 ## Lessons so far
 
+- A wrong review is worse than none: one false "undefined variable" turned a 3-minute success into a
+  broken result. Reviews need the whole changed functions, and claims checks can't confirm need a second look.
 - Two looks at the same change catch more than one: the review that caught a dangerous bug was the
   second, independent one (field notes 18). Mocked tests only check which arguments were passed.
 - On a big repo, time follows how much code a change touches, not the repo's size, once the
