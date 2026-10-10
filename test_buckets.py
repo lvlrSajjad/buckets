@@ -1359,6 +1359,27 @@ class BigRepoTools(unittest.TestCase):
         self.assertEqual(buckets.git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip(), start)
         self.assertNotIn("buckets-review", buckets.git(repo, "worktree", "list"))
 
+    def test_buckets_review_prints_run_info_before_claude(self):
+        repo = make_repo({"a.ts": "1\n"})
+        start = buckets.git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        buckets.git(repo, "switch", "-q", "-c", "buckets/y")
+        (repo / "a.ts").write_text("2\n")
+        commit_all(repo, "change")
+        buckets.git(repo, "switch", "-q", start)
+        run = buckets.Run(repo)
+        long_request = "x" * 150
+        (run.dir / "meta.json").write_text(json.dumps({"repo": str(repo), "kind": "code", "request": long_request,
+                                                        "done": True, "branch": "buckets/y", "merge_into": start}))
+        def fake(cfg, run, label, prompt, where, **kw):
+            return "Verdict: looks good", 0.12
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {})
+        with mock.patch.object(buckets, "claude_call", fake), mock.patch.object(buckets, "claude_ready", lambda c: True), \
+                contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(buckets.cmd_review(cfg, repo), 0)
+        output = out.getvalue()
+        self.assertIn(long_request[:100], output)
+        self.assertIn("buckets/y", output)
+
     def test_a_type_and_a_value_with_one_name_arent_an_api_change(self):
         b = buckets.Buckets.__new__(buckets.Buckets)
         surface = {"h.tsx": [{"kind": "interface", "name": "H", "signature": "interface H"},
