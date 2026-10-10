@@ -1201,6 +1201,62 @@ class LlamaCppServer(unittest.TestCase):
         buckets.unload(cfg)                                      # a no-op for llama.cpp, no error
 
 
+class BigRepoTools(unittest.TestCase):
+    """What the first big-repo run (a 2,000-file React Native monorepo) needed."""
+
+    def test_request_words_find_paths_and_code(self):
+        repo = make_repo({
+            "app/screens/work-order-details/screen.tsx": 'export const S = () => <Row title={"Original ETA"} />\n',
+            "app/models/work-order-details/model.ts": "export const M = { createdAt: 1, originalEta: 2 }\n",
+            "app/screens/invoice/screen.tsx": "export const I = 1\n"})
+        self.assertEqual(buckets.word_runs("Does work order details have created at? Hide `x` and a/b.c"),
+                         [["work", "order", "details"], ["created", "at"]])
+        self.assertEqual(buckets.spellings(["created", "at"]), ["created-at", "created_at", "createdAt", "CreatedAt"])
+        leads = buckets.request_leads(repo, "Hide the Original ETA from the work order details",
+                                      buckets.list_files(repo, []))
+        self.assertIn('Paths spelling "work order details" (2 files)', leads)
+        self.assertNotIn("invoice", leads)
+        self.assertIn('Code and text matching "original eta"', leads)
+        self.assertIn('screen.tsx:1: export const S = () => <Row title={"Original ETA"} />', leads)   # UI text
+        self.assertIn("model.ts:1: export const M = { createdAt: 1, originalEta: 2 }", leads)            # identifier
+
+    def test_checks_that_rewrite_files_arent_detected(self):
+        repo = make_repo({"package.json": json.dumps({"workspaces": ["apps/*"], "scripts": {
+            "lint": "yarn workspaces foreach --all run lint", "test": "jest"}}),
+            "yarn.lock": "", "apps/a/package.json": json.dumps({"scripts": {"lint": "eslint . --fix && yarn format"}})})
+        self.assertEqual(buckets.detect_checks(repo, {}), {"test": "yarn run test"})
+
+    def test_fixers_in_workspace_packages(self):
+        repo = make_repo({"package.json": json.dumps({"workspaces": ["packages/*"]}),
+                          "packages/shared/package.json": json.dumps({"prettier": {"semi": False}}),
+                          "packages/shared/eslint.config.js": "",
+                          "node_modules/.bin/eslint": "", "node_modules/prettier/bin/prettier.cjs": ""})
+        fixers = buckets.detect_fixers(repo, {})
+        self.assertEqual(fixers, [
+            "cd packages/shared && ../../node_modules/.bin/eslint --fix --quiet --no-warn-ignored {js_files@packages/shared}",
+            "cd packages/shared && node ../../node_modules/prettier/bin/prettier.cjs --write --ignore-unknown {files@packages/shared}"])
+        self.assertEqual(buckets.fill_fixer(fixers[1], ["packages/shared/app/a.tsx", "apps/x/b.ts"]),
+                         "cd packages/shared && node ../../node_modules/prettier/bin/prettier.cjs --write --ignore-unknown app/a.tsx")
+        self.assertIsNone(buckets.fill_fixer(fixers[0], ["README.md"]))
+        self.assertEqual([buckets.fixer_name(f) for f in fixers], ["eslint", "prettier"])
+
+    def test_leftover_blank_lines_go_and_nothing_else_moves(self):
+        repo = make_repo({"s.tsx": "<A>\n  <Row\n    x={1}\n  />\n  <B />\n\n\n  <C />\n</A>\n"})
+        base = buckets.git(repo, "rev-parse", "HEAD").strip()
+        (repo / "s.tsx").write_text("<A>\n\n  <B />\n\n\n  <C />\n</A>\n")        # a row removed, a blank left
+        commit_all(repo, "remove a row")
+        self.assertTrue(buckets.drop_leftover_blanks(repo, base, "s.tsx"))
+        self.assertEqual((repo / "s.tsx").read_text(), "<A>\n  <B />\n\n\n  <C />\n</A>\n")  # its own blanks kept
+
+    def test_a_type_and_a_value_with_one_name_arent_an_api_change(self):
+        b = buckets.Buckets.__new__(buckets.Buckets)
+        surface = {"h.tsx": [{"kind": "interface", "name": "H", "signature": "interface H"},
+                             {"kind": "const", "name": "H", "signature": "const H = () =>"}]}
+        b.surface_before, b.repo = surface, make_repo({"a.txt": "x"})
+        b._index = mock.Mock(surface=lambda: {"h.tsx": list(reversed(surface["h.tsx"]))}, uses=lambda *a: {"uses": []})
+        self.assertEqual(b.api_impact("HEAD"), {"removed": [], "changed": [], "added": [], "untouched": []})
+
+
 class ReviewSkip(unittest.TestCase):
     BASE = {"typecheck": {"ok": False}, "test": {"ok": True}}
     NOW = {"typecheck": {"ok": True}, "test": {"ok": True}}

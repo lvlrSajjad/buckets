@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
+import difflib
 import fnmatch
 import hashlib
 import json
@@ -1298,6 +1299,31 @@ def batches(blocks: list[str], budget: int) -> list[list[str]]:
 # ---------------------------------------------------------------- checks
 
 
+WRITES = re.compile(r"--fix\b|--write\b|\b(yarn|npm run|pnpm( run)?|bun run)\s+format\b")
+
+
+def script_writes(repo: Path, scripts: dict, name: str) -> bool:
+    """Whether a package script changes files when run, here or (for "run it in every workspace"
+    scripts) in any workspace's script of the same name."""
+    if WRITES.search(scripts.get(name, "")):
+        return True
+    if not re.search(r"foreach|workspaces|\s-r\b|--recursive|\bturbo\b|\bnx\b|lerna", scripts.get(name, "")):
+        return False
+    try:
+        spaces = json.loads((repo / "package.json").read_text()).get("workspaces") or []
+    except (OSError, json.JSONDecodeError):
+        return False
+    spaces = spaces.get("packages", []) if isinstance(spaces, dict) else spaces
+    for pattern in spaces:
+        for pkg in repo.glob(f"{pattern.rstrip('/')}/package.json"):
+            try:
+                if WRITES.search((json.loads(pkg.read_text()).get("scripts") or {}).get(name, "")):
+                    return True
+            except (OSError, json.JSONDecodeError):
+                continue
+    return False
+
+
 def detect_checks(repo: Path, rc: dict) -> dict[str, str]:
     if rc.get("checks") is not None:
         return dict(rc["checks"])
@@ -1320,6 +1346,8 @@ def detect_checks(repo: Path, rc: dict) -> dict[str, str]:
                               ("lint", ["lint"]), ("test", ["test"])):
             hit = next((o for o in options if o in scripts), None)
             if hit and "no test specified" not in scripts[hit]:
+                if script_writes(repo, scripts, hit):
+                    continue  # a check must only look: this one rewrites files (eslint --fix, prettier --write)
                 checks[name] = runner.format(hit)
         if "typecheck" not in checks and (repo / "tsconfig.json").exists():
             checks["typecheck"] = "npx --no-install tsc --noEmit -p ."
@@ -1633,6 +1661,76 @@ def grep_text(repo: Path, pattern: str, paths: list[str], limit: int = 60) -> st
     return f"GREP /{pattern}/{where} (exact, {len(lines)} match{'es' if len(lines) != 1 else ''}):\n{body}{more}"
 
 
+STOP = set("""a an the of from to for and or but not no is are was were be been do does did have has
+had we i you it its this that these those there here what which who how why when where can could should
+would will shall may might must please just also only some any all each every more most other into onto
+with without as if then than so about over under again new old our your my their them they he
+she his her me us via per hide show add remove delete make change fix update set get let use using need
+needs want wants field fields value values file files screen page view thing things way part one two
+""".split())
+
+
+def word_runs(text: str) -> list[list[str]]:
+    """Runs of meaningful words in a request ("hide the work order details" -> [["work", "order",
+    "details"]]); code names, paths and quoted strings are left to the other lookups."""
+    text = re.sub(r"`[^`]*`|\"[^\"]*\"|'[^']*'|\S*[/\\.]\S*", " | ", text)
+    runs, cur = [], []
+    for tok in re.findall(r"[A-Za-z][A-Za-z0-9]*|[^A-Za-z0-9\s]+", text):
+        w = tok.lower()
+        if not tok[0].isalpha() or w in STOP or len(w) < 2:
+            if cur:
+                runs.append(cur)
+            cur = []
+        else:
+            cur.append(w)
+    return [r for r in runs + ([cur] if cur else []) if r]
+
+
+def spellings(words: list[str]) -> list[str]:
+    """How a phrase is written in code: kebab, snake, camel and Pascal case."""
+    camel = words[0] + "".join(w.capitalize() for w in words[1:])
+    return list(dict.fromkeys(["-".join(words), "_".join(words), camel, camel[0].upper() + camel[1:]]))
+
+
+def request_leads(repo: Path, request: str, files, limit_files: int = 12) -> str:
+    """Where the request's own words appear, found without a model: folder and file names that spell
+    a phrase of it (work order details -> work-order-details/), and code or UI text that does
+    (created at -> createdAt, created_at, "Created At")."""
+    out = []
+    runs = word_runs(request)
+    phrases = sorted({tuple(r[i:j]) for r in runs for i in range(len(r)) for j in range(i + 2, min(len(r), i + 4) + 1)},
+                     key=len, reverse=True)
+    taken: set[str] = set()
+    placed: set[tuple] = set()  # phrases that name folders or files: places, not things to search for
+    for words in phrases:
+        names = {n.lower() for n in spellings(list(words))}
+        hits = [f for f in files if f not in taken and any(
+            part.lower().split(".")[0] in names or part.lower() in names for part in f.split("/"))]
+        if hits:
+            placed.update(words[i:j] for i in range(len(words)) for j in range(i + 1, len(words) + 1))
+            taken.update(hits)
+            shown = sorted(hits, key=len)[:limit_files]
+            out.append(f"Paths spelling \"{' '.join(words)}\" ({len(hits)} file{'s' if len(hits) != 1 else ''}): "
+                       + ", ".join(shown) + (" …" if len(hits) > limit_files else ""))
+    for words in [p for p in phrases if len(p) <= 3 and p not in placed]:
+        pattern = "|".join(re.escape(x) for x in spellings(list(words))) + "|" + "[[:space:]]+".join(map(re.escape, words))
+        r = subprocess.run(["git", "grep", "-n", "-I", "-i", "-w", "-E", "-e", f"({pattern})"], cwd=repo,
+                           capture_output=True, text=True, errors="replace")
+        lines = [l for l in r.stdout.splitlines() if not l.startswith((MEMORY_DIR + "/",))]
+        if not lines or len(lines) > 400:  # nothing, or too common a phrase to point anywhere
+            continue
+        by_file: dict[str, list[str]] = {}
+        for l in lines:
+            f, _, rest = l.partition(":")
+            by_file.setdefault(f, []).append(rest)
+        # hits in the request's place (the files its words name) first, then the busiest files
+        rows = [f"  {f}:{h.split(':', 1)[0]}: {h.split(':', 1)[1].strip()[:110]}"
+                for f in sorted(by_file, key=lambda f: (f not in taken, -len(by_file[f])))[:6] for h in by_file[f][:2]]
+        out.append(f"Code and text matching \"{' '.join(words)}\" ({len(lines)} line{'s' if len(lines) != 1 else ''} in "
+                   f"{len(by_file)} file{'s' if len(by_file) != 1 else ''}):\n" + "\n".join(rows))
+    return "\n\n".join(out)
+
+
 def find_package_dir(repo: Path, name: str) -> Path | None:
     """An installed npm package's folder: the repo's node_modules, then each workspace package's."""
     for base in [repo, *sorted(p.parent for p in repo.glob("*/package.json")),
@@ -1721,23 +1819,50 @@ FIXER_GROUPS = {"js_files": (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts
                 "py_files": (".py",), "go_files": (".go",), "files": None}
 
 
+ESLINT_CONFIGS = ("eslint.config.js", "eslint.config.mjs", "eslint.config.cjs", "eslint.config.ts", ".eslintrc",
+                  ".eslintrc.js", ".eslintrc.cjs", ".eslintrc.json", ".eslintrc.yml", ".eslintrc.yaml")
+PRETTIER_CONFIGS = (".prettierrc", ".prettierrc.json", ".prettierrc.js", ".prettierrc.cjs", ".prettierrc.yaml",
+                    ".prettierrc.yml", "prettier.config.js", "prettier.config.cjs", "prettier.config.mjs")
+
+
+def js_fixers(repo: Path, d: str, pkg: str) -> list[str]:
+    """ESLint (errors only, so a touched file doesn't collect unrelated warning fixes) and Prettier
+    for one folder with its own config, run from that folder with the tools installed there or at
+    the root; Prettier through node, since its launcher isn't always executable."""
+    here, out = repo / d, []
+    up = "/".join(".." for _ in Path(d).parts) if d != "." else "."
+    cd = f"cd {shlex.quote(d)} && " if d != "." else ""
+    at = f"@{d}" if d != "." else ""
+    tool = lambda rel: next((f"{loc}/{rel}" for loc, base in ((".", here), (up, repo)) if (base / rel).exists()), None)
+    eslint = tool("node_modules/.bin/eslint")
+    if eslint and any((here / n).exists() for n in ESLINT_CONFIGS):
+        out.append(f"{cd}{eslint} --fix --quiet --no-warn-ignored {{js_files{at}}}")
+    prettier = tool("node_modules/prettier/bin/prettier.cjs") or tool("node_modules/prettier/bin-prettier.js")
+    if prettier and (any((here / n).exists() for n in PRETTIER_CONFIGS) or '"prettier":' in pkg):
+        out.append(f"{cd}node {prettier} --write --ignore-unknown {{files{at}}}")
+    return out
+
+
 def detect_fixers(repo: Path, rc: dict) -> list[str]:
     """Formatters and lint auto-fixers the repo already uses. `.buckets.json` "fixers" overrides;
-    placeholders {files}, {js_files}, {py_files}, {go_files} become the changed files."""
+    placeholders {files}, {js_files}, {py_files}, {go_files} become the changed files ({js_files@dir}:
+    the ones under dir, relative to it)."""
     if rc.get("fixers") is not None:
         return list(rc["fixers"])
     has = lambda *names: any((repo / n).exists() for n in names)
     bin_dir = repo / "node_modules/.bin"
     pkg = (repo / "package.json").read_text(errors="replace") if (repo / "package.json").exists() else ""
-    out = []
-    if (bin_dir / "eslint").exists() and has("eslint.config.js", "eslint.config.mjs", "eslint.config.cjs",
-                                             "eslint.config.ts", ".eslintrc", ".eslintrc.js", ".eslintrc.cjs",
-                                             ".eslintrc.json", ".eslintrc.yml", ".eslintrc.yaml"):
-        out.append("node_modules/.bin/eslint --fix --no-warn-ignored {js_files}")
-    if (bin_dir / "prettier").exists() and (has(".prettierrc", ".prettierrc.json", ".prettierrc.js", ".prettierrc.cjs",
-                                                ".prettierrc.yaml", ".prettierrc.yml", "prettier.config.js",
-                                                "prettier.config.cjs", "prettier.config.mjs") or '"prettier":' in pkg):
-        out.append("node_modules/.bin/prettier --write --ignore-unknown {files}")
+    out = js_fixers(repo, ".", pkg)
+    # A monorepo keeps its lint and format configs in the workspace packages (packages/shared/...).
+    try:
+        spaces = json.loads(pkg).get("workspaces") or [] if pkg else []
+    except json.JSONDecodeError:
+        spaces = []
+    spaces = spaces.get("packages", []) if isinstance(spaces, dict) else spaces
+    for pattern in spaces:
+        for pj in sorted(repo.glob(f"{pattern.rstrip('/')}/package.json")):
+            d = pj.parent.relative_to(repo).as_posix()
+            out += js_fixers(repo, d, pj.read_text(errors="replace"))
     if shutil.which("ruff") and has("pyproject.toml", "ruff.toml", ".ruff.toml"):
         out += ["ruff check --fix --quiet {py_files}", "ruff format --quiet {py_files}"]
     if shutil.which("gofmt") and has("go.mod"):
@@ -1745,15 +1870,62 @@ def detect_fixers(repo: Path, rc: dict) -> list[str]:
     return out
 
 
+def fixer_name(cmd: str) -> str:
+    """"prettier" for `cd packages/x && node ../../node_modules/prettier/bin/prettier.cjs --write …`."""
+    words = re.sub(r"^cd \S+ && ", "", cmd).split()
+    tool = words[1] if words[0] == "node" and len(words) > 1 else words[0]
+    return re.sub(r"\.(c|m)?js$", "", tool.split("/")[-1])
+
+
+def drop_leftover_blanks(repo: Path, base: str, path: str) -> bool:
+    """Where this work deleted lines and left only blank lines in their place, remove those blanks
+    (a removed JSX row tends to leave one behind). Nothing else in the file is touched."""
+    diff = git(repo, "diff", "-U0", f"{base}..HEAD", "--", path, check=False)
+    drop: set[int] = set()
+    for hunk in re.split(r"(?m)^(?=@@ )", diff)[1:]:
+        m = re.match(r"@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", hunk)
+        removed, start, added = int(m.group(1) or 1), int(m.group(2)), int(m.group(3) if m.group(3) is not None else 1)
+        plus = [l[1:] for l in hunk.splitlines()[1:] if l.startswith("+")]
+        if removed and added and all(not l.strip() for l in plus):
+            drop.update(range(start, start + added))
+    if not drop:
+        return False
+    lines = (repo / path).read_text(errors="replace").split("\n")
+    (repo / path).write_text("\n".join(l for i, l in enumerate(lines, 1) if i not in drop))
+    return True
+
+
+def formatted_before(repo: Path, base: str, path: str, cmd: str) -> bool:
+    """Whether a Prettier fixer would leave the file's version at `base` as it is: a file that wasn't
+    formatted before isn't reformatted top to bottom because this work changed two lines in it."""
+    m = re.match(r"(?:cd (\S+) && )?node (\S+)", cmd)
+    if not m:
+        return True
+    d = (m.group(1) or ".").strip("'\"")
+    old = subprocess.run(["git", "show", f"{base}:{path}"], cwd=repo, capture_output=True, text=True, errors="replace")
+    if old.returncode != 0:
+        return True  # a new file: format it
+    rel = path[len(d) + 1:] if d != "." else path
+    r = subprocess.run(["node", m.group(2), "--stdin-filepath", rel], cwd=repo / d, input=old.stdout,
+                       capture_output=True, text=True, errors="replace")
+    return r.returncode == 0 and r.stdout == old.stdout
+
+
 def fill_fixer(cmd: str, files: list[str]) -> str | None:
     """The command with its file placeholders filled; None when a placeholder has no files."""
-    for key, exts in FIXER_GROUPS.items():
-        if "{" + key + "}" in cmd:
-            chosen = [f for f in files if exts is None or f.endswith(exts)]
-            if not chosen:
-                return None
-            cmd = cmd.replace("{" + key + "}", " ".join(shlex.quote(f) for f in chosen))
-    return cmd
+    def fill(m):
+        key, d = m.group(1), m.group(2)
+        exts = FIXER_GROUPS[key]
+        chosen = [f for f in files if exts is None or f.endswith(exts)]
+        if d:
+            chosen = [f[len(d) + 1:] for f in chosen if f.startswith(d + "/")]
+        if not chosen:
+            raise LookupError
+        return " ".join(shlex.quote(f) for f in chosen)
+    try:
+        return re.sub(r"\{(" + "|".join(FIXER_GROUPS) + r")(?:@([^}]+))?\}", fill, cmd)
+    except LookupError:
+        return None
 
 
 def paths_in_text(text: str, files) -> list[str]:
@@ -2739,6 +2911,9 @@ class Buckets:
                         private[f] = py_decls(self.repo / f)
                     for hit in [d for d in private[f] if d["name"].split(".")[-1] == name][:2]:
                         show(f, hit, f"`{name}`, named in the request, is defined in {f}")
+        leads = request_leads(self.repo, self.request, files)
+        if leads:
+            parts.append("Where the request's words appear (found mechanically):\n" + leads)
         sources = list(dict.fromkeys(s for s in sources if not re.search(r"\.(test|spec)\.", s)))[:6]
         importers = self.index.importers(sources)
         for src in sources:
@@ -2783,7 +2958,8 @@ class Buckets:
         files = list_files(self.repo, self.rc.get("exclude", []))
         if not files:
             return "(the repository has no readable text files)"
-        if len(files) > self.cfg["map_max_entries"]:
+        named_up_front = [f for f in paths_in_text(self.request, files) if f in files]
+        if len(files) > self.cfg["map_max_entries"] and not (named_up_front and self.difficulty == "light"):
             dirs = dir_summary(files)
             listing = "\n".join(f"{d} ({c} files, {n} lines)" for d, (c, n) in sorted(dirs.items()))
             chosen = ask_json(self.chores, self.run, "pick-dirs", SYSTEM,
@@ -2853,6 +3029,13 @@ class Buckets:
         members = [d for d in decls if cls and d["name"].startswith(cls["name"] + ".")
                    and "." not in d["name"][len(cls["name"]) + 1:]]
         if not members:
+            # One long function (a 1,500-line React screen): the stretches around the lines that
+            # match the request's words, else its first lines.
+            spots = self.hot_spots(path, lo, hi)
+            if spots:
+                return "\n".join(read_spec(self.repo, self.index.files, f"{path}:{a}-{b}", self.cfg["max_file_chars"])
+                                 for a, b in spots) + f"\n  … (`{path}` {lo}-{hi} is one long declaration; these are " \
+                                                       f"the parts that match the request)"
             return read_spec(self.repo, self.index.files, f"{path}:{lo}-{lo + longest}", self.cfg["max_file_chars"])
         last = members[-1]
         setup = [m for m in members[:-1] if m["name"].split(".")[-1] in ("setUp", "setup", "__init__", "beforeEach")]
@@ -2863,6 +3046,40 @@ class Buckets:
                 + "".join(read_spec(self.repo, self.index.files, f"{path}:{m['line']}-{m['end']}",
                                     self.cfg["max_file_chars"]) + "\n" for m in setup[:1])
                 + read_spec(self.repo, self.index.files, f"{path}:{last['line']}-{last['end']}", self.cfg["max_file_chars"]))
+
+    def hot_spots(self, path: str, lo: int, hi: int, around: int = 12, budget: int = 220) -> list[tuple[int, int]]:
+        """Line ranges in `path` between lo and hi around the lines that mention the request's
+        phrases (in any code spelling), quoted strings or code names, merged, within `budget` lines."""
+        terms = [x for words in {tuple(r[i:j]) for r in word_runs(self.request) for i in range(len(r))
+                                 for j in range(i + 2, len(r) + 1)}
+                 for x in spellings(list(words)) + [" ".join(words)]]
+        terms += re.findall(r'"([^"]{3,})"|`([^`]{3,})`', self.request) and [
+            q for pair in re.findall(r'"([^"]{3,})"|`([^`]{3,})`', self.request) for q in pair if q]
+        terms += [n for n in request_names(self.request) if len(n) >= 4]
+        if not terms:
+            return []
+        lines = (self.repo / path).read_text(errors="replace").splitlines()
+        span = range(lo, min(hi, len(lines)) + 1)
+        found = {t: [i for i in span if re.search(re.escape(t).replace(r"\ ", r"\s+"), lines[i - 1], re.I)]
+                 for t in set(terms)}
+        # Rare terms first ("Original ETA", once) and none of the file's own subject (a term on
+        # dozens of its lines, like workOrderDetails in the work order details screen).
+        hits = sorted({i for t, where in sorted(found.items(), key=lambda kv: len(kv[1]))
+                       if 0 < len(where) <= 8 for i in where})
+        spans: list[list[int]] = []
+        for h in hits:
+            a, b = max(lo, h - around), min(hi, h + around)
+            if spans and a <= spans[-1][1] + 1:
+                spans[-1][1] = max(spans[-1][1], b)
+            else:
+                spans.append([a, b])
+        out, used = [], 0
+        for a, b in spans:
+            if used + (b - a + 1) > budget:
+                break
+            out.append((a, b))
+            used += b - a + 1
+        return out
 
     def facts_cover(self, long: list[str], ctx: str) -> bool:
         """The mechanically gathered facts already show every part of the long files that the request
@@ -3482,17 +3699,18 @@ class Buckets:
         commit what they change, so review rounds aren't spent on formatting."""
         fixers = detect_fixers(self.repo, self.rc)
         changed = [f for f in git(self.repo, "diff", "--name-only", f"{base}..HEAD").split() if (self.repo / f).is_file()]
-        if not fixers or not changed:
+        if not changed:
             return
-        ran = []
+        ran = ["leftover blank lines"] if [f for f in changed if drop_leftover_blanks(self.repo, base, f)] else []
         for cmd in fixers:
-            filled = fill_fixer(cmd, changed)
+            files = [f for f in changed if "prettier" not in cmd or formatted_before(self.repo, base, f, cmd)]
+            filled = fill_fixer(cmd, files)
             if not filled:
                 continue
             with Ticker(f"  Tidying: {cmd.split()[0].split('/')[-1]}"):
                 code, out, _ = run_proc(filled, self.repo, 300, shell=True)
             self.run.save(f"fixer-{len(ran) + 1}.log", f"$ {filled}\n(exit {code})\n\n{strip_ansi(out)}")
-            ran.append(cmd.split()[0].split("/")[-1])
+            ran.append(fixer_name(cmd))
         fixed = [p for p in changed_paths(self.repo) if p in changed]
         stray = [p for p in changed_paths(self.repo) if p not in changed]
         if stray:  # fixers only get the changed files, but undo anything else to be safe
@@ -3513,17 +3731,19 @@ class Buckets:
             return None
         touched = set(git(self.repo, "diff", "--name-only", f"{base}..HEAD").split())
         removed, changed, added, untouched = [], [], [], []
+        # kind and name together: TypeScript lets a type and a value share a name (interface X + const X)
         for f, decls in before.items():
-            now = {d["name"]: d for d in after.get(f, [])}
+            now = {(d.get("kind"), d["name"]): d for d in after.get(f, [])}
             for d in decls:
-                n = now.get(d["name"])
+                n = now.get((d.get("kind"), d["name"]))
                 if n is None:
                     removed.append(f"`{d['name']}` from `{f}`")
                 elif n["signature"] != d["signature"]:
                     changed.append({"file": f, "name": d["name"], "before": d["signature"], "after": n["signature"]})
         for f, decls in after.items():
-            had = {d["name"] for d in before.get(f, [])}
-            added += [f"`{d['name']}` in `{f}`: {d['signature'][:100]}" for d in decls if d["name"] not in had]
+            had = {(d.get("kind"), d["name"]) for d in before.get(f, [])}
+            added += [f"`{d['name']}` in `{f}`: {d['signature'][:100]}" for d in decls
+                      if (d.get("kind"), d["name"]) not in had]
         for c in changed:
             for u in (self.index.uses(c["name"], c["file"]) or {"uses": []})["uses"]:
                 if u["file"] != c["file"] and u["file"] not in touched and not u.get("reexport"):
@@ -4238,8 +4458,10 @@ def doctor(cfg: dict, repo: Path | None) -> int:
         code, out, _ = run_proc([oc, "models"], Path.home(), 60)
         line(cfg["coder"]["opencode_model"] in out, f"opencode model {cfg['coder']['opencode_model']}")
     if repo:
-        checks = detect_checks(repo, repo_config(repo))
-        src = ".buckets.json" if repo_config(repo).get("checks") is not None else "detected"
+        rc = {**path_rules(cfg, repo), **repo_config(repo)}
+        checks = detect_checks(repo, rc)
+        src = (".buckets.json" if repo_config(repo).get("checks") is not None
+               else "your config's repos rules" if rc.get("checks") is not None else "detected")
         print(f"\n  repo {repo}\n  checks ({src}):")
         for n, cmd in checks.items():
             print(f"    {n}: {cmd}")
