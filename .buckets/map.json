@@ -39,33 +39,33 @@
     "ReplyTooLong",
     "SchemaGaveUp"
    ],
-   "hash": "34634faffac8",
+   "hash": "aa296b4a21d0",
    "imports": [],
-   "lines": 5872,
+   "lines": 5882,
    "purpose": "buckets: empty the pool with many small buckets.",
    "source": "docstring"
   },
   "docs/field-notes.md": {
    "declares": [],
-   "hash": "1c0acf5876b2",
+   "hash": "c21b0affa578",
    "imports": [],
-   "lines": 420,
+   "lines": 454,
    "purpose": "A record of building and using `buckets`: what broke, what we measured, and how each real run went, including the failures.",
    "source": "docstring"
   },
   "docs/handoff.md": {
    "declares": [],
-   "hash": "5918719ea2bd",
+   "hash": "55697ff58f9d",
    "imports": [],
-   "lines": 65,
+   "lines": 69,
    "purpose": "Where buckets stands after the second build day, for whoever (or whichever session) picks it up next.",
    "source": "docstring"
   },
   "docs/roadmap.md": {
    "declares": [],
-   "hash": "b2b7d82c424d",
+   "hash": "a821367629c5",
    "imports": [],
-   "lines": 121,
+   "lines": 133,
    "purpose": "What's left, roughly in the order I'd do it, with why and how big.",
    "source": "docstring"
   },
@@ -84,11 +84,11 @@
     "FakeModels",
     "Research"
    ],
-   "hash": "b69cb1250a24",
+   "hash": "b0e701bb2d89",
    "imports": [
     "buckets.py"
    ],
-   "lines": 2106,
+   "lines": 2121,
    "purpose": "Tests for the parts of buckets that don't need a model: run with `python3 -m unittest -v`.",
    "source": "docstring"
   },

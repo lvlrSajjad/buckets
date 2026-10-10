@@ -927,6 +927,11 @@ class FasterRuns(unittest.TestCase):
         # a misremembered short quote can't replace the whole function
         with self.assertRaisesRegex(ValueError, "isn't a name or lines in the file"):
             buckets.apply_edits(text, [{"at": "def run(x):\n    y = 2", "mode": "replace", "code": "def run(x):"}], decls)
+        # a bare line number or range: those lines
+        self.assertIn("    y = x\n    return y + 1\n    print(y)",
+                      buckets.apply_edits(text, [{"at": "11", "mode": "after", "code": "    print(y)"}], decls))
+        with self.assertRaisesRegex(ValueError, "aren't in the file"):
+            buckets.apply_edits(text, [{"at": "90-99", "mode": "replace", "code": "x"}], decls)
         with self.assertRaisesRegex(ValueError, "isn't a name or lines in the file"):
             buckets.apply_edits(text, [{"at": "Box.nothing", "mode": "after", "code": "x = 1"}], decls)
         with self.assertRaisesRegex(ValueError, "appears 2 times"):
@@ -954,7 +959,8 @@ class FasterRuns(unittest.TestCase):
 
     def test_a_file_the_request_names_gets_a_task(self):
         (self.repo / "test_m.py").write_text("def test_run():\n    pass\n")
-        b = buckets.Buckets(self.b.cfg, self.repo, "make run double x in src/m.py and add a test in test_m.py")
+        b = buckets.Buckets(buckets.deep_merge(self.b.cfg, {"lookups": False}), self.repo,
+                            "make run double x in src/m.py and add a test in test_m.py")
         b.on_windows, b.material = True, lambda mode: "material"
         task = {"file": "src/m.py", "action": "edit", "instructions": "x", "done_when": "y", "where": "", "edits": []}
         labels = []
@@ -1347,6 +1353,72 @@ class BigRepoTools(unittest.TestCase):
         self.assertEqual(b.api_impact("HEAD"), {"removed": [], "changed": [], "added": [], "untouched": []})
 
 
+class Lookups(unittest.TestCase):
+    """Planning as a conversation: the planner reads, searches and asks the reader machine before
+    it answers with the plan."""
+
+    def setUp(self):
+        self.repo = make_repo({"src/m.py": "def run(x):\n    return x + 1\n\n\ndef other():\n    return run(2)\n",
+                               "src/n.py": "from src.m import run\n\nVALUE = run(3)\n"})
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        self.b = buckets.Buckets(cfg, self.repo, "make run add 2")
+        self.b.on_windows = True
+
+    def test_the_planner_looks_things_up_then_plans(self):
+        turns, asked = [], []
+        plan = {"summary": "s", "tasks": [{"file": "src/m.py", "action": "edit", "instructions": "x", "done_when": "y",
+                                           "where": "run", "edits": []}]}
+        def fake_turn(cfg, run, label, messages, **kw):
+            turns.append((label, [m["role"] for m in messages], kw.get("tools") is not None))
+            if len(turns) == 1:
+                return "", "", [{"id": "1", "name": "read", "arguments": {"what": "run"}},
+                                {"id": "2", "name": "search", "arguments": {"pattern": "run\\("}},
+                                {"id": "3", "name": "ask", "arguments": {"question": "Who calls run?",
+                                                                          "files": ["src/n.py", "nope.py"]}}], False
+            tool_results = {m["name"]: m["content"] for m in messages if m["role"] == "tool"}
+            self.assertIn("    1| def run(x):", tool_results["read"])              # exact code
+            self.assertIn("src/n.py:3:VALUE = run(3)", tool_results["search"])      # git grep
+            self.assertIn("src/n.py:3", tool_results["ask"])                        # the reader's answer...
+            self.assertIn("VALUE = run(3)", tool_results["ask"])                    # ...with the real line attached
+            return json.dumps(plan), "", [], False
+        def fake_chat(cfg, run, label, system, user, **kw):
+            asked.append(user)
+            return "- `src/n.py:3`: VALUE = run(3) calls it"
+        with mock.patch.object(buckets, "chat_turn", fake_turn), mock.patch.object(buckets, "chat", fake_chat), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            got = self.b.plan_with_lookups("PLAN PROMPT", lambda d: buckets.validate_plan(d, self.repo, 8))
+        self.assertEqual(got["tasks"][0]["file"], "src/m.py")
+        self.assertEqual([t[0] for t in turns], ["plan-1", "plan-2"])
+        self.assertEqual(turns[1][1], ["system", "user", "assistant", "tool", "tool", "tool"])
+        self.assertIn("=== src/n.py ===", asked[0])                                  # the reader got the file
+        self.assertNotIn("nope.py", asked[0])
+        self.assertIn("answered: Who calls run?", err.getvalue())
+
+    def test_a_cut_thought_and_a_bad_answer_end_in_the_forced_plan(self):
+        seen = []
+        def fake_turn(cfg, run, label, messages, **kw):
+            seen.append((label, kw.get("think"), kw.get("schema") is not None))
+            if label == "plan-1":
+                return "", "my notes", [], True                                    # thinking cut
+            if label == "plan-2":
+                return "not json at all", "", [], False
+            return json.dumps({"summary": "s", "tasks": []}), "", [], False
+        with mock.patch.object(buckets, "chat_turn", fake_turn), contextlib.redirect_stderr(io.StringIO()):
+            got = self.b.plan_with_lookups("P", lambda d: buckets.validate_plan(d, self.repo, 8))
+        self.assertEqual(got["tasks"], [])
+        self.assertEqual(seen, [("plan-1", True, False), ("plan-2", False, False), ("plan-final", False, True)])
+
+    def test_tool_calls_on_the_wire(self):
+        history = [{"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "name": "read", "arguments": {"what": "x"}}]},
+                   {"role": "tool", "tool_call_id": "c1", "name": "read", "content": "code"}]
+        ollama = buckets.wire_messages(history, "ollama")
+        self.assertEqual(ollama[0]["tool_calls"], [{"function": {"name": "read", "arguments": {"what": "x"}}}])
+        self.assertEqual(ollama[1], {"role": "tool", "content": "code", "tool_name": "read"})
+        openai = buckets.wire_messages(history, "openai")
+        self.assertEqual(openai[0]["tool_calls"][0]["function"]["arguments"], '{"what": "x"}')
+        self.assertEqual(openai[1]["tool_call_id"], "c1")
+
+
 class ReviewSkip(unittest.TestCase):
     BASE = {"typecheck": {"ok": False}, "test": {"ok": True}}
     NOW = {"typecheck": {"ok": True}, "test": {"ok": True}}
@@ -1683,7 +1755,8 @@ class EndToEnd(unittest.TestCase):
             self.assertIn("a + b", buckets.git(repo, "show", f"{branch}:calc.ts"))
             self.assertIn("a - b", (repo / "calc.ts").read_text())            # your branch untouched
             # the last call notes what calc.ts is for, in the project map
-            self.assertEqual(fake.labels, ["intent", "files", "tasks", "done", "files"])
+            # the planning conversation's first turn has no forced format ("text"), then the plan itself
+            self.assertEqual(fake.labels, ["intent", "files", "text", "tasks", "done", "files"])
             journal = (repo / ".buckets/journal.md").read_text()
             self.assertIn("Asked: fix add so it returns the sum", journal)
             self.assertIn("Changed: calc.ts", journal)

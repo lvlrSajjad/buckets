@@ -725,7 +725,7 @@ def _stream_chat(url: str, body: dict, label: str, timeout: float, quiet: bool =
         url.rstrip("/") + "/api/chat", data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json"},
     )
-    content, thinking, final, ntok, nthink = [], [], {}, 0, 0
+    content, thinking, final, ntok, nthink, calls = [], [], {}, 0, 0, []
     tick = Ticker(f"  {friendly(label)}: reading") if not quiet else contextlib.nullcontext()
     with tick, urllib.request.urlopen(req, timeout=timeout) as resp:
         for raw in resp:
@@ -746,6 +746,11 @@ def _stream_chat(url: str, body: dict, label: str, timeout: float, quiet: bool =
             if m.get("content"):
                 content.append(m["content"])
                 ntok += 1
+            for c in m.get("tool_calls") or []:  # Ollama sends each call whole
+                fn = c.get("function") or {}
+                args = fn.get("arguments") or {}
+                calls.append({"id": c.get("id") or f"call_{len(calls) + 1}", "name": fn.get("name", ""),
+                              "arguments": args if isinstance(args, dict) else loads_or_empty(args)})
             if msg.get("done"):
                 final = msg
                 break
@@ -753,7 +758,17 @@ def _stream_chat(url: str, body: dict, label: str, timeout: float, quiet: bool =
                 tick.text = f"  {friendly(label)}: {'writing' if content else 'thinking'} ({ntok} tokens)"
     if not final:
         raise StreamCut(f"{label}: the reply stopped early (did the model server crash?)")
-    return "".join(content), "".join(thinking), {k: v for k, v in final.items() if k != "message"}
+    stats = {k: v for k, v in final.items() if k != "message"}
+    stats["tool_calls"] = calls
+    return "".join(content), "".join(thinking), stats
+
+
+def loads_or_empty(text) -> dict:
+    try:
+        value = json.loads(text) if isinstance(text, str) else text
+        return value if isinstance(value, dict) else {}
+    except json.JSONDecodeError:
+        return {}
 
 
 def guard_thinking(thinking: list[str], nthink: int, content: list[str], think_budget: int) -> None:
@@ -764,12 +779,35 @@ def guard_thinking(thinking: list[str], nthink: int, content: list[str], think_b
         raise ThinkingCut("".join(thinking), nthink, looped=True)
 
 
+def wire_messages(messages: list[dict], api: str) -> list[dict]:
+    """A conversation with tool calls as each server takes it. buckets keeps assistant turns as
+    {"tool_calls": [{"id", "name", "arguments": {...}}]} and tool results as {"role": "tool",
+    "tool_call_id", "name", "content"}; plain messages pass through."""
+    out = []
+    for m in messages:
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            if api == "openai":
+                calls = [{"id": c["id"], "type": "function",
+                          "function": {"name": c["name"], "arguments": json.dumps(c["arguments"])}} for c in m["tool_calls"]]
+            else:
+                calls = [{"function": {"name": c["name"], "arguments": c["arguments"]}} for c in m["tool_calls"]]
+            out.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": calls})
+        elif m.get("role") == "tool":
+            out.append({"role": "tool", "content": m["content"],
+                        **({"tool_call_id": m["tool_call_id"]} if api == "openai" else {"tool_name": m.get("name", "")})})
+        else:
+            out.append(m)
+    return out
+
+
 def openai_body(body: dict) -> dict:
     """buckets' (Ollama-shaped) request as llama.cpp's server takes it. The JSON schema applies after
     the thinking, as with Ollama (checked: it thinks first, then answers in the schema)."""
-    out = {"model": body["model"], "messages": body["messages"], "stream": True,
+    out = {"model": body["model"], "messages": wire_messages(body["messages"], "openai"), "stream": True,
            "max_tokens": body["options"]["num_predict"], "temperature": body["options"].get("temperature", 0.3),
            "chat_template_kwargs": {"enable_thinking": bool(body["think"])}}
+    if body.get("tools"):
+        out["tools"] = body["tools"]
     if body.get("format"):
         out["response_format"] = {"type": "json_schema", "json_schema": {"name": "answer", "schema": body["format"]}}
     return out
@@ -782,7 +820,7 @@ def _stream_chat_llamacpp(url: str, body: dict, label: str, timeout: float, quie
     req = urllib.request.Request(url.rstrip("/") + "/v1/chat/completions",
                                  data=json.dumps(openai_body(body)).encode(),
                                  headers={"Content-Type": "application/json"})
-    content, thinking, ntok, nthink, finish, timings = [], [], 0, 0, None, {}
+    content, thinking, ntok, nthink, finish, timings, parts = [], [], 0, 0, None, {}, {}
     tick = Ticker(f"  {friendly(label)}: reading") if not quiet else contextlib.nullcontext()
     with tick, urllib.request.urlopen(req, timeout=timeout) as resp:
         for raw in resp:
@@ -809,6 +847,12 @@ def _stream_chat_llamacpp(url: str, body: dict, label: str, timeout: float, quie
                 if delta.get("content"):
                     content.append(delta["content"])
                     ntok += 1
+                for c in delta.get("tool_calls") or []:  # streamed in pieces, keyed by index
+                    part = parts.setdefault(c.get("index", 0), {"id": "", "name": "", "arguments": ""})
+                    fn = c.get("function") or {}
+                    part["id"] = c.get("id") or part["id"]
+                    part["name"] += fn.get("name") or ""
+                    part["arguments"] += fn.get("arguments") or ""
                 finish = choice.get("finish_reason") or finish
             if not quiet:
                 tick.text = f"  {friendly(label)}: {'writing' if content else 'thinking'} ({ntok} tokens)"
@@ -819,7 +863,9 @@ def _stream_chat_llamacpp(url: str, body: dict, label: str, timeout: float, quie
              "prompt_eval_count": timings.get("prompt_n", 0), "prompt_eval_duration": ms("prompt_ms"),
              "prompt_eval_cached_count": timings.get("cache_n", 0),
              "eval_count": timings.get("predicted_n", ntok), "eval_duration": ms("predicted_ms"),
-             "total_duration": ms("prompt_ms") + ms("predicted_ms")}
+             "total_duration": ms("prompt_ms") + ms("predicted_ms"),
+             "tool_calls": [{"id": c["id"] or f"call_{i + 1}", "name": c["name"], "arguments": loads_or_empty(c["arguments"])}
+                            for i, c in sorted(parts.items())]}
     return "".join(content), "".join(thinking), stats
 
 
@@ -887,6 +933,82 @@ def chat(cfg: dict, run: Run, label: str, system: str, user: str, *, schema: dic
         say(f"  {warn()} {friendly(label)}: attempt {attempt} failed ({err[:160]}); retrying")
         time.sleep(5 * attempt)
     raise ModelError(f"{label}: failed after 3 attempts")
+
+
+def chat_turn(cfg: dict, run: Run, label: str, messages: list[dict], *, tools: list | None = None,
+              schema: dict | None = None, think: bool = True, think_budget: int = 0, max_tokens: int = 8000,
+              timeout: float = 2400) -> tuple[str, str, list[dict], bool]:
+    """One turn of a conversation that may call tools: (content, thinking, tool calls, cut). `cut`
+    means the thinking was stopped at its budget or in a loop; `thinking` then holds the notes."""
+    need = sum(est_tokens(m.get("content") or "") for m in messages) + max_tokens
+    if need > cfg.get("num_ctx", 32768):
+        raise PromptTooBig(f"{label}: about {need} tokens with the answer, but the context is {cfg.get('num_ctx', 32768)}")
+    llama = cfg.get("api") == "llamacpp"
+    body = {"model": cfg["model"], "stream": True, "think": think, "keep_alive": cfg.get("keep_alive", "10m"),
+            "messages": messages if llama else wire_messages(messages, "ollama"),
+            "options": {"num_ctx": cfg.get("num_ctx", 32768), "temperature": cfg.get("temperature", 0.3),
+                        "num_predict": max_tokens}}
+    if tools:
+        body["tools"] = tools
+    if schema:
+        body["format"] = schema
+    stream = _stream_chat_llamacpp if llama else _stream_chat
+    err = ""
+    for attempt in range(1, 4):
+        try:
+            content, thinking, stats = stream(cfg["url"], body, label, timeout, False, think_budget if think else 0)
+        except ThinkingCut as cut:
+            run.save(f"{label}-thinking-cut.txt", cut.thinking)
+            say(f"  {friendly(label)}: " + (f"was thinking in circles after {cut.tokens} tokens" if cut.looped
+                                             else f"thought for {cut.tokens} tokens (the budget)"))
+            return "", cut.thinking, [], True
+        except (StreamCut, urllib.error.URLError, ConnectionError, TimeoutError) as e:
+            err = str(e)
+            say(f"  {warn()} {friendly(label)}: attempt {attempt} failed ({err[:160]}); retrying")
+            time.sleep(5 * attempt)
+            continue
+        run.save(f"{label}.json", {"request": body, "thinking": thinking, "content": content, "stats": stats})
+        run.talked = True
+        detail(f"{label}: {stats.get('prompt_eval_count', '?')} tokens in, {stats.get('eval_count', '?')} out, "
+               f"{stats.get('total_duration', 0) / 1e9:.0f}s")
+        return content, thinking, stats.get("tool_calls") or [], False
+    raise ModelError(f"{label}: failed after 3 attempts ({err[:200]})")
+
+
+LOOKUP_TOOLS = [
+    {"type": "function", "function": {
+        "name": "read", "description": "Exact code from the repository, by a name from the code "
+        "(\"GitAssistant.op_log\", \"parse_args\", \"GIT_OPS\") or a line range (\"path:120-180\").",
+        "parameters": {"type": "object", "properties": {"what": {"type": "string"}}, "required": ["what"]}}},
+    {"type": "function", "function": {
+        "name": "search", "description": "Lines matching a regular expression across the repository "
+        "(or under one path), with file and line numbers.",
+        "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}},
+                       "required": ["pattern"]}}},
+    {"type": "function", "function": {
+        "name": "ask", "description": "Another machine reads the given files in full and answers your "
+        "question with file:line references: for how something works, where something is handled, or what "
+        "pattern the code follows. Up to 4 files.",
+        "parameters": {"type": "object", "properties": {"question": {"type": "string"},
+                                                        "files": {"type": "array", "items": {"type": "string"}}},
+                       "required": ["question", "files"]}}},
+]
+
+LOOKUP_NOTE = """
+
+Before you plan, you may look things up with the tools, but only what the material above doesn't
+show and the plan needs: read (exact code by name or line range), search (a pattern across the
+repository) and ask (another machine reads whole files and answers a question). Ask for several at
+once when you can. When you have what you need, reply with the plan as the JSON object, with no tool
+call."""
+
+ASK_PROMPT = """Answer the question from these files. Be brief: at most 8 lines, each with a `path:line`
+or `path:start-end` reference (the numbers are shown on every line), most relevant first, then at
+most 2 sentences of summary. Don't paste code. If the files don't answer it, say what's missing.
+
+Question: {question}
+
+{files}"""
 
 
 def extract_json(text: str):
@@ -3121,15 +3243,16 @@ class Buckets:
                                     self.cfg["max_file_chars"]) + "\n" for m in setup[:1])
                 + read_spec(self.repo, self.index.files, f"{path}:{last['line']}-{last['end']}", self.cfg["max_file_chars"]))
 
-    def hot_spots(self, path: str, lo: int, hi: int, around: int = 12, budget: int = 220) -> list[tuple[int, int]]:
-        """Line ranges in `path` between lo and hi around the lines that mention the request's
-        phrases (in any code spelling), quoted strings or code names, merged, within `budget` lines."""
-        terms = [x for words in {tuple(r[i:j]) for r in word_runs(self.request) for i in range(len(r))
+    def hot_spots(self, path: str, lo: int, hi: int, around: int = 12, budget: int = 220,
+                  text: str | None = None) -> list[tuple[int, int]]:
+        """Line ranges in `path` between lo and hi around the lines that mention the request's (or
+        `text`'s) phrases (in any code spelling), quoted strings or code names, merged, within `budget`."""
+        text = self.request if text is None else text
+        terms = [x for words in {tuple(r[i:j]) for r in word_runs(text) for i in range(len(r))
                                  for j in range(i + 2, len(r) + 1)}
                  for x in spellings(list(words)) + [" ".join(words)]]
-        terms += re.findall(r'"([^"]{3,})"|`([^`]{3,})`', self.request) and [
-            q for pair in re.findall(r'"([^"]{3,})"|`([^`]{3,})`', self.request) for q in pair if q]
-        terms += [n for n in request_names(self.request) if len(n) >= 4]
+        terms += [q for pair in re.findall(r'"([^"]{3,})"|`([^`]{3,})`', text) for q in pair if q]
+        terms += [n for n in request_names(text) if len(n) >= 4]
         if not terms:
             return []
         lines = (self.repo / path).read_text(errors="replace").splitlines()
@@ -3600,6 +3723,8 @@ class Buckets:
                   and self.cfg.get("offload", {}).get("escalate_unsure_research") else None)
         if target:
             plan = self.ask_escalated(target, "plan-escalated", prompt, PLAN_SCHEMA, validate)
+        elif self.cfg.get("lookups", True):
+            plan = self.plan_with_lookups(prompt, validate)
         else:
             plan = ask_json(self.planner, self.run, "plan", SYSTEM, prompt, PLAN_SCHEMA, validate,
                             max_tokens=16000, timeout=self.timeout, **self.think_budget())
@@ -3616,6 +3741,93 @@ class Buckets:
                 plan = again
         self.run.save("plan.json", plan)
         return plan
+
+    def plan_with_lookups(self, prompt: str, validate) -> dict:
+        """Planning as a conversation: the planner may read, search, or ask the reader machine about
+        files, in rounds, before answering with the plan. Reads and searches are exact and instant;
+        an `ask` goes to the fast reader (Windows), so the planner's machine doesn't read whole files."""
+        budget = self.think_budget().get("think_budget", self.planner.get("think_budget", 2500))
+        messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt + LOOKUP_NOTE}]
+        think, asked = True, 0
+        for turn in range(1, self.cfg.get("lookup_rounds", 4) + 2):
+            last = turn > self.cfg.get("lookup_rounds", 4)
+            content, thinking, calls, cut = chat_turn(self.planner, self.run, f"plan-{turn}", messages,
+                                                      tools=None if last else LOOKUP_TOOLS, think=think,
+                                                      think_budget=budget, max_tokens=16000, timeout=self.timeout)
+            if cut:  # notes so far; decide without more thinking
+                messages.append({"role": "user", "content": "Your thinking so far (cut short, but use it):\n"
+                                 + thinking[-6000:] + "\n\nNo more thinking: call the tools you still need, or "
+                                 "reply with the plan as the JSON object."})
+                think = False
+                continue
+            if calls and not last:
+                messages.append({"role": "assistant", "content": content, "tool_calls": calls})
+                for call in calls[:6]:
+                    result = self.lookup(call, asked)
+                    asked += call["name"] == "ask"
+                    messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"],
+                                     "content": result[:8000]})
+                for call in calls[6:]:
+                    messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"],
+                                     "content": "(not run: at most 6 look-ups per round)"})
+                think = False  # thinking once is enough; later rounds read the answers and decide
+                continue
+            try:
+                return validate(extract_json(content))
+            except (ValueError, KeyError, TypeError) as e:
+                messages.append({"role": "assistant", "content": content})
+                messages.append({"role": "user", "content": f"That wasn't a usable plan ({e}). Reply with only the "
+                                 "plan as the JSON object."})
+                break
+        content, _, _, _ = chat_turn(self.planner, self.run, "plan-final", messages + [
+            {"role": "user", "content": "Reply now with only the plan as the JSON object."}],
+            schema=PLAN_SCHEMA, think=False, max_tokens=16000, timeout=self.timeout)
+        return validate(extract_json(content))
+
+    def lookup(self, call: dict, asked: int) -> str:
+        """Run one of the planner's look-ups: read and search here, exactly; ask on the reader."""
+        args, name = call["arguments"], call["name"]
+        if name == "read":
+            what = str(args.get("what") or "")
+            where = locate(self.repo, self.index.files, self.index.outline(), what) or \
+                (clean_path(what) if SPEC.match(clean_path(what)) and clean_path(what).split(":")[0] in self.index.files else None)
+            text = self.part(where) if where and ":" in where else (
+                read_spec(self.repo, self.index.files, where, self.cfg["max_file_chars"]) if where else
+                f"!! `{what}` isn't a name or a file:range in this repository")
+            say(f"  {ok()} {machine_label(self.planner)} read {what[:70]}")
+            return text
+        if name == "search":
+            pattern, path = str(args.get("pattern") or ""), str(args.get("path") or "")
+            say(f"  {ok()} {machine_label(self.planner)} searched /{pattern[:50]}/" + (f" in {path}" if path else ""))
+            return grep_text(self.repo, pattern, [path] if path else [], limit=40)
+        if name == "ask":
+            if asked >= self.cfg.get("lookup_asks", 6):
+                return "(not asked: the limit of questions for this plan is reached)"
+            question = str(args.get("question") or "")
+            files = [f for f in (clean_path(str(x)) for x in args.get("files") or []) if f in self.index.files][:4]
+            if not files:
+                return "!! name the files to read (paths from the repository)"
+            start = time.time()
+            text = ASK_PROMPT.format(question=question, files="\n\n".join(
+                self.file_for_question(f, question) for f in files))
+            answer = chat(self.chores, self.run, f"ask-{asked + 1}", SYSTEM, text, think=False, max_tokens=900,
+                          timeout=self.timeout, quiet=True)
+            say(f"  {ok()} {self.worker} answered: {question[:60]} ({elapsed(start)})")
+            facts = ground_truth(answer, self.repo, self.index.files)
+            return answer + (f"\n\n{facts}" if facts else "")
+        return f"!! no tool called {name}"
+
+    def file_for_question(self, path: str, question: str) -> str:
+        """A file for the reader to answer from: whole when it's short, else its outline plus the
+        stretches around the question's terms."""
+        lines = self.index.files.get(path, 0)
+        if lines <= 600:
+            return numbered(self.repo, path, self.cfg["max_file_chars"])
+        decls = decls_of(self.repo, path, self.index.outline())
+        spots = self.hot_spots(path, 1, lines, text=question, budget=300)
+        return (f"=== {path} ({lines} lines; outline) ===\n" + outline_text(decls)[:6000] + "\n"
+                + "\n".join(read_spec(self.repo, self.index.files, f"{path}:{a}-{b}", self.cfg["max_file_chars"])
+                            for a, b in spots))
 
     def code_task(self, task: dict, commit: bool = True) -> dict:
         """One file's task: the planner's exact edits applied directly when they fit, else a coder
@@ -4308,6 +4520,12 @@ def apply_edits(text: str, edits: list[dict], decls_for=None) -> str:
                 raise ValueError(f"edit {i}: append needs the name of a class, dict or list, not `{at[:60]}`")
             text = "\n".join(append_into(lines, span, plain_code(e["code"])))
             continue
+        if span is None and re.fullmatch(r"\s*(\d+)(?:\s*[-–]\s*(\d+))?\s*", at):  # a bare line number or range
+            m = re.fullmatch(r"\s*(\d+)(?:\s*[-–]\s*(\d+))?\s*", at)
+            a, b = int(m.group(1)), int(m.group(2) or m.group(1))
+            if not 1 <= a <= b <= len(lines):
+                raise ValueError(f"edit {i}: lines {a}-{b} aren't in the file ({len(lines)} lines)")
+            span = (a - 1, b)
         if span is None:
             by_name = False
             want = [l.strip() for l in at.split("\n")]
