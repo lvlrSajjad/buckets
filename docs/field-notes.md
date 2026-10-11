@@ -667,6 +667,24 @@ the coder does both), two runs each:
 Close: the native loop is a little faster on a small task and just as right. Not enough to switch the
 default; it needs the larger cases (several tasks, files to search) and more runs.
 
+### 30. Checks on the other machine: measured, and not worth it here (2026-10-11)
+
+The buckets agent (`tools/windows-agent.cjs`) runs on the Windows machine: `buckets win` runs commands there,
+and buckets can keep a copy of a repo there (git bundles; the first copy of a 2,000-file app repo took 12.5 min,
+mostly installing dependencies) and run checks in it, compared with the Mac's ("shadow") or instead of them
+("split"). The numbers on this pair of machines, same commit:
+
+| Check | Mac (M2 Pro) | Windows (the 35B's experts in its RAM) |
+|---|---|---|
+| tsc | 10 s | 24.5 s |
+| eslint | 35 s | 124 s |
+| jest (1,545 tests) | 8 s, all pass | 123 s, 2 fail (tests that read files by path) |
+
+And the model paid for it: llama-server's resident memory went from 23.3 GB to 21.1 GB while the checks ran (Windows
+trimmed the model to make room), so the next requests read those parts back from disk. With the model's experts
+in RAM there's about 3 GB and little CPU left on Windows. Checks stay on the Mac (`agent.checks` is off); shadow and
+split are kept for a machine with room to spare. The remote commands are the useful part here.
+
 ## Lessons so far
 
 - Run it, don't argue about it: comparing two versions of a small function on sample inputs settles
