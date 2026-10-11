@@ -3460,12 +3460,13 @@ class Buckets:
 
     def prefer_move(self, plan: dict) -> dict:
         """A plan that would retype the moved code (a new file with no exact code) gets the mechanical
-        move instead; the planner's other tasks stay. Next to a move, edit tasks on its two files with
-        no exact code go: the move already rewires them (one such task spent 9 minutes changing nothing)."""
+        move instead; the planner's other tasks stay. Next to a move or share, edit tasks on its files go,
+        even with exact edits: it already rewires them (one such task spent 9 minutes changing nothing,
+        another replaced each shared declaration by hand), and what's left is for the review."""
         moves = [t for t in plan["tasks"] if t["action"] in ("move", "share")]
         if moves:
             mine = {f for t in moves for f in ([t["file"], t["into"]] if t["action"] == "move" else [t["file"], *t["from"]])}
-            extra = [t for t in plan["tasks"] if t["action"] in ("edit", "create") and t["file"] in mine and not t.get("edits")]
+            extra = [t for t in plan["tasks"] if t["action"] in ("edit", "create") and t["file"] in mine]
             if extra:
                 say(f"  {paint('dropped', 'dim')} {', '.join(t['id'] for t in extra)}: the move already does "
                     f"that; anything left over is for the review, after the checks")
