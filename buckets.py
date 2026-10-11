@@ -14,9 +14,14 @@ models only make judgments, and always answer in JSON the script validates.
 from __future__ import annotations
 
 import argparse
+import base64
 import ast
 import contextlib
 import difflib
+try:
+    import fcntl
+except ImportError:  # not POSIX: no guard
+    fcntl = None
 import fnmatch
 import functools
 import hashlib
@@ -40,6 +45,7 @@ from pathlib import Path, PurePosixPath
 
 VERSION = "0.1.0"
 
+LOCK_PATH = Path(os.environ.get("BUCKETS_LOCK", Path.home() / ".local/state/buckets/active.lock"))
 CONFIG_PATH = Path(os.environ.get("BUCKETS_CONFIG", Path.home() / ".config/buckets/config.json"))
 STATE_DIR = Path(os.environ.get("BUCKETS_STATE", Path.home() / ".local/state/buckets"))
 
@@ -71,6 +77,13 @@ DEFAULT_CONFIG = {
         "opencode_agent": "buckets-coder",
         "timeout_s": 900,
         "attempts": 2,
+    },
+    "agent": {                      # the buckets agent on the other machine (tools/windows-agent.cjs)
+        "url": "",                  # e.g. "http://192.168.1.111:8766"; empty: no agent
+        "token_file": "~/.config/buckets/agent.token",
+        "checks": "off",            # "shadow": the checks also run there and the results are compared (proof);
+                                    # "split": the ones in "remote" run there, the rest here, side by side
+        "remote": ["lint", "test"],
     },
     "reader": {                     # chores and summarizing code
         "url": "http://localhost:11434",
@@ -1713,7 +1726,88 @@ def clean_tree(repo: Path) -> str:
     return git(repo, "rev-parse", "HEAD^{tree}", check=False).strip()
 
 
-def run_checks(repo: Path, checks: dict[str, str], run: Run, tag: str, timeout: float) -> dict:
+def remote_checks(agent: dict | None, checks: dict[str, str], repo: Path, tree: str) -> tuple[str, list[str]]:
+    """How the other machine helps with these checks: ("off" | "shadow" | "split", the checks it runs). Only
+    committed code goes over, and only when that machine's model isn't busy (its checks would slow it)."""
+    mode = (agent or {}).get("checks", "off")
+    names = [n for n, c in checks.items() if c != "(code index)"]
+    if mode not in ("shadow", "split") or not (agent or {}).get("url") or not tree or not names:
+        return "off", []
+    try:
+        if agent_call({"agent": agent}, "GET", "/status", timeout=5).get("model_busy"):
+            return "off", []
+    except AgentError:
+        return "off", []
+    return mode, names if mode == "shadow" else [n for n in names if n in (agent.get("remote") or [])]
+
+
+def agent_sync(agent: dict, repo: Path) -> str:
+    """The agent's copy of `repo` brought to HEAD: just the commit when it has it, else the commits it lacks as
+    a git bundle (all of them the first time, and then it installs dependencies, which takes a while)."""
+    cfg, head = {"agent": agent}, git(repo, "rev-parse", "HEAD").strip()
+    body = {"repo": repo.name, "head": head}
+    try:
+        return agent_call(cfg, "POST", "/sync", body, timeout=3600)["head"]
+    except AgentError as e:
+        if "409" not in str(e):
+            raise
+    have = (agent_call(cfg, "GET", "/status", timeout=10).get("copies") or {}).get(repo.name)
+    known = bool(have) and subprocess.run(["git", "merge-base", "--is-ancestor", have, "HEAD"], cwd=repo,
+                                          capture_output=True).returncode == 0
+    with tempfile.TemporaryDirectory() as d:
+        bundle = Path(d) / "sync.bundle"
+        git(repo, "bundle", "create", "-q", str(bundle), f"{have}..HEAD" if known else "HEAD")
+        body["bundle"] = base64.b64encode(bundle.read_bytes()).decode()
+    return agent_call(cfg, "POST", "/sync", body, timeout=3600)["head"]
+
+
+def run_on_agent(agent: dict, repo: Path, checks: dict[str, str], names: list[str], timeout: float, out: dict) -> None:
+    """The named checks on the other machine, into `out` (None for one it couldn't run: it runs here instead)."""
+    try:
+        agent_sync(agent, repo)
+    except AgentError as e:
+        say(f"  {warn()} the other machine couldn't take the checks ({str(e)[:120]}); running them here")
+        out.update({n: None for n in names})
+        return
+    for name in names:
+        start, tid = time.time(), live("tool", name=name, kind="check", machine="windows")
+        try:
+            d = agent_call({"agent": agent}, "POST", "/run", {"repo": repo.name, "cmd": checks[name], "timeout_s": timeout},
+                           timeout=timeout + 120)
+        except AgentError as e:
+            live("tool_end", id=tid, ok=False, secs=round(time.time() - start, 1))
+            say(f"  {warn()} {name} on the other machine failed to run ({str(e)[:100]}); running it here")
+            out[name] = None
+            continue
+        text, timed_out = strip_ansi(d.get("output", "")), bool(d.get("timed_out"))
+        good = d.get("exit") == 0 and not timed_out
+        live("tool_end", id=tid, ok=good, secs=d.get("secs"))
+        out[name] = {"ok": good, "seconds": d.get("secs"), "where": "windows", "exit": d.get("exit"),
+                     "tail": ("(timed out)\n" if timed_out else "") + text[-3000:],
+                     "output": ("(timed out)\n" if timed_out else "") + text[-20000:]}
+
+
+def shadow_compare(repo: Path, tag: str, here: dict, there: dict) -> None:
+    """Shadow mode: the same checks here and there must agree before the other machine is trusted with them."""
+    rows, head = [], git(repo, "rev-parse", "HEAD").strip()
+    for name, r in here.items():
+        t = there.get(name)
+        if t is None or r is None:
+            continue
+        rows.append({"at": datetime.now().isoformat(timespec="seconds"), "repo": repo.name, "head": head, "tag": tag,
+                     "check": name, "mac_ok": r["ok"], "win_ok": t["ok"], "mac_s": r["seconds"], "win_s": t["seconds"]})
+        if r["ok"] != t["ok"]:
+            say(f"  {warn()} {name}: {'passes' if r['ok'] else 'fails'} here but {'passes' if t['ok'] else 'fails'} "
+                f"on the other machine (kept this machine's result; the difference is in the shadow log)")
+    if rows:
+        path = STATE_DIR / "checks-shadow.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as f:
+            f.write("".join(json.dumps(r) + "\n" for r in rows))
+        detail("shadow checks: " + ", ".join(f"{r['check']} {r['mac_s']}s here / {r['win_s']}s there" for r in rows))
+
+
+def run_checks(repo: Path, checks: dict[str, str], run: Run, tag: str, timeout: float, agent: dict | None = None) -> dict:
     results, cached = {}, []
     tree = clean_tree(repo)
     cache_path = STATE_DIR / "checks-cache.json"
@@ -1721,7 +1815,18 @@ def run_checks(repo: Path, checks: dict[str, str], run: Run, tag: str, timeout: 
         cache = json.loads(cache_path.read_text()) if tree else {}
     except (OSError, json.JSONDecodeError):
         cache = {}
+    todo = [n for n, c in checks.items()
+            if not (tree and c != "(code index)" and time.time() - (cache.get(f"{repo}|{tree}|{c}") or {}).get("at", 0)
+                    < CHECKS_CACHE_HOURS * 3600)]
+    mode, there = remote_checks(agent, {n: checks[n] for n in todo}, repo, tree)
+    remote: dict = {}
+    worker = threading.Thread(target=run_on_agent, args=(agent, repo, checks, there, timeout, remote), daemon=True) \
+        if there else None
+    if worker:
+        worker.start()
     for name, cmd in checks.items():
+        if mode == "split" and name in there:
+            continue  # the other machine runs it
         key = f"{repo}|{tree}|{cmd}"
         hit = cache.get(key) if tree and cmd != "(code index)" else None
         if hit and time.time() - hit.get("at", 0) < CHECKS_CACHE_HOURS * 3600:
@@ -1749,10 +1854,33 @@ def run_checks(repo: Path, checks: dict[str, str], run: Run, tag: str, timeout: 
                          "output": ("(timed out)\n" if timed_out else "") + out[-20000:]}
         if tree and not timed_out:
             cache[key] = {**results[name], "at": time.time()}
+    if worker:
+        worker.join()
+        if mode == "shadow":
+            shadow_compare(repo, tag, results, remote)
+        else:
+            for name in there:
+                r = remote.get(name)
+                if r is None:  # it couldn't run there: here, now
+                    start = time.time()
+                    with Ticker(f"  Running {name}: {checks[name]}"):
+                        code, out, timed_out = run_proc(checks[name], repo, timeout, shell=True)
+                    out = strip_ansi(out)
+                    r = {"ok": code == 0 and not timed_out, "seconds": round(time.time() - start, 1),
+                         "tail": ("(timed out)\n" if timed_out else "") + out[-3000:],
+                         "output": ("(timed out)\n" if timed_out else "") + out[-20000:]}
+                run.save(f"check-{tag}-{name}.log", f"$ {checks[name]}\n(on {r.get('where', 'this machine')}, "
+                                                     f"exit {r.get('exit', '?')})\n\n{r['output']}")
+                results[name] = {k: v for k, v in r.items() if k not in ("where", "exit")}
+                if tree and "(timed out)" not in r["tail"][:12]:
+                    cache[f"{repo}|{tree}|{checks[name]}"] = {**results[name], "at": time.time()}
+            results = {n: results[n] for n in checks if n in results}  # in the configured order
     if tree and len(results) > len(cached):
         keep = sorted(cache.items(), key=lambda kv: kv[1].get("at", 0))[-200:]
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(dict(keep)))
+    if mode == "split" and there:
+        detail(f"checks on the other machine: {', '.join(there)}")
     say("  checks: " + ("  ".join(f"{n} {ok() if r['ok'] else bad()}" for n, r in results.items())
                         or warn("none configured (add them to .buckets.json)"))
         + (paint(f"  (cached: same code as an earlier run)", "dim") if cached and len(cached) == len(results)
@@ -5671,7 +5799,7 @@ class Buckets:
         names = sorted({n for c in claims for n in re.findall(r"`([A-Za-z_][\w.]*)`", c)})[:6]
         lines = []
         for n in names:
-            hits = git(self.repo, "grep", "-n", "-w", "-e", n.split(".")[-1], "--", *touched).splitlines() if touched else []
+            hits = git(self.repo, "grep", "-n", "-w", "-e", n.split(".")[-1], "--", *touched, check=False).splitlines() if touched else []  # no match is an answer
             lines.append(f"`{n}`:\n" + ("\n".join(f"  {h[:160]}" for h in hits[:8]) or "  (not found in the changed files)"))
         messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt},
                     {"role": "assistant", "content": json.dumps(verdict)},
@@ -5727,7 +5855,7 @@ class Buckets:
             if tasks:
                 self.auto_fix(shortcut_base or base)
             if tasks:  # nothing changed otherwise, so the last check results still hold
-                now = run_checks(repo, checks, self.run, f"round{rnd}", self.cfg["check_timeout_s"])
+                now = run_checks(repo, checks, self.run, f"round{rnd}", self.cfg["check_timeout_s"], agent=self.cfg.get("agent"))
             broke = sorted(n for n, r in now.items() if not r["ok"] and now_before.get(n, {}).get("ok"))
             if rnd >= 2 and broke and verdict is not None:
                 # A follow-up round that breaks what the round before had working: undo it and stop, rather
@@ -5874,7 +6002,7 @@ class Buckets:
         git(repo, "checkout", "-q", "-b", branch, base)
         say(f"  working on a new branch: {paint(branch, 'cyan')}")
         checks = self.checks_with_index(detect_checks(repo, self.rc))
-        baseline = run_checks(repo, checks, self.run, "baseline", self.cfg["check_timeout_s"])
+        baseline = run_checks(repo, checks, self.run, "baseline", self.cfg["check_timeout_s"], agent=self.cfg.get("agent"))
         self.surface_before = self.index.surface()
 
         picks, resolved = [], []
@@ -5914,7 +6042,7 @@ class Buckets:
                 say(f"  {ok()} {sha[:7]} applied after resolving the conflicts")
             after_picks = git(repo, "rev-parse", "HEAD").strip()
             self.heading(3, "Checks after the picks")
-            now = run_checks(repo, checks, self.run, "picked", self.cfg["check_timeout_s"])
+            now = run_checks(repo, checks, self.run, "picked", self.cfg["check_timeout_s"], agent=self.cfg.get("agent"))
             regressions = [n for n, r in now.items() if baseline.get(n, {}).get("ok") and not r["ok"]]
             rounds, verdict = [], None
             if regressions or resolved:
@@ -5980,7 +6108,7 @@ class Buckets:
         repo = self.repo
         checks = self.checks_with_index(detect_checks(repo, self.rc))
         self.heading(2, "Checking the starting point")
-        baseline = run_checks(repo, checks, self.run, "baseline", self.cfg["check_timeout_s"])
+        baseline = run_checks(repo, checks, self.run, "baseline", self.cfg["check_timeout_s"], agent=self.cfg.get("agent"))
         self.surface_before = self.index.surface()
         files = self.index.files
         if getattr(self, "plan_file", None):
@@ -6904,6 +7032,128 @@ def cmd_discard(repo: Path, yes: bool) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- the other machine (buckets agent)
+
+
+AGENT_FILES = [Path(__file__).resolve().parent / "tools" / n for n in ("windows-agent.cjs", "setup-buckets-agent.ps1")]
+
+
+class AgentError(RuntimeError):
+    pass
+
+
+def agent_call(cfg: dict, method: str, path: str, body: dict | None = None, timeout: float = 60) -> dict:
+    """One request to the buckets agent on the other machine; AgentError when it can't be reached or refuses."""
+    a = cfg.get("agent") or {}
+    if not a.get("url"):
+        raise AgentError('no agent set up: run `buckets win setup`, then set "agent": {"url": …} in the config')
+    try:
+        token = Path(os.path.expanduser(a.get("token_file", "~/.config/buckets/agent.token"))).read_text().strip()
+    except OSError:
+        raise AgentError(f"no agent token at {a.get('token_file')}: run `buckets win setup`") from None
+    req = urllib.request.Request(a["url"].rstrip("/") + path, method=method,
+                                 data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            d = json.loads(e.read() or b"{}")
+        except ValueError:
+            d = {}
+        raise AgentError(f"the agent said {e.code}: {d.get('error', '')}".strip()) from None
+    except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
+        raise AgentError(f"the agent at {a['url']} didn't answer ({getattr(e, 'reason', e)})") from None
+
+
+def cmd_win(cfg: dict, argv: list[str]) -> int:
+    """`buckets win <command>`: run a command on the other machine and show its output (PowerShell there by default;
+    --bash, --cmd, --detach for servers, --cwd DIR, --timeout SECONDS). `buckets win status`, `setup`, `update`."""
+    if argv[:1] == ["setup"]:
+        return win_setup(cfg, Path(os.path.expanduser(argv[2])) if argv[1:2] == ["--to"] and len(argv) > 2 else None)
+    try:
+        if not argv or argv == ["status"]:
+            d = agent_call(cfg, "GET", "/status", timeout=10)
+            busy = {True: "busy", False: "idle", None: "not answering"}[d.get("model_busy")]
+            say(f"{ok()} agent {d.get('version')} on {d.get('platform')} · CPU {d.get('cpu_percent')}% of {d.get('cpus')} · "
+                f"{d.get('free_mem_gb')} GB free · model server {busy}"
+                + (f" · running: {d['running']['what']} ({d['running']['secs']}s)" if d.get("running") else ""))
+            for name, head in (d.get("copies") or {}).items():
+                say(f"  copy {name} at {str(head)[:10]}")
+            return 0
+        if argv == ["update"]:
+            code = AGENT_FILES[0].read_text()
+            agent_call(cfg, "POST", "/update", {"code": code}, timeout=30)
+            want = int(re.search(r"const VERSION = (\d+)", code).group(1))
+            for _ in range(20):
+                time.sleep(1)
+                try:
+                    if agent_call(cfg, "GET", "/status", timeout=3).get("version") == want:
+                        say(f"{ok()} the agent is updated to version {want}")
+                        return 0
+                except AgentError:
+                    continue
+            die("the agent didn't come back after the update; it keeps the previous version as windows-agent.cjs.previous")
+        opts = {"shell": None, "detach": False, "cwd": None, "timeout_s": 300}
+        while argv and argv[0].startswith("--"):
+            flag = argv.pop(0)
+            if flag in ("--bash", "--cmd", "--powershell"):
+                opts["shell"] = flag[2:]
+            elif flag == "--detach":
+                opts["detach"] = True
+            elif flag in ("--cwd", "--timeout") and argv:
+                opts["cwd" if flag == "--cwd" else "timeout_s"] = argv.pop(0) if flag == "--cwd" else float(argv.pop(0))
+            else:
+                die(f"buckets win: unknown option {flag}")
+        if not argv:
+            die('buckets win: say the command, e.g. buckets win "nvidia-smi"')
+        d = agent_call(cfg, "POST", "/exec", {"cmd": " ".join(argv), **{k: v for k, v in opts.items() if v is not None}},
+                       timeout=opts["timeout_s"] + 30)
+    except AgentError as e:
+        die(str(e))
+    if opts["detach"]:
+        say(f"{ok()} started (pid {d.get('pid')}); its output goes to {d.get('log')}")
+        return 0
+    sys.stdout.write(d.get("output", ""))
+    if d.get("timed_out"):
+        say(f"{warn()} stopped after {opts['timeout_s']:g}s (--timeout to allow longer)")
+    return d.get("exit") if isinstance(d.get("exit"), int) else 1
+
+
+def win_setup(cfg: dict, to: Path | None = None) -> int:
+    """A token, and a folder with what the other machine needs once: the agent, its setup script, the token.
+    `to`: also put the folder there (a folder shared from the other machine), so nothing has to be carried."""
+    a = cfg.get("agent") or {}
+    token_path = Path(os.path.expanduser(a.get("token_file", "~/.config/buckets/agent.token")))
+    if not token_path.exists():
+        import secrets
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(secrets.token_urlsafe(32) + "\n")
+        token_path.chmod(0o600)
+    out = CONFIG_PATH.parent / "windows-setup"
+    out.mkdir(parents=True, exist_ok=True)
+    for f in AGENT_FILES:
+        shutil.copy2(f, out / f.name)
+    shutil.copy2(token_path, out / "agent.token")
+    (out / "agent.token").chmod(0o600)
+    if to is not None:
+        to.mkdir(parents=True, exist_ok=True)
+        for f in out.iterdir():
+            shutil.copyfile(f, to / f.name)
+        say(f"{ok()} {to} has what the Windows machine needs, once (the setup there removes the token from it):")
+    else:
+        say(f"{ok()} {out} has what the Windows machine needs, once:")
+        say("  1. copy that folder to the Windows machine (it holds the token: keep it to yourself)")
+    step = 1 if to is not None else 2
+    say(f"  {step}. on the Windows machine, in PowerShell as administrator, in that folder:")
+    say("       powershell -ExecutionPolicy Bypass -File .\\setup-buckets-agent.ps1")
+    if not a.get("url"):
+        say(f'  {step + 1}. here, in ~/.config/buckets/config.json: "agent": {{"url": "http://<windows address>:8766"}}')
+    say("  then: buckets win status")
+    return 0
+
+
 # ---------------------------------------------------------------- buckets live
 
 
@@ -7654,7 +7904,7 @@ class GitAssistant:
                                f"for those too")
         self.git("commit", "-q", "-m", self.message(f"{text['title']}\n\n{text['body']}"))
         checks = detect_checks(self.repo, b.rc)
-        results = run_checks(self.repo, checks, b.run, "pr", self.cfg["check_timeout_s"])
+        results = run_checks(self.repo, checks, b.run, "pr", self.cfg["check_timeout_s"], agent=self.cfg.get("agent"))
         failing = [n for n, res in results.items() if not res["ok"]]
         if failing:
             self.git("switch", "-q", back)
@@ -7765,6 +8015,87 @@ def claude_ready(cfg: dict) -> bool:
         return False
 
 
+def active_run() -> dict | None:
+    """The buckets run going on this machine now (its repo, request, pid, start), or None."""
+    if fcntl is None or not LOCK_PATH.exists():
+        return None
+    with LOCK_PATH.open("a+") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            f.seek(0)
+            try:
+                return json.loads(f.read() or "{}") or {"request": "?"}
+            except ValueError:
+                return {"request": "?"}
+        fcntl.flock(f, fcntl.LOCK_UN)
+    return None
+
+
+def describe_run(d: dict) -> str:
+    try:
+        age = elapsed(datetime.fromisoformat(d["started"]).timestamp())
+    except (KeyError, ValueError):
+        age = "a while"
+    request = " ".join(str(d.get("request", "?")).split())[:70]
+    return f'"{request}" in {Path(d.get("repo", "?")).name}, started {age} ago (pid {d.get("pid", "?")})'
+
+
+@contextlib.contextmanager
+def one_run(repo: Path, request: str, wait: bool = False):
+    """One buckets run per machine: both machines' models serve one request at a time (a second run would
+    queue behind the first and push its prompts out of the cache), and two runs in one repo would switch
+    branches under each other. A second run stops with what's running, or with `wait` queues behind it.
+    The lock goes with the process, so a crash never leaves it stuck."""
+    if fcntl is None:
+        yield
+        return
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    f = LOCK_PATH.open("a+")
+    try:
+        waiting = False
+        while True:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                f.seek(0)
+                try:
+                    other = json.loads(f.read() or "{}")
+                except ValueError:
+                    other = {}
+                if not wait and not waiting and interactive() and ask_yes(
+                        f"Another buckets run is going: {describe_run(other)}. Wait for it to finish?", 60):
+                    wait = True
+                if not wait:
+                    die(f"another buckets run is going: {describe_run(other)}. One run at a time (both machines "
+                        f"serve one request at a time); add --wait to start when it finishes")
+                if not waiting:
+                    say(f"  waiting for the other buckets run to finish: {describe_run(other)} (Ctrl-C to give up)")
+                    waiting = True
+                time.sleep(3)
+        f.seek(0)
+        f.truncate()
+        f.write(json.dumps({"repo": str(repo), "request": request, "pid": os.getpid(),
+                            "started": datetime.now().isoformat(timespec="seconds")}))
+        f.flush()
+        yield
+    finally:
+        try:
+            f.seek(0)
+            f.truncate()
+        except OSError:
+            pass
+        f.close()
+
+
+def busy_here(repo: Path) -> None:
+    """merge, discard and undo switch branches: not while a run works in this repo."""
+    d = active_run()
+    if d and Path(d.get("repo", "")).resolve() == repo.resolve():
+        die(f"a buckets run is working in this repo: {describe_run(d)}; wait for it to finish (or stop it)")
+
+
 def interactive() -> bool:
     return sys.stdin.isatty() and sys.stderr.isatty()
 
@@ -7853,6 +8184,8 @@ def start_time_limit(minutes: float | None) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if (sys.argv[1:] if argv is None else argv)[:1] == ["win"]:  # before argparse: the command keeps its own flags
+        return cmd_win(load_config(), (sys.argv[1:] if argv is None else argv)[1:])
     ap = argparse.ArgumentParser(prog="buckets", description=__doc__.split("\n\n")[0])
     ap.add_argument("request", nargs="*", help="what you want, in plain words")
     ap.add_argument("-f", "--file", help="read the request from a file")
@@ -7865,6 +8198,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--onto", help="with --pick: the branch to pick onto (default: the current branch)")
     ap.add_argument("-y", "--yes", action="store_true", help="start without the 5-second pause")
     ap.add_argument("--time-limit", type=float, metavar="MIN", help="stop cleanly after MIN minutes (like Ctrl-C)")
+    ap.add_argument("--wait", action="store_true",
+                    help="if another buckets run is going, start when it finishes instead of stopping")
     ap.add_argument("-v", "--verbose", action="store_true", help="also show token counts and timings")
     ap.add_argument("--reading", choices=["auto", "direct", "research"],
                     help="local mode: read picked files directly, or have the planner ask the helper model "
@@ -7922,6 +8257,7 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_last(here)
         if here is None:
             die("run this inside the repo")
+        busy_here(here)
         if words == ["undo"]:
             return cmd_undo(here)
         return cmd_merge(here) if words == ["merge"] else cmd_discard(here, args.yes)
@@ -7939,47 +8275,48 @@ def main(argv: list[str] | None = None) -> int:
             return chat_loop(sys.argv[1:] if argv is None else list(argv))
         ap.error("say what you want, e.g. buckets \"explain how auth works\"")
     repo = git_toplevel(args.repo)
-    if repo is None:
-        # Not a git repository yet: only git/GitHub chores make sense here ("make this a git repo…").
-        repo = Path(args.repo).resolve()
-        if not repo.is_dir():
-            die(f"{repo} isn't a folder")
-        if repo in (Path.home().resolve(), Path("/")):
-            die(f"{repo} is your {'home folder' if repo != Path('/') else 'root folder'}, not a project; "
-                f"cd into the project first (e.g. cd ~/Coding/ME/my-project)")
+    with one_run((repo or Path(args.repo)).resolve(), request.strip(), args.wait):
+        if repo is None:
+            # Not a git repository yet: only git/GitHub chores make sense here ("make this a git repo…").
+            repo = Path(args.repo).resolve()
+            if not repo.is_dir():
+                die(f"{repo} isn't a folder")
+            if repo in (Path.home().resolve(), Path("/")):
+                die(f"{repo} is your {'home folder' if repo != Path('/') else 'root folder'}, not a project; "
+                    f"cd into the project first (e.g. cd ~/Coding/ME/my-project)")
+            b = Buckets(cfg, repo, request.strip(), like=args.like)
+            _LOG = b.run.dir / "run.log"
+            say(f"{paint('buckets', 'bold')} {VERSION} · {repo.name} (not a git repository yet) · "
+                f"{paint(request.strip()[:100], 'bold')}")
+            try:
+                # A follow-up to an unfinished git request here ("name it buckets", "yes go ahead") is git too.
+                if not pending_git(repo) and b.route()["intent"] != "git":
+                    die(f"{repo} isn't a git repository; ask to make it one first "
+                        f"(e.g. buckets \"make this a git repo\"), or cd into a repo")
+                b.total = 3
+                b.heading(1, "Understanding your request")
+                say("  git/GitHub chores → local (free), with your confirmation before anything changes")
+                return GitAssistant(b).handle(b.request, args.yes)
+            except ModelError as e:
+                die(str(e))
+            except KeyboardInterrupt:
+                clear_status()
+                print("\nstopped", file=sys.stderr)
+                return 130
         b = Buckets(cfg, repo, request.strip(), like=args.like)
         _LOG = b.run.dir / "run.log"
-        say(f"{paint('buckets', 'bold')} {VERSION} · {repo.name} (not a git repository yet) · "
-            f"{paint(request.strip()[:100], 'bold')}")
+        say(f"{paint('buckets', 'bold')} {VERSION} · {repo.name} · {paint(request.strip()[:100], 'bold')}")
+        detail(f"run folder: {b.run.dir}")
+        code = 1
         try:
-            # A follow-up to an unfinished git request here ("name it buckets", "yes go ahead") is git too.
-            if not pending_git(repo) and b.route()["intent"] != "git":
-                die(f"{repo} isn't a git repository; ask to make it one first "
-                    f"(e.g. buckets \"make this a git repo\"), or cd into a repo")
-            b.total = 3
-            b.heading(1, "Understanding your request")
-            say("  git/GitHub chores → local (free), with your confirmation before anything changes")
-            return GitAssistant(b).handle(b.request, args.yes)
-        except ModelError as e:
-            die(str(e))
-        except KeyboardInterrupt:
-            clear_status()
-            print("\nstopped", file=sys.stderr)
-            return 130
-    b = Buckets(cfg, repo, request.strip(), like=args.like)
-    _LOG = b.run.dir / "run.log"
-    say(f"{paint('buckets', 'bold')} {VERSION} · {repo.name} · {paint(request.strip()[:100], 'bold')}")
-    detail(f"run folder: {b.run.dir}")
-    code = 1
-    try:
-        code = run_request(b, cfg, args, repo)
-        return code
-    finally:
-        if cfg.get("offload", {}).get("unload_mac"):
-            unload(cfg["planner"])
-        if time.time() - _T0 > 60 and cfg.get("notify", True):
-            notify("buckets", f"{'Done' if code == 0 else 'Finished, not done' if code == 2 else 'Stopped'}"
-                              f" · {repo.name} · {elapsed()}")
+            code = run_request(b, cfg, args, repo)
+            return code
+        finally:
+            if cfg.get("offload", {}).get("unload_mac"):
+                unload(cfg["planner"])
+            if time.time() - _T0 > 60 and cfg.get("notify", True):
+                notify("buckets", f"{'Done' if code == 0 else 'Finished, not done' if code == 2 else 'Stopped'}"
+                                  f" · {repo.name} · {elapsed()}")
 
 
 CHAT_COMMANDS = {"merge": "merge", "last": "last", "discard": "discard", "undo": "undo", "pr": "pr", "setup": "setup", "review": "review",

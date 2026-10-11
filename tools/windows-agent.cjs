@@ -23,7 +23,7 @@ const path = require("path");
 const crypto = require("crypto");
 const { spawn, spawnSync } = require("child_process");
 
-const VERSION = 2;
+const VERSION = 3;
 const args = Object.fromEntries(process.argv.slice(2).reduce((out, a, i, all) =>
   a.startsWith("--") ? [...out, [a.slice(2), all[i + 1]]] : out, []));
 const PORT = Number(args.port || process.env.BUCKETS_AGENT_PORT || 8766);
@@ -132,7 +132,7 @@ async function sync({ repo, head: want, bundle }) {
       git(ROOT, "clone", "-q", "--no-checkout", file, name);
       git(dir, "config", "core.autocrlf", "false");  // the same bytes as the Mac, or eslint and tests disagree
     } else if (file) {
-      git(dir, "fetch", "-q", file, "+refs/heads/*:refs/remotes/mac/*");
+      git(dir, "fetch", "-q", file, "+HEAD:refs/buckets/mac");  // buckets bundles the commit it's on, as HEAD
     }
     try { git(dir, "cat-file", "-e", `${want}^{commit}`); } catch {
       return { status: 409, body: { need: "bundle", have: head(dir), error: `${want.slice(0, 10)} isn't here yet` } };

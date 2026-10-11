@@ -21,6 +21,7 @@ _SANDBOX = Path(tempfile.mkdtemp(prefix="buckets-tests-"))
 buckets.CONFIG_PATH = _SANDBOX / "config.json"
 buckets.OPENCODE_CONFIG = _SANDBOX / "opencode.json"
 buckets.STATE_DIR = _SANDBOX / "state"
+buckets.LOCK_PATH = _SANDBOX / "active.lock"
 
 
 def make_repo(files: dict[str, str]) -> Path:
@@ -3213,6 +3214,245 @@ class NativeCoder(unittest.TestCase):
         self.b.fit_messages(messages, {"num_ctx": 32768, "max_tokens": 8000})
         self.assertIn("shortened", messages[2]["content"])
         self.assertEqual(messages[3]["content"], "y" * 900)
+
+
+class OneRunAtATime(unittest.TestCase):
+    """One buckets run per machine; a second stops with what's running, or queues with --wait."""
+
+    HOLD = """
+import sys, time
+sys.path.insert(0, {here!r})
+import buckets
+from pathlib import Path
+buckets.LOCK_PATH = Path({lock!r})
+with buckets.one_run(Path({repo!r}), "split the big screen"):
+    print("held", flush=True)
+    time.sleep({secs})
+"""
+
+    def setUp(self):
+        self.repo = make_repo({"a.txt": "a"})
+        self.lock = _SANDBOX / f"lock-{time.time_ns()}"
+        self.saved = buckets.LOCK_PATH
+        buckets.LOCK_PATH = self.lock
+
+    def tearDown(self):
+        buckets.LOCK_PATH = self.saved
+
+    def hold(self, secs):
+        code = self.HOLD.format(here=str(Path(buckets.__file__).parent), lock=str(self.lock), repo=str(self.repo), secs=secs)
+        p = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+        self.assertEqual(p.stdout.readline().strip(), "held")
+        self.addCleanup(p.kill)
+        return p
+
+    def test_a_second_run_stops_and_names_the_one_going(self):
+        self.hold(30)
+        d = buckets.active_run()
+        self.assertEqual((d["request"], Path(d["repo"]).resolve()), ("split the big screen", self.repo.resolve()))
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(err):
+            with buckets.one_run(self.repo, "another job"):
+                self.fail("must not start")
+        self.assertIn('another buckets run is going: "split the big screen"', err.getvalue())
+        self.assertIn("--wait", err.getvalue())
+
+    def test_with_wait_it_starts_when_the_other_finishes(self):
+        p = self.hold(2)
+        start = time.time()
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            with buckets.one_run(self.repo, "another job", wait=True):
+                self.assertEqual(buckets.active_run()["pid"], os.getpid())  # now it's this run
+        self.assertGreater(time.time() - start, 1)
+        self.assertIn("waiting for the other buckets run", err.getvalue())
+        p.wait()
+        self.assertIsNone(buckets.active_run())
+
+    def test_a_crashed_run_leaves_no_lock(self):
+        p = self.hold(30)
+        p.kill()
+        p.wait()
+        self.assertIsNone(buckets.active_run())
+        with buckets.one_run(self.repo, "next"):
+            pass
+
+    def test_merge_and_discard_wait_for_a_run_in_the_same_repo_only(self):
+        self.hold(30)
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            buckets.busy_here(self.repo)
+        buckets.busy_here(make_repo({"b.txt": "b"}))  # another repo: fine
+
+
+class ConfirmEvidence(unittest.TestCase):
+    def test_a_name_no_longer_in_the_changed_files_is_evidence_not_a_crash(self):
+        repo = make_repo({"src/screen.tsx": "const renderOld = () => null\n"})
+        (repo / "src/screen.tsx").write_text("const New = () => null\n")
+        subprocess.run(["git", "commit", "-qam", "rename"], cwd=repo, check=True)
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        b = buckets.Buckets(cfg, repo, "x")
+        seen = []
+        def fake_turn(cfg, run, label, messages, **kw):
+            seen.append(messages[-1]["content"])
+            return '{"real": [], "why": "it was removed"}', "", [], False
+        with mock.patch.object(buckets, "chat_turn", fake_turn), contextlib.redirect_stderr(io.StringIO()):
+            got = b.confirm_claims(cfg["planner"], "PROMPT", {"done": True}, ["`renderOld` is still used"], 1)
+        self.assertEqual(got, [])
+        self.assertIn("(not found in the changed files)", seen[0])
+
+
+class WindowsAgent(unittest.TestCase):
+    """`buckets win` against a real agent (tools/windows-agent.cjs), started here on a free port."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not shutil.which("node"):
+            raise unittest.SkipTest("node is needed")
+        cls.tmp = Path(tempfile.mkdtemp())
+        cls.agent = cls.tmp / "windows-agent.cjs"  # a copy: `update` rewrites the agent's own file
+        shutil.copy2(Path(buckets.__file__).parent / "tools" / "windows-agent.cjs", cls.agent)
+        (cls.tmp / "token").write_text("t" * 32 + "\n")
+        import socket
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            cls.port = sock.getsockname()[1]
+        cls.proc = subprocess.Popen(["node", str(cls.agent), "--root", str(cls.tmp / "copies"), "--token-file",
+                                     str(cls.tmp / "token"), "--port", str(cls.port), "--host", "127.0.0.1",
+                                     "--model-url", "http://127.0.0.1:1"], stdout=subprocess.PIPE, text=True)
+        cls.proc.stdout.readline()  # listening
+        cls.cfg = {"agent": {"url": f"http://127.0.0.1:{cls.port}", "token_file": str(cls.tmp / "token")}}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.proc.kill()
+        cls.proc.wait()
+        cls.proc.stdout.close()
+
+    def win(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = buckets.cmd_win(self.cfg, list(argv))
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_status_and_commands_with_their_exit_codes(self):
+        code, _, err = self.win("status")
+        self.assertEqual(code, 0)
+        self.assertIn("agent 3 on", err)
+        self.assertEqual(self.win("echo", "hello from the other machine")[:2], (0, "hello from the other machine\n"))
+        self.assertEqual(self.win("--bash", "--cwd", str(self.tmp), "pwd; exit 3")[:2], (3, str(self.tmp.resolve()) + "\n"))
+        code, _, err = self.win("--timeout", "1", "sleep 5")
+        self.assertEqual(code, 124)
+        self.assertIn("stopped after 1s", err)
+
+    def test_detached_commands_return_at_once(self):
+        start = time.time()
+        code, _, err = self.win("--detach", "sleep 3; echo done")
+        self.assertEqual(code, 0)
+        self.assertLess(time.time() - start, 2)
+        self.assertIn("started (pid", err)
+
+    def test_a_wrong_token_or_no_agent_is_said_plainly(self):
+        bad = self.tmp / "bad"
+        bad.write_text("x" * 32)
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()) as err:
+            buckets.cmd_win({"agent": {**self.cfg["agent"], "token_file": str(bad)}}, ["status"])
+        self.assertIn("401", err.getvalue())
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()) as err:
+            buckets.cmd_win({"agent": {"url": "http://127.0.0.1:1", "token_file": str(bad)}}, ["status"])
+        self.assertIn("didn't answer", err.getvalue())
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()) as err:
+            buckets.cmd_win({}, ["status"])
+        self.assertIn("buckets win setup", err.getvalue())
+
+    def test_an_update_replaces_the_agent_and_keeps_the_previous_one(self):
+        tmp = Path(tempfile.mkdtemp())
+        agent = tmp / "windows-agent.cjs"
+        shutil.copy2(self.agent, agent)
+        import socket
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        proc = subprocess.Popen(["node", str(agent), "--root", str(tmp / "copies"), "--token-file", str(self.tmp / "token"),
+                                 "--port", str(port), "--host", "127.0.0.1"], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(proc.stdout.close)
+        self.addCleanup(proc.kill)
+        proc.stdout.readline()
+        cfg = {"agent": {"url": f"http://127.0.0.1:{port}", "token_file": str(self.tmp / "token")}}
+        with self.assertRaisesRegex(buckets.AgentError, "400"):
+            buckets.agent_call(cfg, "POST", "/update", {"code": "// buckets agent\nthis is not javascript ((("})
+        new = agent.read_text().replace("const VERSION = 3;", "const VERSION = 4;")
+        self.assertEqual(buckets.agent_call(cfg, "POST", "/update", {"code": new})["restarting"], True)
+        self.assertEqual(proc.wait(timeout=5), 0)  # the start script's loop starts it again
+        self.assertIn("const VERSION = 4;", agent.read_text())
+        self.assertIn("const VERSION = 3;", (tmp / "windows-agent.cjs.previous").read_text())
+
+    def checks_repo(self):
+        repo = make_repo({"a.txt": "a\n", "b.txt": "ok\n"})
+        run = buckets.Run(repo)
+        return repo, run, {"lint": "test -f a.txt", "test": "grep -q ok b.txt"}
+
+    def test_split_checks_run_there_from_a_copy_kept_in_sync(self):
+        repo, run, checks = self.checks_repo()
+        agent = {**self.cfg["agent"], "checks": "split", "remote": ["test"]}
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = buckets.run_checks(repo, checks, run, "t1", 60, agent=agent)
+        self.assertEqual({n: r["ok"] for n, r in got.items()}, {"lint": True, "test": True})
+        self.assertEqual(list(got), ["lint", "test"])
+        log = next(run.dir.glob("*check-t1-test.log")).read_text()
+        self.assertIn("(on windows, exit 0)", log)
+        copy = self.tmp / "copies" / repo.name
+        self.assertEqual(subprocess.run(["git", "rev-parse", "HEAD"], cwd=copy, capture_output=True, text=True).stdout,
+                         subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout)
+        (repo / "b.txt").write_text("failed\n")
+        subprocess.run(["git", "commit", "-qam", "break"], cwd=repo, check=True)
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = buckets.run_checks(repo, checks, run, "t2", 60, agent=agent)  # only the new commit goes over
+        self.assertEqual(got["test"]["ok"], False)
+        self.assertIn("failed", (copy / "b.txt").read_text())
+
+    def test_shadow_checks_keep_this_machines_result_and_log_differences(self):
+        repo, run, checks = self.checks_repo()
+        checks["where"] = f'[ "$(pwd -P)" = "{repo.resolve()}" ]'  # true only here
+        agent = {**self.cfg["agent"], "checks": "shadow"}
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            got = buckets.run_checks(repo, checks, run, "s", 60, agent=agent)
+        self.assertTrue(all(r["ok"] for r in got.values()))
+        self.assertIn("where: passes here but fails on the other machine", err.getvalue())
+        rows = [json.loads(l) for l in (buckets.STATE_DIR / "checks-shadow.jsonl").read_text().splitlines()]
+        mine = [r for r in rows if r["repo"] == repo.name]
+        self.assertEqual({r["check"]: (r["mac_ok"], r["win_ok"]) for r in mine},
+                         {"lint": (True, True), "test": (True, True), "where": (True, False)})
+
+    def test_uncommitted_code_or_no_agent_keeps_the_checks_here(self):
+        repo, run, checks = self.checks_repo()
+        (repo / "new.txt").write_text("x")
+        self.assertEqual(buckets.remote_checks({**self.cfg["agent"], "checks": "split"}, checks, repo,
+                                               buckets.clean_tree(repo)), ("off", []))
+        (repo / "new.txt").unlink()
+        gone = {"url": "http://127.0.0.1:1", "token_file": self.cfg["agent"]["token_file"], "checks": "split",
+                "remote": ["test"]}
+        self.assertEqual(buckets.remote_checks(gone, checks, repo, buckets.clean_tree(repo)), ("off", []))
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = buckets.run_checks(repo, checks, run, "local", 60, agent=gone)
+        self.assertEqual({n: r["ok"] for n, r in got.items()}, {"lint": True, "test": True})
+
+    def test_setup_makes_a_private_token_and_the_folder_to_carry(self):
+        token = _SANDBOX / f"agent-{time.time_ns()}.token"
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            buckets.cmd_win({"agent": {"url": "", "token_file": str(token)}}, ["setup"])
+        folder = buckets.CONFIG_PATH.parent / "windows-setup"
+        self.assertEqual(sorted(p.name for p in folder.iterdir()),
+                         ["agent.token", "setup-buckets-agent.ps1", "windows-agent.cjs"])
+        self.assertEqual(oct(token.stat().st_mode & 0o777), "0o600")
+        self.assertGreaterEqual(len(token.read_text().strip()), 32)
+        self.assertIn('"agent": {"url"', err.getvalue())
+        shared = Path(tempfile.mkdtemp()) / "share" / "buckets-setup"
+        with contextlib.redirect_stderr(io.StringIO()):
+            buckets.cmd_win({"agent": {"url": "x", "token_file": str(token)}}, ["setup", "--to", str(shared)])
+        self.assertEqual((shared / "agent.token").read_text(), token.read_text())
+        self.assertTrue((shared / "setup-buckets-agent.ps1").exists())
 
 
 if __name__ == "__main__":
