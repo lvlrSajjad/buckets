@@ -340,11 +340,11 @@ def repo_config(repo: Path) -> dict:
 
 
 def opencode_env(repo: Path) -> dict:
-    """opencode knows a project by its first commit and opens the folder it first saw it in, so in a clone or
-    a second worktree of a repo its sessions would edit the original. A data folder per repo path keeps each
-    session in the folder buckets runs it in."""
+    """Where an opencode session works. It takes its folder from $PWD, not the process's working directory, so
+    a buckets started elsewhere (a script, the regression suite) sent it to that other folder; and it knows a
+    project by its first commit, so a data folder per repo path keeps a clone or second worktree its own."""
     where = STATE_DIR / "opencode" / re.sub(r"[^\w.-]+", "_", str(Path(repo).resolve()).strip("/"))
-    return {**os.environ, "XDG_DATA_HOME": str(where)}
+    return {**os.environ, "XDG_DATA_HOME": str(where), "PWD": str(Path(repo).resolve())}
 
 
 # ---------------------------------------------------------------- live events
@@ -5506,8 +5506,10 @@ class Buckets:
         def validate(d):
             return {"done": bool(d["done"]), "summary": str(d["summary"]),
                     "issues": [str(i) for i in d.get("issues") or []],
-                    "tasks": validate_tasks(self.fill_moves({"tasks": d.get("tasks") or []})["tasks"], self.repo,
-                                            self.cfg["max_tasks"], f"R{rnd + 1}T")}
+                    # a follow-up without a file can't be done; the verdict and issues still count
+                    "tasks": validate_tasks(self.fill_moves({"tasks": [t for t in d.get("tasks") or []
+                                                                       if clean_path(str(t.get("file") or ""))]})["tasks"],
+                                            self.repo, self.cfg["max_tasks"], f"R{rnd + 1}T")}
 
         moved = [r for r in results if r.get("action") in ("move", "share", "relocate", "dedupe", "unify", "component", "signature")
                  and r.get("status") == "done"]

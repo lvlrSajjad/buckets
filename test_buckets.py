@@ -3079,6 +3079,7 @@ class OpencodeFolder(unittest.TestCase):
         self.assertNotEqual(a["XDG_DATA_HOME"], b["XDG_DATA_HOME"])
         self.assertTrue(a["XDG_DATA_HOME"].startswith(str(buckets.STATE_DIR / "opencode")))
         self.assertEqual(a["PATH"], os.environ["PATH"])
+        self.assertEqual(a["PWD"], str(Path("/work/app").resolve()))  # opencode reads its folder from $PWD
 
     def test_run_proc_passes_the_environment(self):
         for on_line in (None, lambda line: None):

@@ -216,7 +216,7 @@ def run_buckets(c: dict, clone: Path, config: Path, request: str, log: Path) -> 
     here = str(Path(c["_file"]).parent) if c.get("_file") else "."
     cmd += [a.replace("{case_dir}", here) for a in c.get("args", ["--local", "-y"])]
     cmd += ["--time-limit", f"{limit:g}", request]
-    env = {**os.environ, "BUCKETS_CONFIG": str(config), "BUCKETS_STATE": str(STATE / "state"),
+    env = {**os.environ, "PWD": str(clone), "BUCKETS_CONFIG": str(config), "BUCKETS_STATE": str(STATE / "state"),
            "NO_COLOR": "1", "PYTHONUNBUFFERED": "1"}
     started = time.time()
     with log.open("a") as out:
