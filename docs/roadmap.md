@@ -22,8 +22,8 @@ Size: S under ~1 h, M a few hours, L a day or more. Each item is tested live (th
 **Tier 2: the refactoring toolbox** (big, medium and small moves combined in one plan; one engine finds
 references through TypeScript)
 7. ~~Move a function to a util, updating every importer~~ **done** (`relocate`, field notes 26). S–M
-8. Change a signature everywhere: add an optional parameter or prop, rename or reorder one, update every
-   call site. M
+8. ~~Change a signature everywhere~~ **done for adding a parameter or prop** (`signature`, field notes 27);
+   renaming or reordering one is left for item 11. M
 9. Code copied 3–4 times that drifted apart: **partly done** (`dedupe`: same-named top-level copies replaced
    by an import when they behave the same, run on sample inputs; differences shown). Still to do: finding
    copies with different names (clone detection), copies inside components. M–L

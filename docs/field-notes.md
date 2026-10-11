@@ -614,6 +614,22 @@ into a fact, and it is checked again at review time against the code as it is th
 Lessons: two confident reviewers can both miss a behaviour change that the checks don't cover; a
 mechanical behaviour comparison catches it. Evidence must be recomputed when the code it describes changes.
 
+### 27. A parameter added everywhere (`signature`, 2026-10-11)
+
+In the work repo, a widely used message helper (37 calls in 19 files): "add a duration parameter (default
+2000), use it instead of the fixed value, and pass 3000 from every call".
+
+| Run | What happened | Fix |
+|---|---|---|
+| 1, 3 | the planner chose `signature` itself; the values came JSX-style (`{3000}`), then labelled (`default: 2000`), then as `number = 2000`, each breaking every call | values unwrapped and unlabelled; values and types that don't parse are refused before anything is written |
+| 2 | the planner hand-edited the first 8 of 19 files instead | a plan that hand-edits 3+ call-site files is asked once more for the single signature task |
+| 4 | right, but the edit helper had also collapsed 90 of the files' own blank lines | blank lines tidied only where a removal left extra ones |
+| **7** | signature task (6 s for 37 calls), lint flags the parameter as unused, round 2 makes the one-line body change | **8m 57s, both reviews done; verified: all 37 calls pass 3000, `tsc`, eslint over the app, all tests pass** |
+
+Two smaller cases (a prop added to a component used in 4 places; a prop passed only from one screen's two
+uses) were planned as plain edits, which was right: the tool is for changes that repeat across many call
+sites, and plain edits did those in 3m 47s and 7m 03s.
+
 ## Lessons so far
 
 - Run it, don't argue about it: comparing two versions of a small function on sample inputs settles
