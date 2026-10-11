@@ -642,5 +642,5 @@ e.g. `{"~/code/oss/*": {"mode": "local"}}`.
 ## Tests
 
 ```bash
-python3 -m unittest test_buckets test_regress
+python3 -m unittest test_buckets test_regress test_rename
 ```
