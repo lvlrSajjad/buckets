@@ -3073,5 +3073,74 @@ class GitAssistantTests(unittest.TestCase):
         mock_git.stop()
 
 
+class OpencodeFolder(unittest.TestCase):
+    def test_each_repo_path_gets_its_own_opencode_data_folder(self):
+        a, b = buckets.opencode_env(Path("/work/app")), buckets.opencode_env(Path("/tmp/clones/app"))
+        self.assertNotEqual(a["XDG_DATA_HOME"], b["XDG_DATA_HOME"])
+        self.assertTrue(a["XDG_DATA_HOME"].startswith(str(buckets.STATE_DIR / "opencode")))
+        self.assertEqual(a["PATH"], os.environ["PATH"])
+
+    def test_run_proc_passes_the_environment(self):
+        for on_line in (None, lambda line: None):
+            code, out, _ = buckets.run_proc(["sh", "-c", "echo $XDG_DATA_HOME"], Path("."), 10, on_line=on_line,
+                                            env={**os.environ, "XDG_DATA_HOME": "/here"})
+            self.assertEqual(out.strip(), "/here")
+
+
+class LiveEvents(unittest.TestCase):
+    def setUp(self):
+        self.saved = dict(buckets.LIVE)
+        self.repo = make_repo({"a.txt": "a"})
+        self.run = buckets.Run(self.repo, "do the thing", "local")
+        self.events = self.run.dir / "events.jsonl"
+
+    def tearDown(self):
+        buckets.LIVE.update(self.saved)
+
+    def lines(self):
+        return [json.loads(line) for line in self.events.read_text().splitlines()]
+
+    def test_a_run_starts_its_events_with_the_request_and_records_what_it_says(self):
+        buckets.say("Step 1/5 · Understanding your request")
+        first, said = self.lines()
+        self.assertEqual((first["ev"], first["request"], first["mode"], first["run"]),
+                         ("run", "do the thing", "local", self.run.dir.name))
+        self.assertTrue(said["text"].endswith("Step 1/5 · Understanding your request"))
+
+    def test_a_model_call_is_a_session_with_a_start_progress_and_end(self):
+        def stream(url, body, label, *a, **kw):
+            buckets.live_progress(5, 3)
+            buckets.live_progress(6, 3)  # within the second: not shown
+            return "answer", "", {"prompt_eval_count": 120, "eval_count": 6}
+        wrapped = buckets.live_stream(stream)
+        wrapped("http://192.168.1.9:8080", {"model": "m", "think": True, "messages": [{"content": "x" * 400}]}, "plan")
+        call, progress, end = self.lines()[1:]
+        self.assertEqual((call["ev"], call["label"], call["machine"], call["think"]), ("call", "plan", "windows", True))
+        self.assertEqual((progress["id"], progress["tokens"]), (call["id"], 5))
+        self.assertEqual((end["ev"], end["ok"], end["tokens_in"], end["tokens_out"]), ("call_end", True, 120, 6))
+
+    def test_a_failed_call_ends_as_failed(self):
+        def stream(url, body, label, *a, **kw):
+            raise buckets.StreamCut("gone")
+        with self.assertRaises(buckets.StreamCut):
+            buckets.live_stream(stream)("http://localhost:11434", {"messages": []}, "review")
+        call, end = self.lines()[1:]
+        self.assertEqual((call["machine"], end["ok"], end["error"]), ("mac", False, "StreamCut"))
+
+    def test_the_server_reads_whole_lines_from_an_offset_and_lists_runs(self):
+        with mock.patch.dict(os.environ, {"BUCKETS_REGRESS_STATE": str(_SANDBOX / "no-suite")}):
+            buckets.say("one")
+            got = buckets.live_events(self.run.dir.name, 0)
+            self.assertEqual([e["ev"] for e in got["lines"]], ["run", "say"])
+            with self.events.open("a") as f:
+                f.write('{"t": 1, "ev": "say", "text": "half')  # still being written
+            more = buckets.live_events(self.run.dir.name, got["next"])
+            self.assertEqual(more, {"lines": [], "next": got["next"]})
+            self.assertEqual(buckets.live_events("../etc", 0)["lines"], [])
+            runs = buckets.live_runs()
+            mine = next(r for r in runs if r["run"] == self.run.dir.name)
+            self.assertEqual((mine["request"], mine["done"]), ("do the thing", "running"))
+
+
 if __name__ == "__main__":
     unittest.main()

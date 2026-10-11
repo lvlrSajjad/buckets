@@ -18,7 +18,9 @@ import ast
 import contextlib
 import difflib
 import fnmatch
+import functools
 import hashlib
+import http.server
 import json
 import os
 import re
@@ -221,6 +223,7 @@ def say(msg: str) -> None:
     m, s = divmod(int(time.time() - _T0), 60)
     print(f"{paint(f'[{m:02d}:{s:02d}]', 'dim')} {msg}", file=sys.stderr, flush=True)
     _log(f"[{m:02d}:{s:02d}] {msg}")
+    live("say", text=strip_ansi(msg))
 
 
 def detail(msg: str) -> None:
@@ -336,13 +339,86 @@ def repo_config(repo: Path) -> dict:
         die(f"{p} is not valid JSON: {e}")
 
 
+def opencode_env(repo: Path) -> dict:
+    """opencode knows a project by its first commit and opens the folder it first saw it in, so in a clone or
+    a second worktree of a repo its sessions would edit the original. A data folder per repo path keeps each
+    session in the folder buckets runs it in."""
+    where = STATE_DIR / "opencode" / re.sub(r"[^\w.-]+", "_", str(Path(repo).resolve()).strip("/"))
+    return {**os.environ, "XDG_DATA_HOME": str(where)}
+
+
+# ---------------------------------------------------------------- live events
+
+
+LIVE: dict = {"path": None, "id": 0}  # the current run's events.jsonl, and the last call id
+_live_lock, _live_thread = threading.Lock(), threading.local()
+
+
+def live(ev: str, **fields) -> int | None:
+    """One event in the run's events.jsonl, for `buckets live` to animate: model calls ("call", "progress",
+    "call_end"), tools ("tool", "tool_end"), every printed line ("say"), the run's start and end. Calls and
+    tools get an id, returned. Never fails the run."""
+    if LIVE["path"] is None:
+        return None
+    with _live_lock:
+        if ev in ("call", "tool"):
+            LIVE["id"] += 1
+            fields["id"] = LIVE["id"]
+        try:
+            with open(LIVE["path"], "a") as f:
+                f.write(json.dumps({"t": round(time.time(), 3), "ev": ev, **fields}, default=str) + "\n")
+        except OSError:
+            pass
+    return fields.get("id")
+
+
+def live_progress(tokens: int, thinking: int) -> None:
+    """A streaming call's token counts, at most once a second."""
+    now, cid = time.time(), getattr(_live_thread, "call", None)
+    if cid and now - getattr(_live_thread, "shown", 0) >= 1:
+        _live_thread.shown = now
+        live("progress", id=cid, tokens=tokens, thinking=thinking)
+
+
+def machine_of(url: str) -> str:
+    """Which machine a model server is: this Mac, or the other one on the network."""
+    host = urllib.parse.urlparse(url or "").hostname or ""
+    return "mac" if host in ("", "localhost", "127.0.0.1", "::1") else "windows"
+
+
+def live_stream(fn):
+    """A model call as a live session: when it starts, its token counts as it streams, how it ended."""
+    @functools.wraps(fn)
+    def wrapper(url, body, label, *args, **kw):
+        prompt = sum(est_tokens(m.get("content") or "") for m in body.get("messages", []))
+        cid = live("call", label=label, machine=machine_of(url), model=body.get("model"),
+                   think=bool(body.get("think")), prompt_tokens=prompt)
+        _live_thread.call, start = cid, time.time()
+        try:
+            content, thinking, stats = fn(url, body, label, *args, **kw)
+        except ThinkingCut:
+            live("call_end", id=cid, ok=True, cut=True, secs=round(time.time() - start, 1))
+            raise
+        except BaseException as e:
+            live("call_end", id=cid, ok=False, error=type(e).__name__, secs=round(time.time() - start, 1))
+            raise
+        finally:
+            _live_thread.call = None
+        live("call_end", id=cid, ok=True, tokens_in=stats.get("prompt_eval_count"), tokens_out=stats.get("eval_count"),
+             secs=round(time.time() - start, 1))
+        return content, thinking, stats
+    return wrapper
+
+
 class Run:
     """One invocation's working folder: every model call, coder log and the report."""
 
-    def __init__(self, repo: Path):
+    def __init__(self, repo: Path, request: str = "", mode: str = ""):
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         self.dir = STATE_DIR / "runs" / f"{repo.name}-{stamp}"
         self.dir.mkdir(parents=True, exist_ok=True)
+        LIVE.update(path=self.dir / "events.jsonl", id=0)
+        live("run", run=self.dir.name, repo=repo.name, request=request, mode=mode)
         self.n = 0
         self.talked = False  # a local model answered during this run (so one is up)
 
@@ -360,15 +436,15 @@ class Run:
 
 
 def run_proc(cmd, cwd: Path, timeout: float, shell: bool = False,
-             input: str | None = None, on_line=None) -> tuple[int, str, bool]:
+             input: str | None = None, on_line=None, env: dict | None = None) -> tuple[int, str, bool]:
     """Run a command in its own process group; kill the whole group on timeout.
     With `on_line`, output is read as it arrives and each line is passed to it (for live progress)."""
     if on_line is not None:
-        return _run_streaming(cmd, cwd, timeout, on_line)
+        return _run_streaming(cmd, cwd, timeout, on_line, env)
     proc = subprocess.Popen(
         cmd, cwd=cwd, shell=shell, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL, text=True, errors="replace",
-        start_new_session=True,
+        start_new_session=True, env=env,
     )
     try:
         out, _ = proc.communicate(input=input, timeout=timeout)
@@ -409,9 +485,9 @@ def _kill_group(proc) -> None:
             continue
 
 
-def _run_streaming(cmd, cwd: Path, timeout: float, on_line) -> tuple[int, str, bool]:
+def _run_streaming(cmd, cwd: Path, timeout: float, on_line, env: dict | None = None) -> tuple[int, str, bool]:
     proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            stdin=subprocess.DEVNULL, text=True, errors="replace", start_new_session=True)
+                            stdin=subprocess.DEVNULL, text=True, errors="replace", start_new_session=True, env=env)
     lines: list[str] = []
 
     def pump():
@@ -729,6 +805,7 @@ class SchemaGaveUp(ModelError):
     """Claude couldn't fit its answer to the JSON schema (the CLI's structured-output retries ran out)."""
 
 
+@live_stream
 def _stream_chat(url: str, body: dict, label: str, timeout: float, quiet: bool = False,
                  think_budget: int = 0) -> tuple[str, str, dict]:
     req = urllib.request.Request(
@@ -751,11 +828,13 @@ def _stream_chat(url: str, body: dict, label: str, timeout: float, quiet: bool =
             if m.get("thinking"):
                 thinking.append(m["thinking"])
                 ntok += 1
+                live_progress(ntok, nthink)
                 nthink += 1
                 guard_thinking(thinking, nthink, content, think_budget)  # leaving the `with` closes the request
             if m.get("content"):
                 content.append(m["content"])
                 ntok += 1
+                live_progress(ntok, nthink)
             for c in m.get("tool_calls") or []:  # Ollama sends each call whole
                 fn = c.get("function") or {}
                 args = fn.get("arguments") or {}
@@ -823,6 +902,7 @@ def openai_body(body: dict) -> dict:
     return out
 
 
+@live_stream
 def _stream_chat_llamacpp(url: str, body: dict, label: str, timeout: float, quiet: bool = False,
                           think_budget: int = 0) -> tuple[str, str, dict]:
     """The same call against llama.cpp's server (OpenAI-style, streamed): its reasoning and content,
@@ -852,11 +932,13 @@ def _stream_chat_llamacpp(url: str, body: dict, label: str, timeout: float, quie
                 if delta.get("reasoning_content"):
                     thinking.append(delta["reasoning_content"])
                     ntok += 1
+                    live_progress(ntok, nthink)
                     nthink += 1
                     guard_thinking(thinking, nthink, content, think_budget)
                 if delta.get("content"):
                     content.append(delta["content"])
                     ntok += 1
+                    live_progress(ntok, nthink)
                 for c in delta.get("tool_calls") or []:  # streamed in pieces, keyed by index
                     part = parts.setdefault(c.get("index", 0), {"id": "", "name": "", "arguments": ""})
                     fn = c.get("function") or {}
@@ -1114,9 +1196,11 @@ def claude_call(cfg: dict, run: Run, label: str, prompt: str, repo: Path, *, sch
                 model: str | None = None, tools: bool = True, add_dirs=()):
     c = cfg["claude"]
     model = model or c["model"]
+    cid, start = live("call", label=label, machine="claude", model=model, think=False, prompt_tokens=est_tokens(prompt)), time.time()
     with Ticker(f"  {friendly(label)} (Claude {model})"):
         code, out, timed_out = run_proc(claude_command(c, model, schema, tools, add_dirs), repo, c["timeout_s"],
                                         input=prompt)
+    live("call_end", id=cid, ok=code == 0 and not timed_out, secs=round(time.time() - start, 1))
     run.save(f"{label}-claude.json", f"{prompt}\n\n===== output =====\n{out}")
     if timed_out:
         raise ModelError(f"{label}: Claude timed out after {c['timeout_s']}s")
@@ -1169,12 +1253,15 @@ def ts_moves(repo: Path, payload: dict, timeout: int = 300) -> dict:
     """Run one ts_moves.cjs operation (extract, compare, share); {"ok": False, "error"} on any failure."""
     if not shutil.which("node") or not MOVES_SCRIPT.exists():
         return {"ok": False, "error": "node (and ts_moves.cjs) are needed for mechanical moves"}
+    tid, start, out = live("tool", name=f"ts_moves:{payload.get('op', '?')}", kind="move"), time.time(), None
     try:
         r = subprocess.run(["node", str(MOVES_SCRIPT)], input=json.dumps({**payload, "repo": str(repo)}),
                            cwd=repo, capture_output=True, text=True, timeout=timeout)
-        return json.loads(r.stdout) if r.stdout.strip() else {"ok": False, "error": r.stderr.strip()[-300:] or "no output"}
+        out = json.loads(r.stdout) if r.stdout.strip() else {"ok": False, "error": r.stderr.strip()[-300:] or "no output"}
     except (subprocess.TimeoutExpired, json.JSONDecodeError) as e:
-        return {"ok": False, "error": str(e)[:300]}
+        out = {"ok": False, "error": str(e)[:300]}
+    live("tool_end", id=tid, ok=bool(out.get("ok")), secs=round(time.time() - start, 1))
+    return out
 TS_EXT = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
 
 
@@ -1651,8 +1738,10 @@ def run_checks(repo: Path, checks: dict[str, str], run: Run, tag: str, timeout: 
                              "output": out[-20000:]}
             continue
         start = time.time()
+        tid = live("tool", name=name, kind="check")
         with Ticker(f"  Running {name}: {cmd}"):
             code, out, timed_out = run_proc(cmd, repo, timeout, shell=True)
+        live("tool_end", id=tid, ok=code == 0 and not timed_out, secs=round(time.time() - start, 1))
         out = strip_ansi(out)
         run.save(f"check-{tag}-{name}.log", f"$ {cmd}\n(exit {code})\n\n{out}")
         results[name] = {"ok": code == 0 and not timed_out, "seconds": round(time.time() - start, 1),
@@ -3328,7 +3417,7 @@ class Buckets:
         self.cost = 0.0
         self.difficulty = "light"
         self.total = 5
-        self.run = Run(repo)
+        self.run = Run(repo, request, self.mode)
         self.planner = cfg["planner"]
         self.timeout = cfg["request_timeout_s"]
         self.run.save("request.md", request)
@@ -4209,7 +4298,11 @@ class Buckets:
                 action = coder_action(line)
                 if action:
                     tick.text = f"  {cap(self.worker)} is looking up: {ask[:40]} · {action}"
-            _, out, timed_out = run_proc(cmd, self.repo, r["errand_timeout_s"], on_line=show)
+            cid = live("call", label=label, machine=machine_of(c.get("url", "")), model=model, think=False,
+                       prompt_tokens=est_tokens(prompt))
+            code, out, timed_out = run_proc(cmd, self.repo, r["errand_timeout_s"], on_line=show,
+                                           env=opencode_env(self.repo))
+            live("call_end", id=cid, ok=code == 0 and not timed_out, secs=round(time.time() - start, 1))
         self.run.save(f"{label}.log", f"{prompt}\n\n===== output =====\n{strip_ansi(out)}")
         answer = errand_answer(out) or ("(no answer: timed out)" if timed_out else "(no answer)")
         mark = warn() if answer.startswith("(no answer") else ok()
@@ -4714,7 +4807,11 @@ class Buckets:
                     action = coder_action(line)
                     if action:
                         tick.text = f"{head} · {action}"
-                code, out, timed_out = run_proc(cmd, self.repo, c["timeout_s"], on_line=show)
+                cid = live("call", label=f"code-{task['id']}", machine=machine_of(c.get("url", "")),
+                           model=c["opencode_model"], think=False, prompt_tokens=est_tokens(prompt))
+                code, out, timed_out = run_proc(cmd, self.repo, c["timeout_s"], on_line=show,
+                                                env=opencode_env(self.repo))
+                live("call_end", id=cid, ok=code == 0 and not timed_out, secs=round(time.time() - start, 1))
             out = strip_ansi(out)
             self.run.save(f"coder-{task['id']}-a{attempt}.log", f"{prompt}\n\n===== output =====\n{out}")
             touched = touched_since(self.repo, before)
@@ -6359,6 +6456,7 @@ def finish(b, kind: str, done: bool | None, branch: str | None, merge_into: str 
             "builds_on": getattr(b, "builds_on", None),
             "minutes": round((time.time() - _T0) / 60, 1), "claude_usd": round(b.cost, 3)}
     (b.run.dir / "meta.json").write_text(json.dumps(meta, indent=2))
+    live("end", done=done, branch=branch, minutes=meta["minutes"])
     remember(b, kind, done, branch, merge_into, report)
 
 
@@ -6634,6 +6732,103 @@ def cmd_discard(repo: Path, yes: bool) -> int:
         git(repo, "checkout", "-q", into)
     git(repo, "branch", "-q", "-D", branch)
     say(f"{ok()} deleted {branch}")
+    return 0
+
+
+# ---------------------------------------------------------------- buckets live
+
+
+LIVE_PAGE = Path(__file__).resolve().parent / "live.html"
+LIVE_SAMPLE = Path(__file__).resolve().parent / "tools" / "live-sample.jsonl"
+
+
+def live_dirs() -> dict[str, Path]:
+    """Where runs are: buckets' own state, and the regression suite's when it exists."""
+    dirs = {"": STATE_DIR / "runs"}
+    suite = Path(os.environ.get("BUCKETS_REGRESS_STATE", Path.home() / ".local/state/buckets-regress")) / "state" / "runs"
+    if suite.is_dir() and suite.resolve() != dirs[""].resolve():
+        dirs["regress~"] = suite
+    return dirs
+
+
+def live_runs(limit: int = 30) -> list[dict]:
+    found = [(prefix, d) for prefix, root in live_dirs().items() for d in root.glob("*")
+             if (d / "events.jsonl").exists()]
+    found.sort(key=lambda x: (x[1] / "events.jsonl").stat().st_mtime, reverse=True)
+    out = []
+    for prefix, d in found[:limit]:
+        try:
+            with (d / "events.jsonl").open() as f:
+                first = json.loads(f.readline())
+        except (OSError, ValueError):
+            first = {}
+        try:
+            done = json.loads((d / "meta.json").read_text()).get("done") if (d / "meta.json").exists() else "running"
+        except (OSError, ValueError):
+            done = None
+        out.append({"run": prefix + d.name, "repo": first.get("repo", ""), "request": first.get("request", ""),
+                    "done": done, "mtime": (d / "events.jsonl").stat().st_mtime})
+    return out
+
+
+def live_events(run: str, start: int) -> dict:
+    """The run's events from byte `start` up to the last whole line."""
+    prefix, name = (run.split("~", 1)[0] + "~", run.split("~", 1)[1]) if "~" in run else ("", run)
+    root = live_dirs().get(prefix)
+    if root is None or not re.fullmatch(r"[\w.-]+", name):
+        return {"lines": [], "next": start}
+    try:
+        with (root / name / "events.jsonl").open("rb") as f:
+            f.seek(start)
+            data = f.read()
+    except OSError:
+        return {"lines": [], "next": start}
+    whole = data[:data.rfind(b"\n") + 1]
+    lines = []
+    for line in whole.splitlines():
+        try:
+            lines.append(json.loads(line))
+        except ValueError:
+            pass
+    return {"lines": lines, "next": start + len(whole)}
+
+
+class LiveHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        url = urllib.parse.urlparse(self.path)
+        q = urllib.parse.parse_qs(url.query)
+        if url.path == "/api/runs":
+            return self.send(json.dumps({"runs": live_runs()}), "application/json")
+        if url.path == "/api/events":
+            start = int((q.get("from") or ["0"])[0] or 0)
+            return self.send(json.dumps(live_events((q.get("run") or [""])[0], max(start, 0))), "application/json")
+        if url.path in ("/", "/index.html") and LIVE_PAGE.exists():
+            return self.send(LIVE_PAGE.read_text(), "text/html; charset=utf-8")
+        if url.path == "/tools/live-sample.jsonl" and LIVE_SAMPLE.exists():
+            return self.send(LIVE_SAMPLE.read_text(), "application/x-ndjson")
+        self.send_error(404)
+
+    def send(self, text: str, kind: str) -> None:
+        body = text.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", kind)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+def cmd_live(port: int) -> int:
+    """A page that shows runs as they happen (and replays finished ones), on this machine only."""
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), LiveHandler)
+    say(f"{ok()} buckets live: {paint(f'http://localhost:{port}/', 'cyan')} (Ctrl-C to stop)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
     return 0
 
 
@@ -7550,6 +7745,8 @@ def main(argv: list[str] | None = None) -> int:
         if here is None:
             die("run this inside the repo")
         return cmd_review(cfg, here)
+    if words[:1] == ["live"] and not args.file:
+        return cmd_live(int(words[1]) if len(words) > 1 and words[1].isdigit() else 8765)
     if words in (["last"], ["merge"], ["discard"], ["undo"]) and not args.file:
         here = git_toplevel(args.repo)
         if words == ["last"]:
