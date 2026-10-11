@@ -6093,8 +6093,10 @@ def leave_branch(repo: Path, branch: str, start_branch: str, base: str) -> str:
     if changed_paths(repo):
         if not UNATTENDED["on"]:
             return f"uncommitted changes are left on {branch}; you're still on that branch"
-        git(repo, "stash", "push", "-u", "-q", "-m", f"buckets: unfinished task on {branch}")
-        stashed = "; a half-done task's edits are stashed (git stash list)"
+        # Kept on buckets' own branch, never in your stash list: `discard` removes them with the rest.
+        git(repo, "add", "-A")
+        git(repo, "commit", "--no-verify", "-q", "-m", "buckets: unfinished task (the run was stopped)")
+        stashed = "; a half-done task's edits are committed on that branch as \"unfinished\""
     git(repo, "checkout", "-q", start_branch)
     if git(repo, "rev-parse", branch).strip() == base:
         git(repo, "branch", "-q", "-D", branch)

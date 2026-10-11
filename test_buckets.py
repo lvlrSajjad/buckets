@@ -1639,7 +1639,7 @@ class MemoryOutside(unittest.TestCase):
 
 
 class CleanStops(unittest.TestCase):
-    def test_an_unattended_stop_stashes_half_done_edits_and_goes_back(self):
+    def test_an_unattended_stop_keeps_half_done_edits_on_the_branch_and_goes_back(self):
         repo = make_repo({"a.txt": "1\n"})
         main = buckets.git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
         base = buckets.git(repo, "rev-parse", "HEAD").strip()
@@ -1653,11 +1653,11 @@ class CleanStops(unittest.TestCase):
             msg = buckets.leave_branch(repo, "buckets/x", main, base)
         finally:
             buckets.UNATTENDED["on"] = old
-        self.assertIn("stashed", msg)
+        self.assertIn("committed on that branch", msg)
         self.assertEqual(buckets.git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip(), main)
         self.assertEqual((repo / "a.txt").read_text(), "1\n")
-        self.assertIn("buckets: unfinished task on buckets/x", buckets.git(repo, "stash", "list"))
-        self.assertFalse(buckets.branch_exists(repo, "buckets/x"))              # nothing committed on it
+        self.assertEqual(buckets.git(repo, "stash", "list").strip(), "")          # the stash list is untouched
+        self.assertIn("unfinished task", buckets.git(repo, "log", "-1", "--format=%s", "buckets/x"))
 
 
 class Undo(unittest.TestCase):
