@@ -1803,6 +1803,9 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
             buckets.validate_tasks([bad], self.repo, 8, "T")
         with self.assertRaisesRegex(ValueError, "TypeScript or JavaScript"):
             buckets.validate_tasks([{**bad, "file": "README.md", "into": "src/x.ts"}], self.repo, 8, "T")
+        ok = {"id": "T2", "file": "src/ui.tsx", "action": "edit", "instructions": "x", "done_when": "", "edits": []}
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual([t["action"] for t in buckets.validate_tasks([{**bad, "into": ""}, ok], self.repo, 8, "T")], ["edit"])
         with self.assertRaisesRegex(ValueError, "share"):
             buckets.validate_tasks([{**bad, "action": "share", "from": ["src/ui.tsx"], "select": ["x"]}], self.repo, 8, "T")
 

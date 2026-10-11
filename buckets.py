@@ -2859,7 +2859,12 @@ def validate_tasks(tasks: list, repo: Path, max_tasks: int, prefix: str) -> list
             raise ValueError(f"task file path {t['file']!r} must be relative to the repo root")
         action = t["action"]
         if action in ("move", "share"):
-            out.append(validate_move(t, f, repo, f"{prefix}{len(out) + 1}"))
+            try:
+                out.append(validate_move(t, f, repo, f"{prefix}{len(out) + 1}"))
+            except ValueError as e:
+                if len(tasks) == 1:
+                    raise
+                say(f"  {warn()} dropped a {action} task that can't run ({str(e)[:140]})")
             continue
         exists = (repo / f).is_file()
         if action in ("edit", "delete") and not exists:
