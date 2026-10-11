@@ -1,4 +1,4 @@
-# Handoff (updated 2026-10-11, before compacting again)
+# Handoff (updated 2026-10-12 ~00:00, before compacting)
 
 Read this first. Details: [../README.md](../README.md), [field-notes.md](field-notes.md) (every
 measurement; 20–28 are the latest), [roadmap.md](roadmap.md), and the research in
@@ -55,17 +55,34 @@ Done since (2026-10-11 afternoon):
 - **Native coder** (`coder.engine = "native"`, opt-in): buckets' own read/search/edit/write loop.
 - **`buckets live`** (port 8765): `live.html` animates `events.jsonl` live, replays finished runs.
 
-Next, agreed with the owner:
-1. **A/B the coder engines** with the suite (`coder-hide`, `coder-tags`, then the full set), 2-3 runs each;
-   make native the default if it's as reliable and faster. Don't edit this working copy while a buckets
-   case (`coder-tags`, `tags*`) runs: the suite treats a status change in the source repo as a stop.
-2. ~~Roadmap 29–30~~ measured (field notes 31): 30 is in as a syntax reflex (planned edits and coders can't leave
-   a TS/JS file unparseable); 29 is parked on `park/predictive-review`. **Next: 29b, the review thinking budget**
-   (almost half the reviews think until they're cut off), A/B'd on the suite. Suite cases `compact-prop` and
-   `compact-clean` (in `docs/private/regress/`) replay a real plan with and without a syntax slip.
-3. Then item 11 (renames through the TypeScript language service), item 12 (shared hooks past early returns),
-   the rest of item 9 (copies with different names), JSX chunks by lines → components; simframe UI checks.
-4. Then tier 3 (`measure`, the batch loop), tier 4, tier 5.
+Done the night of 2026-10-11 (owner's go-ahead for 8 hours, both laptops; ~22:40–06:45):
+- One run per machine (`--wait` queues); `buckets win` (agent on Windows, `tools/windows-agent.cjs`, v3,
+  self-updating; `C:\buckets`, port 8766, token in `~/.config/buckets/agent.token`); Windows checks measured
+  2.5–15× slower and push the model out of RAM (field notes 30), so `agent.checks = "overflow"` (only while the
+  Mac is busy, tsc+eslint). The work repo's copy on Windows is kept (owner's wish).
+- `rename` (item 11), `find_copies` + dedupe aliases (item 9: identical-once-renamed, non-trivial copies only),
+  `buckets measure` (13), `buckets each` (14), coverage facts for test requests (17), `buckets bisect` (18),
+  `--update BRANCH|PR` (19), red CI on a PR (20), `buckets contract` (23, `api_contract.cjs`), leftover-debug
+  shortcut, "Decided without asking" in reports, repeated look-ups end planning, look-ups shortened to fit
+  the planner's context (a plan hit 70k of 64k).
+- Regression suite: `setup` commands per case; private cases `rename`, `update-conflict` added (not run yet);
+  merge-inventory/rfp/proposal and signature expectations corrected (they checked lines, not what moved).
+
+Next (in order):
+1. **Read the A/B** started 22:45 from a frozen runner copy
+   (`<scratchpad>/runner`, `ab-opencode.log` then `ab-native.log`; `python3 regress.py --summary` style tables
+   in `~/.local/state/buckets-regress/logs/<suite>/summary.md`). Decide the coder default (native vs opencode).
+2. **Run the new cases** with the current code: `python3 regress.py rename update-conflict` (and the four that
+   failed in the baseline). Verify branches by hand as always.
+3. **Fold identical variant files** (6 pairs in the work repo, 5 byte-identical): a `fold` op in ts_moves
+   (TypeScript getEditsForFileRename for both copies → one file in the parent folder; refuse on new type
+   errors), a plan action and a hint from the variant inventory. Was being written when compacting.
+4. **Contract from code:** the backend's exported swagger is ~2.5 months stale, so most "no endpoint" results
+   are false; read NestJS routes from `@Controller`/`@Get…` decorators instead (owner to confirm). Owner
+   questions open: module state shared between variants in merges (suggested: keep it, convert separately);
+   the contract findings (details in `docs/private/contract-report-2026-10-11.md`).
+5. Then item 12 (shared hooks past early returns), JSX chunks → components, simframe UI checks; the other
+   session owns 29b (review thinking budget) and tier 6.
 
 Known weak spots: the local planner varies run to run (guards cover it); reviewers are the weakest link
 (verify every branch yourself); each new tool needed 3–7 live attempts before a clean run.
