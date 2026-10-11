@@ -2544,7 +2544,7 @@ TASK_SCHEMA = {
     "properties": {
         "id": {"type": "string"},
         "file": {"type": "string"},
-        "action": {"type": "string", "enum": ["edit", "create", "delete", "move", "share", "unify", "relocate", "dedupe", "signature", "component", "rename"]},
+        "action": {"type": "string", "enum": ["edit", "create", "delete", "move", "share", "unify", "relocate", "dedupe", "signature", "component", "rename", "fold"]},
         "instructions": {"type": "string"},
         "done_when": {"type": "string"},
         "read_first": {"type": "array", "items": {"type": "string"}},
@@ -2740,6 +2740,9 @@ text and the files it opens itself, and it cannot run commands):
 - Renaming a function, component, type or constant everywhere it's used: plan action "rename": "file"
   defines it, "where" its current name, "name" the new one. Every use, import and JSX tag is renamed
   mechanically (and refused if the new name clashes); don't plan edits for the uses.
+- Two variants of a file that are the same code (the facts say "identical"): plan action "fold": "from" the
+  two copies, "file" the one file they become (by default their parent folder, same name). Both copies go
+  and every importer is repointed mechanically; don't plan edits for the importers.
 - Instructions must be self-contained and concrete: name the functions, types and exports to add
   or change, their signatures, and where in the file they go. Include exact code when it's short.
 - "read_first" lists other files the coder should open for context (types it must use, patterns to
@@ -3149,7 +3152,7 @@ MOVE_HINT = """A mechanical move fits this request: this task moves the code exa
 Dry run: it moves {moved} statements ({lines} lines) of `{where}` into `{name}` in `{into}`. The hook takes
 {params} and returns {count} values ({returns}); private helpers that move along: {helpers}.{notes}
 Plan this as T1 (copy it). Add tasks only for what the request asks beyond the move; checks run after it."""
-MERGE_WORDS = re.compile(r"\b(merg\w*|shar\w*|duplicat\w*|common|diverg\w*|join\w*|unif\w*|dedup\w*|variants?)\b", re.I)
+MERGE_WORDS = re.compile(r"\b(merg\w*|fold\w*|shar\w*|duplicat\w*|common|diverg\w*|join\w*|unif\w*|dedup\w*|variants?)\b", re.I)
 
 
 def shared_hook_names(shared_file: str, variant: str) -> tuple[str, str]:
@@ -3194,6 +3197,15 @@ def variant_inventory(repo: Path, files) -> list[dict]:
         ratio = difflib.SequenceMatcher(None, la, lb, autojunk=False).ratio() if la and lb else 0.0
         out.append({"place": place, "name": name, "a": a, "b": b, "lines": (len(la), len(lb)), "alike": ratio})
     return out
+
+
+def same_code(a: Path, b: Path) -> bool:
+    """The same code, indentation and blank lines aside (what ts_moves' fold accepts)."""
+    norm = lambda p: [l.strip() for l in p.read_text(errors="replace").splitlines() if l.strip()]
+    try:
+        return norm(a) == norm(b)
+    except OSError:
+        return False
 
 
 def variant_inventory_text(items: list[dict]) -> str:
@@ -3337,6 +3349,17 @@ def validate_move(t: dict, f: str, repo: Path, task_id: str) -> dict:
                              "the util file to move them to (new or existing), \"select\" their names")
         return {**base, "file": f, "into": into, "select": select, "where": ""}
     sources = [inside(x) for x in t.get("from") or []]
+    if t["action"] == "fold":
+        if len(sources) != 2 and (repo / f).is_file():  # "file" one copy, the other in "from"
+            sources = list(dict.fromkeys([f, *sources]))
+        if len(sources) != 2 or len(set(sources)) != 2 or not all((repo / x).is_file() and x.endswith(MOVABLE) for x in sources):
+            raise ValueError("fold: \"from\" the two copies (existing files), \"file\" the one file they become")
+        a, b = (PurePosixPath(x) for x in sources)
+        if f in sources or not f.endswith(MOVABLE) or (repo / f).exists():
+            if a.name != b.name or a.parent.parent != b.parent.parent:
+                raise ValueError("fold: the copies aren't the same name in sibling folders; \"file\" must be a new file")
+            f = str(a.parent.parent / a.name)
+        return {**base, "file": f, "from": sources, "where": ""}
     if t["action"] == "unify":
         if len(sources) != 1 or not (repo / sources[0]).is_file() or not (repo / f).is_file() or not select:
             raise ValueError("unify: \"file\" is the variant to change, \"from\" the one other variant to copy from, "
@@ -3356,7 +3379,7 @@ def validate_tasks(tasks: list, repo: Path, max_tasks: int, prefix: str) -> list
         if not f or f.startswith("/") or ".." in f.split("/"):
             raise ValueError(f"task file path {t['file']!r} must be relative to the repo root")
         action = t["action"]
-        if action in ("move", "share", "unify", "relocate", "dedupe", "signature", "component", "rename"):
+        if action in ("move", "share", "unify", "relocate", "dedupe", "signature", "component", "rename", "fold"):
             try:
                 out.append(validate_move(t, f, repo, f"{prefix}{len(out) + 1}"))
             except ValueError as e:
@@ -3915,7 +3938,12 @@ class Buckets:
                 parts.append(inv)
         for h in self.share_hints():
             parts.append(variants_text(h["compare"]))
-            if h["task"]:
+            if h["task"] and h["task"]["action"] == "fold":
+                parts.append("These two files are the same code, so they can be one file: this task folds them into "
+                             f"{h['task']['file']} and repoints every importer ({', '.join(h['fold']['importers_updated'][:8]) or 'none'}), "
+                             "type-checked in a dry run:\n" + json.dumps({k: h["task"][k] for k in ("file", "action", "from")})
+                             + "\nPlan it (copy it); don't plan edits for the importers.")
+            elif h["task"]:
                 parts.append("A mechanical share fits these two files: this task moves their identical top-level "
                              "declarations into one file, exactly, and makes both import it:\n"
                              + json.dumps({k: h["task"][k] for k in ("file", "action", "from", "select")})
@@ -4317,6 +4345,17 @@ class Buckets:
             cmp = ts_moves(self.repo, {"op": "compare", "a": a, "b": b}, timeout=120)
             if not cmp.get("ok"):
                 continue
+            if same_code(self.repo / a, self.repo / b):  # one file twice: fold it, nothing to pick
+                dry = ts_moves(self.repo, {"op": "fold", "files": [a, b]}, timeout=300)
+                if dry.get("ok"):
+                    task = {"id": "T1", "file": dry["into"], "action": "fold", "from": [a, b], "select": [], "where": "",
+                            "instructions": f"Fold the two identical copies into {dry['into']}.",
+                            "done_when": "One file; every importer imports it; checks pass.", "edits": []}
+                    say(f"  {ok()} {a.split('/')[-1]}: the two copies are the same code; they can be folded into "
+                        f"{dry['into']} ({len(dry['importers_updated'])} importer(s) repointed, dry run)")
+                    self._share_hints.append({"compare": cmp, "task": task, "fold": dry})
+                    continue
+                detail(f"{a.split('/')[-1]}: the copies are the same code but can't be folded ({dry.get('error', '')[:200]})")
             same = [p["name"] for p in cmp["pairs"] if p["status"] == "identical" and p.get("module_level")
                     and not p.get("mutable")]
             same += [p["name"] for p in cmp["pairs"] if p["status"] == "identical" and p.get("module_level")
@@ -4393,7 +4432,18 @@ class Buckets:
                 t["file"], t["from"] = f, [other]
         hints = [h for h in self.share_hints() if h["task"]]
         for t in data.get("tasks") or []:
-            if not (isinstance(t, dict) and t.get("action") == "share"):
+            if not (isinstance(t, dict) and t.get("action") in ("share", "fold")):
+                continue
+            named = {clean_path(str(x)) for x in [t.get("file"), *(t.get("from") or [])]}
+            fold = next((h["task"] for h in hints if h["task"]["action"] == "fold"
+                         and (named & set(h["task"]["from"]) or clean_path(str(t.get("file", ""))) == h["task"]["file"])), None)
+            if fold or (t["action"] == "fold" and len(hints) == 1 and hints[0]["task"]["action"] == "fold"):
+                fold = fold or hints[0]["task"]
+                if t["action"] == "share":
+                    say(f"  {paint('as fold', 'dim')}: {fold['file']}'s two copies are the same code; folding instead of sharing")
+                t.update(action="fold", file=fold["file"], **{"from": fold["from"]}, select=[])
+                continue
+            if t["action"] == "fold":
                 continue
             pair = [clean_path(str(x)) for x in t.get("from") or []]
             if len(hints) == 1 and not (len(pair) == 2 and all((self.repo / x).is_file() for x in pair)):
@@ -4482,10 +4532,18 @@ class Buckets:
                 say(f"  {paint('dropped', 'dim')} {', '.join(t['id'] for t in redo)}: the relocate already updates those files")
                 plan = {**plan, "tasks": [t for t in plan["tasks"] if t not in redo]}
             plan = {**plan, "tasks": [{**t, "id": f"T{n}"} for n, t in enumerate(plan["tasks"], 1)]}
-        moves = [t for t in plan["tasks"] if t["action"] in ("move", "share")]
+        folds = {h["task"]["file"]: h for h in self.share_hints() if h["task"] and h["task"]["action"] == "fold"}
+        for h in folds.values():  # the plan retypes or deletes what a fold does
+            ht = h["task"]
+            if not any(t["action"] == "fold" and t["file"] == ht["file"] for t in plan["tasks"]) and any(
+                    t["file"] in (ht["file"], *ht["from"]) and t["action"] in ("create", "edit", "delete") for t in plan["tasks"]):
+                say(f"  {warn()} the plan would fold {ht['file']} by hand; folding it mechanically instead")
+                plan = {**plan, "tasks": [validate_move(dict(ht), ht["file"], self.repo, "T1")] + plan["tasks"]}
+        moves = [t for t in plan["tasks"] if t["action"] in ("move", "share", "fold")]
         if moves:
             mine = {f for t in moves for f in ([t["file"], t["into"]] if t["action"] == "move" else [t["file"], *t["from"]])}
-            extra = [t for t in plan["tasks"] if t["action"] in ("edit", "create") and t["file"] in mine]
+            mine |= {f for t in moves if t["action"] == "fold" and t["file"] in folds for f in folds[t["file"]]["fold"]["importers_updated"]}
+            extra = [t for t in plan["tasks"] if t["action"] in ("edit", "create", "delete") and t["file"] in mine]
             if extra:
                 say(f"  {paint('dropped', 'dim')} {', '.join(t['id'] for t in extra)}: the move already does "
                     f"that; anything left over is for the review, after the checks")
@@ -5278,7 +5336,7 @@ class Buckets:
         """One file's task: the planner's exact edits applied directly when they fit, else a coder
         session. Anything else the coder touches is put back as it was."""
         self.involved = list(dict.fromkeys(getattr(self, "involved", []) + [task["file"]]))
-        if task["action"] in ("move", "share", "unify", "relocate", "dedupe", "signature", "component", "rename"):
+        if task["action"] in ("move", "share", "unify", "relocate", "dedupe", "signature", "component", "rename", "fold"):
             return self.apply_move(task, commit)
         if task["action"] == "delete":  # the coder can't delete files; nothing to decide here anyway
             git(self.repo, "rm", "-q", "--", task["file"])
@@ -5552,6 +5610,25 @@ class Buckets:
                 git(self.repo, "add", "-A", "--", *written)
                 git(self.repo, "commit", "--no-verify", "-q", "-m", f"buckets {task['id']}: component ({note[:200]})\n\n{note}")
             say(f"  {ok()} {task['id']} component ({int(time.time() - start)}s): {paint(note[:220], 'dim')}")
+            return {**task, "status": "done", "note": f"DONE: {note}"}
+        elif task["action"] == "fold":
+            d = ts_moves(self.repo, {"op": "fold", "files": task["from"], "into": task["file"]}, timeout=600)
+            if not d.get("ok"):
+                return {**task, "status": "failed", "note": f"BLOCKED: {d.get('error', 'fold failed')}"}
+            git(self.repo, "rm", "-q", "--", *d["deleted"])
+            written = []
+            for f, text in d["files"].items():
+                (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
+                (self.repo / f).write_text(text)
+                written.append(f)
+            note = (f"folded {' and '.join(d['deleted'])} into {d['into']}"
+                    + (f" (the first copy's formatting kept)" if d.get("formatting_differed") else "")
+                    + f"; {len(d['importers_updated'])} importer(s) repointed")
+            self.involved = list(dict.fromkeys(self.involved + written))
+            if commit:
+                git(self.repo, "add", "-A", "--", *written)
+                git(self.repo, "commit", "--no-verify", "-q", "-m", f"buckets {task['id']}: {note[:200]}\n\n{note}")
+            say(f"  {ok()} {task['id']} fold ({int(time.time() - start)}s): {paint(note[:220], 'dim')}")
             return {**task, "status": "done", "note": f"DONE: {note}"}
         elif task["action"] == "rename":
             d = ts_moves(self.repo, {"op": "rename", "file": task["file"], "name": task["where"], "to": task["name"]})
@@ -5972,7 +6049,7 @@ class Buckets:
                                                                        if clean_path(str(t.get("file") or ""))]})["tasks"],
                                             self.repo, self.cfg["max_tasks"], f"R{rnd + 1}T")}
 
-        moved = [r for r in results if r.get("action") in ("move", "share", "relocate", "dedupe", "unify", "component", "signature", "rename")
+        moved = [r for r in results if r.get("action") in ("move", "share", "relocate", "dedupe", "unify", "component", "signature", "rename", "fold")
                  and r.get("status") == "done"]
         if moved:
             prompt += ("\n\nCode moved mechanically, byte for byte (" + "; ".join(r["note"].removeprefix("DONE: ")[:300] for r in moved)

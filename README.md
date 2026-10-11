@@ -405,6 +405,8 @@ own scoping) moves code byte for byte, and the planner only decides what goes wh
 | `unify` | a near copy made identical to another version, copied exactly (the model picks which, where the difference is incidental) |
 | `signature` | a parameter (or prop) added to a function (or component) and to every call (or JSX use), with a default so old callers keep working, and a value for each use if asked |
 | `component` | a render helper inside a component turned into its own component: its parameters and the values it uses become props, every call becomes an element |
+| `rename` | a top-level function, component, type or constant renamed in every file (TypeScript's own rename: imports, re-exports, JSX tags, shorthand properties); refused on a clash or a new type error |
+| `fold` | two variants of a file that are the same code (indentation and blank lines aside) become one file in their parent folder; its imports and every importer are repointed (TypeScript's file-rename edits). Refused when the copies import their own sibling files (the same text, different code), when nothing imports them (config files a tool finds by location), for `.d.ts` files, or on a new type error |
 | `share` | two variants of a file (`screens/x/app-a/…` and `…/app-b/…`): identical top-level declarations go into one shared file, identical statements inside their components into a shared hook (`use<Screen>Shared`); module state a screen assigns to stays |
 
 For a request that asks to move, split, extract, merge or share code, buckets gives the planner a dry run
@@ -702,5 +704,5 @@ e.g. `{"~/code/oss/*": {"mode": "local"}}`.
 ## Tests
 
 ```bash
-python3 -m unittest test_buckets test_regress test_rename test_find_copies test_api_contract
+python3 -m unittest test_buckets test_regress test_rename test_find_copies test_api_contract test_fold
 ```

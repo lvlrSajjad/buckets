@@ -3699,6 +3699,69 @@ class RenameAction(unittest.TestCase):
         self.assertIn("renaming mechanically instead", err.getvalue())
 
 
+class FoldAction(unittest.TestCase):
+    """The "fold" plan action: two copies that are the same code become one file, from the hint or a share task."""
+
+    HELPER = "import { fmt } from '../../util'\n\nexport const label = (n: number) => fmt(n) + '!'\n"
+
+    def setUp(self):
+        if not (TS_PKG.exists() and shutil.which("node")):
+            self.skipTest("needs node and a typescript package")
+        self.repo = make_repo({
+            "src/util.ts": "export const fmt = (n: number) => n.toFixed(2)\n",
+            "src/x/app/label.ts": self.HELPER,
+            "src/x/app-pro/label.ts": self.HELPER.replace("export", "\nexport"),   # a blank line apart
+            "src/x/app/screen.ts": "import { label } from './label'\nexport const s = label(1)\n",
+            "src/x/app-pro/screen.ts": "import { label } from './label'\nexport const s = label(2)\n",
+            "tsconfig.json": '{"compilerOptions": {"strict": true, "noEmit": true, "skipLibCheck": true}}'})
+        (self.repo / "node_modules").mkdir()
+        (self.repo / "node_modules/typescript").symlink_to(TS_PKG)
+        (self.repo / ".git/info/exclude").write_text("node_modules\n")
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        self.b = buckets.Buckets(cfg, self.repo, "Merge src/x/app/label.ts and src/x/app-pro/label.ts")
+
+    def test_the_hint_folds_and_the_task_leaves_one_file(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            hints = self.b.share_hints()
+        task = hints[0]["task"]
+        self.assertEqual((task["action"], task["file"], task["from"]), ("fold", "src/x/label.ts", ["src/x/app/label.ts", "src/x/app-pro/label.ts"]))
+        self.assertIn("they can be folded into src/x/label.ts", err.getvalue())
+        self.assertIn('"action": "fold"', self.b.facts())
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = self.b.code_task(buckets.validate_move(dict(task), task["file"], self.repo, "T1"))
+        self.assertEqual(got["status"], "done", got)
+        self.assertIn("2 importer(s) repointed", got["note"])
+        self.assertFalse((self.repo / "src/x/app/label.ts").exists())
+        self.assertIn("from '../util'", (self.repo / "src/x/label.ts").read_text())
+        self.assertIn("'../label'", (self.repo / "src/x/app-pro/screen.ts").read_text())
+        self.assertEqual(subprocess.run(["git", "status", "--porcelain"], cwd=self.repo, capture_output=True,
+                                        text=True).stdout.strip(), "")
+
+    def test_a_share_or_hand_edits_of_the_pair_become_the_fold(self):
+        share = {"summary": "s", "tasks": [{"id": "T1", "file": "src/x/label-shared.ts", "action": "share",
+                                            "from": ["src/x/app/label.ts", "src/x/app-pro/label.ts"], "select": ["label"],
+                                            "instructions": "", "done_when": "", "where": "", "edits": []}]}
+        with contextlib.redirect_stderr(io.StringIO()):
+            task = buckets.validate_plan(self.b.fill_moves(share), self.repo, 8)["tasks"][0]
+        self.assertEqual((task["action"], task["file"]), ("fold", "src/x/label.ts"))
+        edit = lambda tid, f, a="edit": {"id": tid, "file": f, "action": a, "instructions": "use the shared label",
+                                         "done_when": "", "edits": [], "read_first": [], "where": ""}
+        plan = {"summary": "s", "tasks": [edit("T1", "src/x/label.ts", "create"), edit("T2", "src/x/app/screen.ts"),
+                                          edit("T3", "src/x/app-pro/label.ts", "delete")]}
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            got = self.b.prefer_move(plan)
+        self.assertEqual([(t["action"], t["file"]) for t in got["tasks"]], [("fold", "src/x/label.ts")])
+        self.assertIn("folding it mechanically instead", err.getvalue())
+
+    def test_the_planner_naming_one_copy_as_the_file_still_folds(self):
+        t = buckets.validate_move({"action": "fold", "file": "src/x/app/label.ts", "from": ["src/x/app-pro/label.ts"]},
+                                  "src/x/app/label.ts", self.repo, "T1")
+        self.assertEqual((t["file"], t["from"]), ("src/x/label.ts", ["src/x/app/label.ts", "src/x/app-pro/label.ts"]))
+        with self.assertRaises(ValueError):
+            buckets.validate_move({"action": "fold", "file": "src/x/label.ts", "from": ["src/x/app/label.ts"]},
+                                  "src/x/label.ts", self.repo, "T1")
+
+
 class Measure(unittest.TestCase):
     def test_numbers_are_compared_line_by_line_between_two_versions(self):
         repo = make_repo({"count.txt": "3\n", ".gitignore": "node_modules/\n"})

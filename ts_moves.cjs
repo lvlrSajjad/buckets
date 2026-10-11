@@ -11,6 +11,7 @@
 //   rename   a top-level declaration gets a new name in every file of the project (TypeScript's own rename).
 //   find_copies  functions in other files that are a shared file's exported functions under other names.
 //   dedupe   copies replaced by an import of the shared function ("aliases" lets a copy under another name go too).
+//   fold     two identical variant files become one in their parent folder; every importer is repointed.
 //
 // Input: one JSON object on stdin with "op" and the op's fields; output: one JSON object on stdout.
 // Files in the output are full new texts (paths relative to the repo); nothing is written here.
@@ -1723,7 +1724,8 @@ function syntax() {
 
 // What a language service reads: the project's files from disk, with some texts replaced in memory.
 function service(files, options, overrides = new Map()) {
-  const text = (f) => (overrides.has(f) ? overrides.get(f) : ts.sys.fileExists(f) ? ts.sys.readFile(f) : undefined);
+  // an override of null is a file deleted
+  const text = (f) => (overrides.has(f) ? overrides.get(f) ?? undefined : ts.sys.fileExists(f) ? ts.sys.readFile(f) : undefined);
   const host = {
     getScriptFileNames: () => files,
     getScriptVersion: (f) => (overrides.has(f) ? '2' : '1'),
@@ -1732,10 +1734,10 @@ function service(files, options, overrides = new Map()) {
     getCompilationSettings: () => options,
     getDefaultLibFileName: (o) => ts.getDefaultLibFilePath(o),
     useCaseSensitiveFileNames: () => ts.sys.useCaseSensitiveFileNames,
-    fileExists: (f) => overrides.has(f) || ts.sys.fileExists(f),
+    fileExists: (f) => (overrides.has(f) ? overrides.get(f) !== null : ts.sys.fileExists(f)),
     readFile: text,
     readDirectory: ts.sys.readDirectory,
-    directoryExists: ts.sys.directoryExists,
+    directoryExists: (d) => ts.sys.directoryExists(d) || [...overrides].some(([f, t]) => t !== null && f.startsWith(d.replace(/\/?$/, '/'))),
     getDirectories: ts.sys.getDirectories,
   };
   return ts.createLanguageService(host, ts.createDocumentRegistry());
@@ -1911,8 +1913,120 @@ function rename() {
   return { files: files_, count: places.length, renamed: { from: name, to }, where: where.sort() };
 }
 
+// Imports of one module written twice (both copies' imports now name the folded file) become one declaration,
+// when both are plain named imports.
+function mergeDuplicateImports(fileName, text) {
+  const sf = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true);
+  const seen = new Map(), edits = [];
+  for (const st of sf.statements) {
+    if (!ts.isImportDeclaration(st) || !st.importClause || st.importClause.name || st.importClause.isTypeOnly) continue;
+    const nb = st.importClause.namedBindings;
+    if (!nb || !ts.isNamedImports(nb)) continue;
+    const spec = st.moduleSpecifier.text, first = seen.get(spec);
+    if (!first) { seen.set(spec, { st, names: nb.elements.map((e) => e.getText(sf)) }); continue; }
+    first.names.push(...nb.elements.map((e) => e.getText(sf)).filter((n) => !first.names.includes(n)));
+    edits.push([lineStart(text, st.getStart(sf)), lineEnd(text, st.getEnd()), '']);
+  }
+  for (const { st, names } of seen.values()) {
+    const nb = st.importClause.namedBindings;
+    if (names.length > nb.elements.length) edits.push([nb.getStart(sf), nb.getEnd(), `{ ${names.join(', ')} }`]);
+  }
+  return edits.length ? applyEdits(text, edits) : text;
+}
+
+// Two variants of one file that are the same (`screens/x/app/a.tsx` and `screens/x/app-pro/a.tsx`) become one
+// file (`screens/x/a.tsx` by default), through TypeScript's own file-rename edits: the file's relative imports
+// and every importer of either copy are repointed. Refused, with nothing changed, when the texts differ, when
+// their imports point at different files once moved (byte-identical copies that read their own siblings), when
+// the target exists, or when the result has an error the project didn't have.
+function fold() {
+  const [a, b] = (input.files || []).map((f) => abs(f).split(path.sep).join('/'));
+  if (!a || !b || a === b) throw new Error('fold needs "files": the two copies');
+  for (const f of [a, b]) if (!ts.sys.fileExists(f)) throw new Error(`${rel(f)} doesn't exist`);
+  let into = input.into;
+  if (!into) {
+    if (path.basename(a) !== path.basename(b) || path.dirname(path.dirname(a)) !== path.dirname(path.dirname(b)))
+      throw new Error('the copies aren\'t the same name in sibling folders; pass "into"');
+    into = path.join(path.dirname(path.dirname(a)), path.basename(a));
+  }
+  into = abs(into).split(path.sep).join('/');
+  if (ts.sys.fileExists(into)) throw new Error(`${rel(into)} already exists`);
+  if (path.extname(into) !== path.extname(a)) throw new Error(`${rel(into)} must keep the ${path.extname(a)} extension`);
+  if (/\.d\.ts$/.test(a)) throw new Error('declaration files are read by the tsconfig where they are; not folding');
+  const textA = ts.sys.readFile(a), textB = ts.sys.readFile(b);
+  // the same code: indentation and blank lines aside (the first copy's formatting is kept)
+  const same = (t) => t.split('\n').map((l) => l.trim()).filter(Boolean).join('\n');
+  if (same(textA) !== same(textB)) {
+    const la = same(textA).split('\n'), lb = same(textB).split('\n');
+    const i = la.findIndex((l, n) => l !== lb[n]);
+    const at = textA.split('\n').map((l, n) => [l.trim(), n]).filter(([l]) => l)[i];
+    throw new Error(`the copies differ (first at line ${at ? at[1] + 1 : '(end)'} of ${rel(a)}: ${JSON.stringify((la[i] || '').trim().slice(0, 80))} vs ${JSON.stringify((lb[i] || '').trim().slice(0, 80))})`);
+  }
+  const { options, files } = projectOf(a);
+  const ls = service([...new Set([...files, b])], options);
+  const prog = ls.getProgram();
+  const fmt = ts.getDefaultFormatCodeSettings();
+  const prefs = { importModuleSpecifierPreference: 'relative', allowTextChangesInNewFiles: true };
+  const own = { [a]: null, [b]: null }, byFile = new Map();
+  for (const f of [a, b]) {
+    for (const ch of ls.getEditsForFileRename(f, into, fmt, prefs)) {
+      const name = path.resolve(ch.fileName).split(path.sep).join('/');
+      const edits = ch.textChanges.map((c) => [c.span.start, c.span.start + c.span.length, c.newText]);
+      if (name === a || name === b) { if (name === f) own[f] = edits; continue; }
+      const r = path.relative(repo, name);
+      if (r.startsWith('..') || r.split(path.sep).includes('node_modules')) throw new Error(`${rel(f)} is imported from outside the repo (${name})`);
+      byFile.set(name, [...(byFile.get(name) || []), ...edits]);
+    }
+  }
+  // nothing imports a config file (babel.config.js, a per-app env file): a tool finds it by where it is
+  if (!byFile.size) throw new Error(`no file imports ${rel(a)} or ${rel(b)}, so a tool (or the app's entry point) finds them by where they are; not folding`);
+  // the moved texts must read the same files: copies that import their own siblings aren't one file
+  const movedA = applyEdits(textA, own[a] || []), movedB = applyEdits(textB, own[b] || []);
+  if (same(movedA) !== same(movedB)) {
+    const la = same(movedA).split('\n'), lb = same(movedB).split('\n');
+    const i = la.findIndex((l, n) => l !== lb[n]);
+    throw new Error(`the copies import different files once moved (line ${i + 1}: ${(la[i] || '').trim().slice(0, 100)} vs ${(lb[i] || '').trim().slice(0, 100)}); fold the files they import first, or share instead`);
+  }
+  const files_ = { [rel(into)]: movedA }, overrides = new Map([[a, null], [b, null], [into, movedA]]);
+  for (const [f, edits] of byFile) {
+    const spans = edits.map((e) => `${e[0]}:${e[1]}`);
+    const uniq = edits.filter((e, i) => spans.indexOf(`${e[0]}:${e[1]}`) === i);
+    const sorted = [...uniq].sort((x, y) => x[0] - y[0]);
+    if (sorted.some((e, i) => i && e[0] < sorted[i - 1][1])) throw new Error(`overlapping import edits in ${rel(f)}`);
+    const o = prog.getSourceFile(f), text = mergeDuplicateImports(f, applyEdits(o ? o.text : ts.sys.readFile(f), uniq));
+    if (text === (o ? o.text : ts.sys.readFile(f))) continue;
+    files_[rel(f)] = text;
+    overrides.set(f, text);
+  }
+  // files that still name either copy's path (a path alias, jest.mock) break silently; check them too
+  const stem = path.basename(a).replace(/\.[jt]sx?$/, '');
+  const spelled = new RegExp(`['"\`][^'"\`\\n]*/${stem.replace(/[.$]/g, '\\$&')}(\\.[jt]sx?)?['"\`]`);
+  const mention = files.filter((f) => !overrides.has(f) && spelled.test(ts.sys.readFile(f) || ''));
+  const leftovers = [];
+  for (const f of mention) {
+    const t = ts.sys.readFile(f) || '';
+    for (const m of t.matchAll(new RegExp(spelled.source, 'g'))) {
+      const spec = m[0].slice(1, -1);
+      if (!spec.startsWith('.')) continue;
+      const target = path.resolve(path.dirname(f), spec).split(path.sep).join('/');
+      if ([a, b].some((x) => x === target || x.replace(/\.[jt]sx?$/, '') === target)) leftovers.push(`${rel(f)}: ${spec}`);
+    }
+  }
+  if (leftovers.length) throw new Error(`still named by path where TypeScript doesn't repoint (${leftovers.slice(0, 4).join('; ')}); not folding`);
+  // the safety net: no error the project didn't have before (the copy's own errors now live at the new path)
+  const after_ = [...new Set([...files.filter((f) => f !== a && f !== b), into])];
+  const was = (k) => k.replace(`${rel(a)}|`, `${rel(into)}|`);
+  const before = new Map();
+  for (const [k, list] of diagnosticKeys(ls, [a, ...byFile.keys(), ...mention], (m) => m)) before.set(was(k), list);
+  const after = diagnosticKeys(service(after_, options, overrides), [into, ...byFile.keys(), ...mention], (m) => m);
+  const fresh = [];
+  for (const [key, list] of after) fresh.push(...list.slice((before.get(key) || []).length));
+  if (fresh.length) throw new Error(`folding would add ${fresh.length} error(s): ${fresh.slice(0, 3).join('; ')}`);
+  return { files: files_, deleted: [rel(a), rel(b)], into: rel(into), formatting_differed: textA !== textB, importers_updated: [...byFile.keys()].filter((f) => files_[rel(f)]).map(rel).sort() };
+}
+
 try {
-  const ops = { extract, compare, share, share_hook: shareHook, unify, relocate, dedupe, find_copies: findCopies, same_behaviour: sameBehaviour, signature, component, syntax, rename };
+  const ops = { extract, compare, share, share_hook: shareHook, unify, relocate, dedupe, find_copies: findCopies, same_behaviour: sameBehaviour, signature, component, syntax, rename, fold };
   if (!ops[input.op]) throw new Error(`unknown op ${input.op}`);
   process.stdout.write(JSON.stringify({ ok: true, ...ops[input.op]() }));
 } catch (e) {
