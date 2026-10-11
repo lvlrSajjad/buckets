@@ -489,7 +489,34 @@ the Mac plans, both machines review each round at once, plus the mechanical weak
 - They never disagreed here, so the confirm step didn't run; the unit tests cover it (a false
   "undefined" claim is dismissed by the reviewer who said done, a confirmed one wins).
 
+### 22. Big-file refactors by moving code, not retyping it (2026-10-11 night)
+
+The owner's request on ecotrak-mobile: split `assessment-questionnaire-screen.tsx` (3,687 lines; ~1,450
+lines of state, refs, effects, a save queue, validation, submit, pagination and attachment handlers
+inside one component) by moving the logic into a `useAssessmentQuestionnaire` hook, keeping the render
+helpers and JSX in the screen.
+
+| Run | What happened | Time | Result |
+|---|---|---|---|
+| Baseline (retyping) | plan in 4m 13s (a good inventory, but missing `saveAnswer`, inventing an import path for a local helper, a circular import); the Windows coder retyped the hook for 15 min until the connection dropped | 20 min cap | **nothing written** |
+| `ts_moves.cjs extract` by hand | TypeScript's scoping picks the statements, the parameters (`navigation`), the 56 returned names, the 12 private helpers that must come along (5 exported back) and the imports; the lines move byte for byte | **2.8 s, no model** | `tsc`, eslint, all 1,545 jest tests pass; eslint warnings identical (12 → 4 + 8, just split) |
+| buckets with `move` (runs 1–5) | the local planner ignored the new rule in a 26k prompt (1), then chose `move` but put its fields in the text (2, crashed), then the guard switched a retyping plan to the move (3); false "shortcut" alarms for `any`s that only moved (36, then 16, then 7: per-file counting, Prettier dropping `;`, Prettier joining lines, the tool's `export`, the generated `navigation: any`), and a redundant "update the screen" task that spent 9 min changing nothing (4) | | each fixed in turn |
+| **buckets with `move` (run 6)** | planner chose `move` itself (the dry-run suggestion in its facts), the redundant task dropped, move 3 s, checks pass, both reviews "done" | **5m 14s** | **correct**: verified in a worktree (`tsc`, eslint, 1,545 tests) |
+
+Same idea for the drifted ecotrak / ecotrak-techs screens: `compare` pairs declarations (rfp-details:
+`CommentInput`, `AddCommentModal`, `FULL`, `statelessOutput` identical; create-invoice's hook shares ten
+number helpers, the screen is 72% alike); `share` moved rfp-details' four into `rfp-details-shared.tsx`
+(245 duplicate lines gone) in 2.3 s with every check passing.
+
+Lessons: the model is good at deciding what goes where and bad at copying 1,500 lines; give it a move
+and it needs only to choose it. A long prompt's rule isn't enough for the local planner: a dry run in
+its facts plus a guard is. Checks that compare lines must expect code to move between files and be
+reformatted on the way.
+
 ## Lessons so far
+
+- Moving code is a job for a tool, not a model: a 1,450-line split failed after 20 min of retyping and took 3 s
+  as a mechanical move (field notes 22). The model decides what goes where; buckets moves it.
 
 - A wrong review is worse than none: one false "undefined variable" turned a 3-minute success into a
   broken result. Reviews need the whole changed functions, and claims checks can't confirm need a second look.
