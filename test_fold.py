@@ -132,6 +132,24 @@ class FoldTests(unittest.TestCase):
         self.assertFalse(d["ok"])
         self.assertIn("src/mocked.ts", d["error"])
 
+    def test_stale_paths_in_edited_files_aliases_and_files_outside_the_project_are_refused(self):
+        repo = variants({"src/both.ts": 'declare const jest: any\nimport { label } from "./screens/x/pro/helper"\n'
+                                        'jest.mock("./screens/x/pro/helper")\nexport const b = label(1)\n'})
+        d = fold(repo, files=["src/screens/x/app/helper.ts", "src/screens/x/pro/helper.ts"])
+        self.assertFalse(d["ok"])
+        self.assertIn("src/both.ts", d["error"])                                # its import is repointed, its mock isn't
+        repo = variants({"src/aliased.ts": 'declare const jest: any\njest.mock("@/screens/x/pro/helper")\nexport const a = 1\n'})
+        cfg = json.loads((repo / "tsconfig.json").read_text())
+        cfg["compilerOptions"].update(baseUrl=".", paths={"@/*": ["src/*"]})
+        (repo / "tsconfig.json").write_text(json.dumps(cfg))
+        d = fold(repo, files=["src/screens/x/app/helper.ts", "src/screens/x/pro/helper.ts"])
+        self.assertFalse(d["ok"])
+        self.assertIn("@/screens/x/pro/helper", d["error"])
+        repo = variants({"tests/helper.test.ts": 'import { label } from "../src/screens/x/app/helper"\nexport const t = label(1)\n'})
+        d = fold(repo, files=["src/screens/x/app/helper.ts", "src/screens/x/pro/helper.ts"])
+        self.assertFalse(d["ok"])
+        self.assertIn("tests/helper.test.ts", d["error"])                      # outside the tsconfig: nothing repoints it
+
     def test_different_names_need_into(self):
         repo = variants({"src/screens/x/pro/helper2.ts": HELPER})
         d = fold(repo, files=["src/screens/x/app/helper.ts", "src/screens/x/pro/helper2.ts"])

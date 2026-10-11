@@ -331,6 +331,19 @@ class ApiContractTests(unittest.TestCase):
             word = by["`/orders/count/${kind}`"]
             self.assertEqual((word["status"], word["endpoint"], word.get("loose")), ("ok", "GET /orders/count/past", True))
             self.assertEqual(by['"/lookups/calculationMethods"']["status"], "ok")   # routes ignore case by default
+            self.assertEqual(word["unknown_keys"], [])                                # a guessed endpoint's keys aren't checked
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)
+        repo = make_repo({"src/http.ts": HTTP_TS, "src/use.ts": (
+            'import { api } from "./http"\n'
+            'export const any = (a: string, b: string) => api.post(`/${a}/${b}`, { foo: 1 })\n'
+            'export const two = (a: string) => api.get(`/${a}/items`)\n')})
+        spec = {"openapi": "3.0.0", "paths": {"/auth/login": {"post": {}}, "/zzz/items": {"get": {}}, "/aaa/items": {"get": {}}}}
+        try:
+            d = run_tool(repo, spec)
+            by = {c["raw"]: c for c in d["calls"]}
+            self.assertEqual(by["`/${a}/${b}`"]["status"], "no-endpoint")            # nothing but guesses: no match
+            self.assertEqual(by["`/${a}/items`"]["status"], "unresolved")            # two ways to fit: no pick
         finally:
             shutil.rmtree(repo, ignore_errors=True)
 

@@ -92,8 +92,33 @@ class ToRefTests(unittest.TestCase):
         self.assertIn("(inputRef.current = r)", out)
         self.assertIn("inputRef.current?.focus()", out)
         self.assertIn("import { useRef as keep, useRef } from \"react\"", out)
-        self.assertIn("isn't a component or hook", next(s["why"] for s in d["skipped"] if s["name"] == "count"))
+        self.assertIn("isn't a component", next(s["why"] for s in d["skipped"] if s["name"] == "count"))
         (repo / "src/a.tsx").write_text(out)
+        self.assertEqual(tsc_errors(repo), "")
+
+    def test_review_cases(self):
+        repo = make_repo({"src/react.d.ts": REACT, "src/d.tsx": (
+            "// @ts-nocheck-free header\nlet n = 0\nlet e = 1\nlet b = 0\nexport { e }\n\n"
+            "export const Expr = () => <div onClick={() => { n++ }} />\n\n"
+            "export function One() { e++; b++; return <i>{e}</i> }\n\n"
+            "export function Two(o: { b?: number }) {\n  ({ b = 5 } = o)\n  return <i>{b}</i>\n}\n")})
+        d = to_ref(repo, file="src/d.tsx")
+        self.assertTrue(d["ok"], d)
+        why = {x["name"]: x["why"] for x in d["skipped"]}
+        self.assertIn("returns an expression", why["n"])                      # never a hook inside the onClick
+        self.assertIn("exported", why["e"])                                    # `export { e }`
+        self.assertIn("used by 2 top-level", why["b"])
+        out = d["files"].get("src/d.tsx", "")
+        self.assertEqual(out, "")                                              # nothing converted, nothing written
+        repo = make_repo({"src/react.d.ts": REACT, "src/f.tsx": (
+            "/* eslint-disable */\nlet b = 0\n\nexport function Two(o: { b?: number }) { ({ b = 5 } = o); return <i>{b}</i> }\n")})
+        d = to_ref(repo, file="src/f.tsx")
+        self.assertTrue(d["ok"], d)
+        out = d["files"]["src/f.tsx"]
+        self.assertTrue(out.startswith("/* eslint-disable */\n"), out)       # the header stays at the top
+        self.assertIn("({ b: bRef.current = 5 } = o)", out)                   # the default kept
+        self.assertIn("{\n  const bRef = useRef<number>(0);\n  ({ b", out)   # a one-line body still parses; `(` isn't a call
+        (repo / "src/f.tsx").write_text(out)
         self.assertEqual(tsc_errors(repo), "")
 
     def test_a_clash_is_skipped(self):
@@ -111,6 +136,9 @@ class ToRefTests(unittest.TestCase):
             'export function useCalls() {\n  calls += 1\n  return calls\n}\n')})
         d = to_ref(repo, file="src/c.tsx")
         self.assertTrue(d["ok"], d)
+        self.assertEqual({c["name"]: c["component"] for c in d["converted"]}, {"seen": "Wrapped"})
+        self.assertIn("isn't a component", d["skipped"][0]["why"])            # a hook's counter may be meant to be shared
+        d = to_ref(repo, file="src/c.tsx", hooks=["useCalls"])               # unless the caller knows it's one screen's
         self.assertEqual({c["name"]: c["component"] for c in d["converted"]}, {"seen": "Wrapped", "calls": "useCalls"})
         (repo / "src/c.tsx").write_text(d["files"]["src/c.tsx"])
         self.assertEqual(tsc_errors(repo), "")

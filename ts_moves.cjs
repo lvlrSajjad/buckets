@@ -295,7 +295,9 @@ function applyEdits(text, edits) {
 
 function afterImports(sf) {
   const imports = sf.statements.filter(ts.isImportDeclaration);
-  return imports.length ? lineEnd(sf.text, imports[imports.length - 1].end) : 0;
+  if (imports.length) return lineEnd(sf.text, imports[imports.length - 1].end);
+  const header = ts.getLeadingCommentRanges(sf.text, 0) || [];  // after a file's header comments (eslint-disable…)
+  return header.length ? lineEnd(sf.text, header[header.length - 1].end) : 0;
 }
 
 // The symbols each import declaration binds, as identifier nodes keyed by symbol.
@@ -1508,24 +1510,36 @@ function signature() {
     };
     visit(o);
   }
-  // "use it instead of the fixed 2000": that literal in the function's own body becomes the parameter
+  // "use it instead of the fixed 2000": that literal in the function's own body becomes the parameter, only where
+  // it is a value (an initializer, an argument, a return, an operand; never a key, a type or an index), and only
+  // where it's named like the parameter (`duration: 2000`) unless it's the one such value in the body
   let replaced = 0;
   if (input.replaces !== undefined && input.replaces !== null && input.replaces !== '') {
-    const lit = String(input.replaces);
+    const lit = String(input.replaces), spots = [];
+    const isLit = (n) => ts.isNumericLiteral(n) || ts.isStringLiteral(n) || n.kind === ts.SyntaxKind.TrueKeyword || n.kind === ts.SyntaxKind.FalseKeyword;
     const visit = (n) => {
-      if ((ts.isNumericLiteral(n) || ts.isStringLiteral(n) || n.kind === ts.SyntaxKind.TrueKeyword || n.kind === ts.SyntaxKind.FalseKeyword)
-          && n.getText(sf) === lit) {
+      if (ts.isTypeNode(n) || (ts.isFunctionLike(n) && n !== fn)) return;  // types; a nested function's own literals
+      if (isLit(n) && n.getText(sf) === lit) {
         const pa = n.parent;
-        if (ts.isPropertyAssignment(pa) && pa.initializer === n && pa.name.getText(sf) === p.name)
-          edits.get(sf).push([pa.getStart(sf), pa.getEnd(), p.name]);  // { duration: 2000 } → { duration }
-        else edits.get(sf).push([n.getStart(sf), n.getEnd(), p.name]);
-        replaced++;
+        const named = (ts.isPropertyAssignment(pa) && pa.initializer === n && pa.name.getText(sf) === p.name)
+          || (ts.isVariableDeclaration(pa) && pa.initializer === n && pa.name.getText(sf) === p.name);
+        const value = named || (ts.isPropertyAssignment(pa) && pa.initializer === n) || (ts.isVariableDeclaration(pa) && pa.initializer === n)
+          || ((ts.isCallExpression(pa) || ts.isNewExpression(pa)) && (pa.arguments || []).includes(n)) || ts.isReturnStatement(pa)
+          || (ts.isBinaryExpression(pa) && (pa.left === n || pa.right === n)) || ts.isConditionalExpression(pa);
+        if (value) spots.push({ n, named });
         return;
       }
-      if (ts.isFunctionLike(n) && n !== fn) return;  // not a nested function's own literals
       ts.forEachChild(n, visit);
     };
     if (fn.body) visit(fn.body);
+    const use = spots.some((x) => x.named) ? spots.filter((x) => x.named) : spots.length === 1 ? spots : [];
+    for (const { n, named } of use) {
+      const pa = n.parent;
+      if (named && ts.isPropertyAssignment(pa)) edits.get(sf).push([pa.getStart(sf), pa.getEnd(), p.name]);  // { duration: 2000 } → { duration }
+      else edits.get(sf).push([n.getStart(sf), n.getEnd(), p.name]);
+    }
+    replaced = use.length;
+    if (spots.length && !use.length) skipped.push(`${lit} appears ${spots.length} times in ${input.name}'s body; which one the parameter replaces is yours to say`);
   }
   for (const [o, e] of edits) if (e.length) files[rel(o.fileName)] = applyEdits(o.text, e);
   return { files, report: { kind: component ? 'component' : 'function', sites, skipped, replaced } };
@@ -1617,6 +1631,10 @@ function component() {
   const text = sf.text;
   const fn = findFunction(sf, input.function);
   if (!fn) throw new Error(`no function or component named ${input.function} in ${input.file}`);
+  const clash = sf.statements.flatMap((st) => (ts.isImportDeclaration(st) && st.importClause
+    ? [st.importClause.name, ...((st.importClause.namedBindings && ts.isNamedImports(st.importClause.namedBindings)) ? st.importClause.namedBindings.elements.map((e) => e.name) : [])]
+    : declaredBy(st))).find((id) => id && id.text === input.name);
+  if (clash) throw new Error(`\`${input.name}\` is already a name in ${input.file} (line ${lineOf(sf, clash.getStart(sf))}); pick another`);
   const body = fn.body.statements;
   const helperStmt = body.find((st) => declaredBy(st).some((id) => id.text === input.helper));
   if (!helperStmt) throw new Error(`\`${input.helper}\` isn't declared directly inside ${input.function}`);
@@ -1670,6 +1688,7 @@ function component() {
     v(d.initializer);
     if (!ok) return false;
     for (const { sym } of references(checker, d.initializer)) {
+      if (params.has(sym)) return false;  // `const user = p.user`: the component's props aren't there to re-derive from
       const dd = sym.declarations && sym.declarations[0];
       if (dd && dd.getSourceFile() === sf && within(dd, fn.body) && !safe(declStmt(dd), seen)) return false;
     }
@@ -2132,19 +2151,33 @@ function fold() {
     files_[rel(f)] = text;
     overrides.set(f, text);
   }
-  // files that still name either copy's path (a path alias, jest.mock) break silently; check them too
+  // files that still name either copy's path break silently: a jest.mock, a path alias, a test outside the
+  // tsconfig. Every quoted path in the repo's source that resolves to a copy is checked (edited files' new texts too)
   const stem = path.basename(a).replace(/\.[jt]sx?$/, '');
-  const spelled = new RegExp(`['"\`][^'"\`\\n]*/${stem.replace(/[.$]/g, '\\$&')}(\\.[jt]sx?)?['"\`]`);
-  const mention = files.filter((f) => !overrides.has(f) && spelled.test(ts.sys.readFile(f) || ''));
-  const leftovers = [];
-  for (const f of mention) {
-    const t = ts.sys.readFile(f) || '';
-    for (const m of t.matchAll(new RegExp(spelled.source, 'g'))) {
-      const spec = m[0].slice(1, -1);
-      if (!spec.startsWith('.')) continue;
-      const target = path.resolve(path.dirname(f), spec).split(path.sep).join('/');
-      if ([a, b].some((x) => x === target || x.replace(/\.[jt]sx?$/, '') === target)) leftovers.push(`${rel(f)}: ${spec}`);
+  const spelled = new RegExp(`(['"\`])([^'"\`\\n]*/${stem.replace(/[.$]/g, '\\$&')}(?:\\.[jt]sx?)?)\\1`, 'g');
+  const repoFiles = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (/^(node_modules|dist|build|coverage|Pods)$/.test(e.name) || e.name.startsWith('.')) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) walk(full);
+      else if (/\.(tsx?|jsx?|mjs|cjs)$/.test(e.name)) repoFiles.push(full.split(path.sep).join('/'));
     }
+  };
+  walk(repo);
+  const mention = [], leftovers = [];
+  for (const f of new Set([...files, ...repoFiles])) {
+    if (f === a || f === b || f.includes('/node_modules/')) continue;
+    const t = overrides.has(f) ? overrides.get(f) : ts.sys.readFile(f) || '';
+    if (!t || !t.includes(stem)) continue;
+    let hit = false;
+    for (const m of t.matchAll(spelled)) {
+      const r = ts.resolveModuleName(m[2], f, options, ts.sys).resolvedModule;
+      const target = r ? path.resolve(r.resolvedFileName).split(path.sep).join('/') : null;
+      if (target === a || target === b) leftovers.push(`${rel(f)}: ${m[2]}`);
+      hit = true;
+    }
+    if (hit && !overrides.has(f) && files.includes(f)) mention.push(f);
   }
   if (leftovers.length) throw new Error(`still named by path where TypeScript doesn't repoint (${leftovers.slice(0, 4).join('; ')}); not folding`);
   // the safety net: no error the project didn't have before (the copy's own errors now live at the new path)
@@ -2172,19 +2205,29 @@ function toRef() {
   const prog = ls.getProgram(), checker = prog.getTypeChecker(), sf = prog.getSourceFile(file);
   if (!sf) throw new Error(`TypeScript didn't load ${input.file}`);
   const text = sf.text, wanted = input.names && input.names.length ? new Set(input.names) : null;
-  const isFn = (n) => (ts.isFunctionExpression(n) || ts.isArrowFunction(n) || ts.isFunctionDeclaration(n)) && n.body && ts.isBlock(n.body);
-  const firstFn = (n) => (isFn(n) ? n : ts.forEachChild(n, firstFn));
-  // the function a top-level statement defines, and its name (a component or a hook can hold a ref)
-  const fnOf = (st) => {
-    if (ts.isFunctionDeclaration(st) && st.name && isFn(st)) return { fn: st, name: st.name.text };
-    if (ts.isVariableStatement(st) && st.declarationList.declarations.length === 1) {
-      const d = st.declarationList.declarations[0];
-      const fn = d.initializer && ts.isIdentifier(d.name) ? firstFn(d.initializer) : null;
-      if (fn) return { fn, name: d.name.text };
-    }
-    if (ts.isExportAssignment(st)) { const fn = firstFn(st.expression); if (fn) return { fn, name: fn.name ? fn.name.text : 'default' }; }
+  const isFn = (n) => ts.isFunctionExpression(n) || ts.isArrowFunction(n) || ts.isFunctionDeclaration(n);
+  // the function itself (`observer(() => …)`, `memo(function X() {…})` unwrapped), never one nested in its body
+  const ownFn = (n) => {
+    while (n && (ts.isParenthesizedExpression(n) || ts.isAsExpression(n))) n = n.expression;
+    if (n && isFn(n)) return n;
+    if (n && ts.isCallExpression(n)) for (const a of n.arguments) { const f = ownFn(a); if (f) return f; }
     return null;
   };
+  // the function a top-level statement defines, and its name (a component can hold a ref)
+  const fnOf = (st) => {
+    if (ts.isFunctionDeclaration(st) && st.name && st.body) return { fn: st, name: st.name.text };
+    if (ts.isVariableStatement(st) && st.declarationList.declarations.length === 1) {
+      const d = st.declarationList.declarations[0];
+      const fn = d.initializer && ts.isIdentifier(d.name) ? ownFn(d.initializer) : null;
+      if (fn) return { fn, name: d.name.text };
+    }
+    if (ts.isExportAssignment(st)) { const fn = ownFn(st.expression); if (fn) return { fn, name: fn.name ? fn.name.text : 'default' }; }
+    return null;
+  };
+  // names an `export { … }` list re-exports (an exported variable: other files may read it)
+  const reexported = new Set();
+  for (const st of sf.statements) if (ts.isExportDeclaration(st) && !st.moduleSpecifier && st.exportClause && ts.isNamedExports(st.exportClause))
+    for (const e of st.exportClause.elements) reexported.add((e.propertyName || e.name).text);
   const allRefs = references(checker, sf);
   const converted = [], skipped = [], byStmt = new Map(), byFn = new Map(), edits = [];
   for (const st of sf.statements) {
@@ -2195,7 +2238,7 @@ function toRef() {
       const name = d.name.text;
       if (wanted && !wanted.has(name)) continue;
       const skip = (why) => skipped.push({ name, why });
-      if (isExported(st)) { skip('exported: other files may read it'); continue; }
+      if (isExported(st) || reexported.has(name)) { skip('exported: other files may read it'); continue; }
       const sym = checker.getSymbolAtLocation(d.name);
       const uses = allRefs.filter((r) => r.sym === sym && r.node !== d.name);
       if (!uses.length) { skip('nothing uses it'); continue; }
@@ -2204,7 +2247,10 @@ function toRef() {
       const top = [...tops][0], owner = fnOf(top);
       if (!owner || !uses.every((u) => within(u.node, owner.fn.body))) { skip(`used at module level (line ${lineOf(sf, uses[0].node.getStart(sf))})`); continue; }
       if (input.component && owner.name !== input.component) continue;  // only the state of the component asked about
-      if (!/^[A-Z]/.test(owner.name) && !/^use[A-Z0-9]/.test(owner.name)) { skip(`used by ${owner.name}, which isn't a component or hook (a ref needs one)`); continue; }
+      // hooks' module state is usually meant to be shared (a counter, a cache): only components get refs
+      // a hook counts when the caller says so (a screen's own hook, used by that screen alone)
+      if (!/^[A-Z]/.test(owner.name) && !(input.hooks || []).includes(owner.name)) { skip(`used by ${owner.name}, which isn't a component (a hook's module state may be meant to be shared)`); continue; }
+      if (!ts.isBlock(owner.fn.body)) { skip(`${owner.name} returns an expression; there's no place for a hook in it`); continue; }
       const ref = /Ref$/.test(name) ? name : `${name}Ref`;
       const clash = allRefs.find((r) => r.node.text === ref && r.sym !== sym) || (ref !== name && new RegExp(`(?<![\\w$])${ref}(?![\\w$])`).test(text));
       if (clash) { skip(`\`${ref}\` is already a name in this file`); continue; }
@@ -2220,7 +2266,8 @@ function toRef() {
       byFn.set(owner.fn, [...(byFn.get(owner.fn) || []), { item, comment: '' }]);
       for (const u of uses) {
         const p = u.node.parent;
-        if (ts.isShorthandPropertyAssignment(p) && p.name === u.node) edits.push([p.getStart(sf), p.getEnd(), `${name}: ${ref}.current`]);
+        if (ts.isShorthandPropertyAssignment(p) && p.name === u.node)
+          edits.push([p.getStart(sf), p.getEnd(), `${name}: ${ref}.current${p.objectAssignmentInitializer ? ` = ${p.objectAssignmentInitializer.getText(sf)}` : ''}`]);
         else edits.push([u.node.getStart(sf), u.node.getEnd(), `${ref}.current`]);
       }
     }
@@ -2231,8 +2278,11 @@ function toRef() {
   for (const [st, ds] of byStmt) {
     const all = st.declarationList.declarations;
     if (ds.length === all.length) {
-      const start = fullStart(sf, st), comment = text.slice(start, lineStart(text, st.getStart(sf))).trim();
-      if (comment && ds.length === 1) for (const list of byFn.values()) for (const e of list) if (e.item.name === ds[0].name.text) e.comment = comment;
+      // a comment above it goes with it, unless it's the file's header or a directive (eslint-, @ts-, a license)
+      let start = fullStart(sf, st), comment = text.slice(start, lineStart(text, st.getStart(sf))).trim();
+      const first = sf.statements[0] === st || /eslint|@ts-|@flow|license|copyright|^#!/i.test(comment);
+      if (first || ds.length > 1) { start = lineStart(text, st.getStart(sf)); comment = ''; }
+      if (comment) for (const list of byFn.values()) for (const e of list) if (e.item.name === ds[0].name.text) e.comment = comment;
       edits.push([start, lineEnd(text, st.getEnd()), '']);
     } else {
       const keep = all.filter((d) => !ds.includes(d)).map((d) => d.getText(sf));
@@ -2243,11 +2293,14 @@ function toRef() {
   // the refs, at the top of each component
   for (const [fn, list] of byFn) {
     const body = fn.body, first = body.statements[0];
-    const indent = first ? text.slice(lineStart(text, first.getStart(sf)), first.getStart(sf)) : '  ';
+    const lead = first ? text.slice(lineStart(text, first.getStart(sf)), first.getStart(sf)) : '';
+    const indent = /^[ \t]+$/.test(lead) ? lead : '  ';  // a one-line body has code before its first statement
     const lines = list.flatMap(({ item, comment }) => [
       ...(comment ? comment.split('\n').map((l) => indent + l.trim()) : []),
       `${indent}const ${item.ref} = useRef<${item.type}>(${item.init})`]);
-    edits.push([body.getStart(sf) + 1, body.getStart(sf) + 1, '\n' + lines.join('\n')]);
+    const asi = first && /^[([`]/.test(first.getText(sf)) ? ';' : '';  // `(…)` on the next line would call the ref
+    const after = first && !/^[ \t]+$/.test(lead) ? '\n' + indent : '';   // a one-line body: its code goes on a line of its own
+    edits.push([body.getStart(sf) + 1, after ? first.getStart(sf) : body.getStart(sf) + 1, '\n' + lines.join('\n') + asi + after]);
   }
   let out = applyEdits(text, edits);
   const hasUseRef = sf.statements.some((st) => ts.isImportDeclaration(st) && st.moduleSpecifier.text === 'react' && st.importClause

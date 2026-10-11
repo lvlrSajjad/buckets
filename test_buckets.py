@@ -3785,6 +3785,10 @@ class ModuleStateRefs(unittest.TestCase):
         self.assertIn("let loaded", (self.repo / "src/x/a/screen.tsx").read_text())   # module state stays module state
 
     def test_a_move_takes_the_refs_into_the_hook(self):
+        f = self.repo / "src/x/a/screen.tsx"   # module state only the JSX uses isn't the move's business
+        f.write_text(f.read_text().replace("let hits = 0\n", "let hits = 0\nlet tag = 'x'\n")
+                     .replace("<i>{String(loaded)}", "<i onClick={() => { tag = 'y' }}>{tag}{String(loaded)}"))
+        subprocess.run(["git", "commit", "-qam", "tag"], cwd=self.repo, check=True)
         task = buckets.validate_tasks([{"id": "T1", "file": "src/x/a/screen.tsx", "action": "move", "where": "Screen",
                                         "select": ["logic"], "into": "src/x/a/use-screen.ts", "name": "useScreen",
                                         "instructions": "", "done_when": "", "edits": []}], self.repo, 8, "T")[0]
@@ -3795,6 +3799,7 @@ class ModuleStateRefs(unittest.TestCase):
         hook = (self.repo / "src/x/a/use-screen.ts").read_text()
         self.assertIn("const loadedRef = useRef<boolean>(false)", hook)
         self.assertNotIn("let loaded", hook + (self.repo / "src/x/a/screen.tsx").read_text())
+        self.assertIn("let tag = 'x'", (self.repo / "src/x/a/screen.tsx").read_text())
         self.assertEqual(self.tsc(), "")
         self.assertEqual(subprocess.run(["git", "status", "--porcelain"], cwd=self.repo, capture_output=True,
                                         text=True).stdout.strip(), "")

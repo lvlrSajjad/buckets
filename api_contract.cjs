@@ -254,19 +254,27 @@ function findEndpoint(endpoints, method, clientPath, base) {
       let score = 0;
       let ok = true;
       let loose = false;  // a word of the client's path was taken for a path parameter
+      let guessed = 0, exact = 0;  // unresolved parts taken for words; words that are the same
       for (let i = 0; i < segs.length && ok; i++) {
         const s = matchSegment(segs[i], ep.segs[i]);
         if (!s) ok = false; else score += s === 2 ? 1000 : s;
         if (s === 1 && ep.segs[i] === '{}' && /^[A-Za-z][\w-]{2,}$/.test(segs[i])) loose = true;
-        if (s === 0.5) loose = true;  // an unresolved part taken for a word
+        if (s === 0.5) { loose = true; guessed++; }  // an unresolved part taken for a word
+        if (s === 2) exact++;
       }
-      if (ok) hits.push({ ep, score, loose });
+      // a guess needs the path's own words to agree more than it guesses (`${a}/${b}` matches nothing)
+      if (ok && guessed && (!exact || guessed > exact)) ok = false;
+      if (ok) hits.push({ ep, score, loose, guessed });
     }
     if (!hits.length) continue;
     const best = Math.max(...hits.map((h) => h.score));
     const ordered = [...hits].sort((a, b) => b.score - a.score);
     const chosen = ordered.find((h) => h.score === best && h.ep.method === method) || ordered.find((h) => h.ep.method === method);
-    return chosen ? { endpoint: chosen.ep, loose: chosen.loose } : { mismatch: [...new Set(hits.map((h) => h.ep))] };
+    if (chosen && chosen.guessed) {  // a guess is only taken when it's the one way the path fits
+      const rivals = new Set(hits.filter((h) => h.ep.method === method && h.score === chosen.score).map((h) => h.ep.specPath));
+      if (rivals.size > 1) return { ambiguous: true };
+    }
+    return chosen ? { endpoint: chosen.ep, loose: chosen.loose, guessed: !!chosen.guessed } : { mismatch: [...new Set(hits.map((h) => h.ep))] };
   }
   return {};
 }
@@ -723,8 +731,10 @@ function evaluate(call, endpoints, base, hosts) {
       r.status = 'ok';
       r.endpoint = ep.id;
       if (found.loose) r.loose = true;
-      r.matched = ep;
-      checkKeys(r, ep, q, body);
+      if (found.guessed) r.guessed = true;  // its keys aren't checked against an endpoint we only guessed
+      else { r.matched = ep; checkKeys(r, ep, q, body); }
+    } else if (found.ambiguous) {
+      r.status = 'unresolved';
     } else if (found.mismatch) {
       r.status = 'method-mismatch';
       r.allowed = found.mismatch.map((e) => e.id);

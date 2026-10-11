@@ -4172,8 +4172,10 @@ class Buckets:
         if not m:
             return hint if not re.search(r"(?m)^\s+const render[A-Z]\w*\s*=", (self.repo / f).read_text(errors="replace")) else None
         lines = [int(m.group(1)), int(m.group(2))]
-        named = [n for n in re.findall(r"\b([A-Z][a-z]+(?:[A-Z][a-z0-9]*)+)\b", self.request) if n != comp] \
-            + re.findall(r"\b([A-Z][a-z0-9]+)\s+component\b", self.request)  # ListRow, or "a Header component"
+        text = (self.repo / f).read_text(errors="replace")
+        taken = lambda n: re.search(rf"(?<![\w$]){n}(?![\w$])", text)  # ScrollView, a name the file already has
+        named = [n for n in re.findall(r"\b([A-Z][\w$]*)\s+component\b", self.request) + re.findall(
+            r"\b([A-Z][a-z]+(?:[A-Z][a-z0-9]*)+)\b", self.request) if n != comp and not taken(n)]  # "a Header component", ListRow
         cname = named[0] if named else f"{comp.removesuffix('Screen')}Section{lines[0]}"
         stem = re.sub(r"(?<!^)([A-Z])", r"-\1", cname).lower()
         into = str(PurePosixPath(f).parent / f"{stem}.tsx")
@@ -4446,20 +4448,23 @@ class Buckets:
 
     def request_param(self) -> dict:
         """The new parameter as the request spells it: "add a duration parameter (number, default 2000) … pass
-        3000 from every call" gives name, type, default and value (the planner drops some of these)."""
+        3000 from every call" gives name, type, default and value (the planner drops some of these). Only what's
+        spelled plainly: a name, a known type, literal values."""
         r, out = self.request, {}
-        m = re.search(r"\b(?:add|adding)\s+(?:(?:a|an|the|new|optional)\s+)*`?([A-Za-z_$][\w$]*)`?\s+(?:param\w*|prop\b|argument|arg\b|option)",
-                      r, re.I)
+        lit = r"(`[^`]+`|\"[^\"]*\"|'[^']*'|-?\d+(?:\.\d+)?|true|false|null|undefined)(?![\w.])"
+        filler = r"(?:(?:a|an|the|new|optional|extra|another|required)\s+)*"
+        m = re.search(rf"\b(?:add|adding)\s+{filler}(?:(?:param\w*|prop|argument|arg|option)\s+(?:called|named)\s+`?([A-Za-z_$][\w$]*)`?"
+                      rf"|`?([A-Za-z_$][\w$]*)`?\s+(?:param\w*|prop\b|argument|arg\b|option))", r, re.I)
         if m:
-            out["name"] = m.group(1)
-        tail = r[m.end():m.end() + 160] if m else r
-        t = re.match(r"\s*\(\s*([A-Za-z_$][\w$<>\[\]| ]*?)\s*(?:,|\))", tail)
-        if t and not t.group(1).lower().startswith("default"):
-            out["type"] = t.group(1).strip()
-        d = re.search(r"\bdefault(?:s| value)?(?:\s+(?:of|to|is|=))?\s+(`[^`]+`|\"[^\"]*\"|'[^']*'|[\w.$-]+)", tail if m else r, re.I)
+            out["name"] = m.group(1) or m.group(2)
+        tail = r[m.end():m.end() + 160] if m else ""
+        t = re.match(r"\s*\(\s*(number|string|boolean|bigint|object|any|unknown|Date|[A-Z][\w$]*|\w+\[\])\s*[,)]", tail)
+        if t:
+            out["type"] = t.group(1)
+        d = re.search(rf"\bdefault(?:s| value)?(?:\s+(?:of|to|is|=))?\s+{lit}", tail, re.I)
         if d:
             out["default"] = d.group(1).strip("`")
-        v = re.search(r"\bpass(?:ing|es)?\s+(`[^`]+`|\"[^\"]*\"|'[^']*'|[\w.$-]+)\s+(?:from|to|in|at|for)\s+(?:every|all|each)\b", r, re.I)
+        v = re.search(rf"\bpass(?:ing|es)?\s+{lit}\s+(?:from|to|in|at|for)\s+(?:every|all|each)\b", r, re.I)
         if v:
             out["value"] = v.group(1).strip("`")
         return out
@@ -4524,8 +4529,8 @@ class Buckets:
             if not (isinstance(t, dict) and t.get("action") in ("share", "fold")):
                 continue
             named = {clean_path(str(x)) for x in [t.get("file"), *(t.get("from") or [])]}
-            fold = next((h["task"] for h in hints if h["task"]["action"] == "fold"
-                         and (named & set(h["task"]["from"]) or clean_path(str(t.get("file", ""))) == h["task"]["file"])), None)
+            fold = next((h["task"] for h in hints if h["task"]["action"] == "fold"  # both copies, or the folded file
+                         and (set(h["task"]["from"]) <= named or clean_path(str(t.get("file", ""))) == h["task"]["file"])), None)
             if fold or (t["action"] == "fold" and len(hints) == 1 and hints[0]["task"]["action"] == "fold"):
                 fold = fold or hints[0]["task"]
                 if t["action"] == "share":
@@ -4631,8 +4636,12 @@ class Buckets:
         moves = [t for t in plan["tasks"] if t["action"] in ("move", "share", "fold")]
         if moves:
             mine = {f for t in moves for f in ([t["file"], t["into"]] if t["action"] == "move" else [t["file"], *t["from"]])}
-            mine |= {f for t in moves if t["action"] == "fold" and t["file"] in folds for f in folds[t["file"]]["fold"]["importers_updated"]}
             extra = [t for t in plan["tasks"] if t["action"] in ("edit", "create", "delete") and t["file"] in mine]
+            for ft in (t for t in moves if t["action"] == "fold" and t["file"] in folds):  # importers' edits about the fold
+                stem = PurePosixPath(ft["file"]).stem
+                extra += [t for t in plan["tasks"] if t["action"] == "edit" and t not in extra
+                          and t["file"] in folds[ft["file"]]["fold"]["importers_updated"] and re.search(
+                              rf"\bimport\w*\b|{re.escape(stem)}", t["instructions"], re.I)]
             if extra:
                 say(f"  {paint('dropped', 'dim')} {', '.join(t['id'] for t in extra)}: the move already does "
                     f"that; anything left over is for the review, after the checks")
@@ -5827,12 +5836,29 @@ class Buckets:
             return {**task, "status": "done", "note": f"DONE: {note}"}
         else:
             return self.apply_share(task, commit, start)
-        pre_written, pre_note = [], ""
-        if task["action"] == "move" and self.cfg.get("module_state", "ref") == "ref":
-            refs, pre_written, pre_note = self.module_refs([task["file"]], [], task["where"])  # they move with the logic
-            if not refs:
-                pre_note = ""
+        pre_written, pre_notes = [], []
         d = ts_moves(self.repo, payload)
+        if task["action"] == "move" and self.cfg.get("module_state", "ref") == "ref":
+            # module state the moved code takes along (or that stops the move) becomes refs first, then the move again
+            done: set = set()
+            for _ in range(4):
+                text = (self.repo / task["file"]).read_text(errors="replace")
+                lets = lambda n: re.search(rf"(?m)^(?:let|var)\s+{re.escape(n)}\b", text)
+                if d.get("ok"):
+                    new = [h for h in d["report"].get("helpers_moved") or [] if lets(h) and h not in done]
+                else:
+                    m = re.search(r"`([\w$]+)` would move to the hook's file, but code that stays assigns to it", d.get("error", ""))
+                    new = [m.group(1)] if m and m.group(1) not in done else []
+                if not new:
+                    break
+                refs, w, n = self.module_refs([task["file"]], new, task["where"])
+                done |= set(new)
+                if not refs:
+                    break
+                pre_written += w
+                pre_notes.append(n)
+                d = ts_moves(self.repo, payload)
+        pre_note = "; ".join(pre_notes)
         if not d.get("ok") and pre_written:
             git(self.repo, "checkout", "-q", "--", *pre_written)  # the move didn't happen: nor do the refs
         if not d.get("ok"):
@@ -5874,9 +5900,14 @@ class Buckets:
     def module_refs(self, files: list[str], names: list[str], component: str = "") -> tuple[dict, list[str], str]:
         """Module-level `let`s turned into refs in each file (to_ref), only those that convert in every file (two
         variants must stay alike). Returns {name: ref}, the files written and a note for the report."""
+        importers = self.index.importers(files)
+        def own_hooks(f):  # a screen's own hook (one file uses it): its module state is that screen's
+            if len(importers.get(f, [])) > 1:
+                return []
+            return [d["name"] for d in self.index.outline().get(f, []) if re.match(r"use[A-Z0-9]", d["name"])]
         def run(want):
-            return [ts_moves(self.repo, {"op": "to_ref", "file": f, "names": want, **({"component": component} if component else {})},
-                             timeout=300) for f in files]
+            return [ts_moves(self.repo, {"op": "to_ref", "file": f, "names": want, "hooks": own_hooks(f),
+                                         **({"component": component} if component else {})}, timeout=300) for f in files]
         ds = run(names)
         bad = next((d for d in ds if not d.get("ok")), None)
         if bad:
@@ -5912,14 +5943,15 @@ class Buckets:
             return {**task, "status": "failed", "note": f"BLOCKED: {cmp.get('error', 'compare failed')}"}
         same = {p["name"]: p for p in cmp["pairs"] if p["status"] == "identical"}
         wanted = list(dict.fromkeys(task["select"] + sorted(getattr(self, "unified", set()))))  # made identical this run
-        notes, written, kept_why = [], [], []
+        notes, written, kept_why, pre = [], [], [], []
         state = [n for n in wanted if same.get(n, {}).get("module_level") and same[n].get("mutable")]
         if state and self.cfg.get("module_state", "ref") == "ref":  # refs in the shared hook, not one module variable
-            refs, written, note = self.module_refs([a, b], state)
+            refs, pre, note = self.module_refs([a, b], state)
             notes.append(note)
             if refs:
                 cmp = ts_moves(self.repo, {"op": "compare", "a": a, "b": b}, timeout=120)
                 if not cmp.get("ok"):
+                    git(self.repo, "checkout", "-q", "--", *pre)  # the share won't happen: nor do the refs
                     return {**task, "status": "failed", "note": f"BLOCKED: {cmp.get('error', 'compare failed')}"}
                 same = {p["name"]: p for p in cmp["pairs"] if p["status"] == "identical"}
                 wanted = [n for n in wanted if n not in refs] + [r for r in refs.values() if r in same]
@@ -5980,10 +6012,12 @@ class Buckets:
         if kept_why:
             notes.append("left in place: " + "; ".join(f"{x['name']} ({x['why']})" for x in kept_why[:8]))
         note = "; ".join(notes)
-        written = list(dict.fromkeys(written))
-        if not written:
+        if not written:  # nothing shared: the refs made for it go too
+            if pre:
+                git(self.repo, "checkout", "-q", "--", *pre)
             say(f"  {warn()} {task['id']}: nothing was shared ({note[:160]})")
             return {**task, "status": "failed", "note": f"BLOCKED: {note}"}
+        written = list(dict.fromkeys(pre + written))
         self.involved = list(dict.fromkeys(self.involved + written))
         if commit:
             git(self.repo, "add", "-A", "--", *written)
@@ -7930,8 +7964,13 @@ def nest_spec(backend: Path) -> str | None:
     if "@nestjs/core" not in {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}:
         return None
     head = git(backend, "rev-parse", "HEAD", check=False).strip()
-    dirty = git(backend, "status", "--porcelain", "--", "src", check=False)
-    key = hashlib.sha1(f"{head}\n{dirty}".encode()).hexdigest()[:12]
+    if head:  # the commit, what's changed since (content, not names) and new files' times
+        state = git(backend, "diff", "HEAD", check=False) + "".join(
+            f"{f}:{(backend / f).stat().st_mtime_ns}\n" for f in git(backend, "ls-files", "--others", "--exclude-standard",
+                                                                      check=False).split("\n") if f and (backend / f).is_file())
+    else:  # not a git repo: the newest source file's time
+        state = str(max((p.stat().st_mtime_ns for p in backend.rglob("*.ts") if "node_modules" not in p.parts), default=0))
+    key = hashlib.sha1(f"{head}\n{state}".encode()).hexdigest()[:12]
     out = STATE_DIR / "contract" / f"{backend.name}-{key}.json"
     if out.is_file():
         return str(out)
@@ -7942,10 +7981,11 @@ def nest_spec(backend: Path) -> str | None:
         d = json.loads(r.stdout or "{}")
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
         return None
-    if not d.get("ok") or not out.is_file():
+    if not d.get("ok") or not out.is_file() or not d.get("summary", {}).get("routes"):
+        out.unlink(missing_ok=True)  # no routes read (paths from the environment…): the exported file is better than none
         return None
-    for old in out.parent.glob(f"{backend.name}-*.json"):  # older commits' specs
-        if old != out:
+    for old in out.parent.glob(f"{backend.name}-*.json"):  # older states' specs of this backend
+        if old != out and re.fullmatch(rf"{re.escape(backend.name)}-[0-9a-f]{{12}}\.json", old.name):
             old.unlink(missing_ok=True)
     return str(out)
 

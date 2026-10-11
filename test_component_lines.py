@@ -88,6 +88,22 @@ class ComponentByLines(unittest.TestCase):
         apply(self.repo, d)
         self.assertEqual(tsc_errors(self.repo), "")
 
+    def test_a_name_the_file_already_has_is_refused(self):
+        d = component(self.repo, file="src/list.tsx", function="ListScreen", lines=[10, 12], into="src/item.tsx", name="Item")
+        self.assertFalse(d["ok"])
+        self.assertIn("`Item` is already a name", d["error"])
+
+    def test_props_are_passed_not_re_derived_from_the_component_props(self):
+        repo = make_repo({"src/p.tsx": 'declare function useTheme(): { c: string }\n'
+                                       'export function Card(p: { user: { name: string } }) {\n  const theme = useTheme()\n'
+                                       '  const user = useTheme() && p.user\n  return (\n    <div>\n      <b>{user.name}</b>\n'
+                                       '      <i>{theme.c}</i>\n    </div>\n  )\n}\n'})
+        d = component(repo, file="src/p.tsx", function="Card", lines=[6, 9], into="src/body.tsx", name="Body")
+        self.assertTrue(d["ok"], d)
+        self.assertIn("user={user}", d["files"]["src/p.tsx"])                   # passed: it comes from the props
+        self.assertNotIn("p.user", d["files"]["src/body.tsx"])
+        self.assertIn("const theme = useTheme()", d["files"]["src/body.tsx"])   # a context value is re-derived
+
     def test_lines_that_cut_an_element_are_refused_with_the_elements_near(self):
         d = component(self.repo, file="src/list.tsx", function="ListScreen", lines=[10, 11], into="src/x.tsx", name="X")
         self.assertFalse(d["ok"])
