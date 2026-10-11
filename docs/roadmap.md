@@ -10,7 +10,7 @@ Size: S under ~1 h, M a few hours, L a day or more. Each item is tested live (th
 **0. Now:** decide what to do about app-a-specific detail in this public repo's field notes (make the repo
 private, or move the app-a notes to a private file).
 
-**Tier 1: gaps in what exists (trust)**
+**Tier 1: gaps in what exists (trust)** · **done** (field notes 25)
 1. Follow-ups build on the previous run's unmerged branch ("now fix w in x, z" starts from `main` today). S
 2. `undo`: revert the last merge. S
 3. Roll back a round that made things worse (round N breaks checks that N−1 passed: revert it, stop). S

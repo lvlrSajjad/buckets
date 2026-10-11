@@ -579,6 +579,19 @@ Lessons: the local model is good at the judgment (incidental vs real) and poor a
 mistake across rounds (each fix introduced the next problem); the tool has to refuse what it can't do
 safely rather than leave it to follow-up rounds.
 
+### 25. Tier 1: follow-ups, undo, round rollback, clean stops (2026-10-11)
+
+Live in a scratch clone of buckets:
+- **Time limit:** `--time-limit 0.5` stopped a run at 0:44 (mid-planning), exit 130, back on `main`, no branch left.
+- **Follow-ups:** run 1 added the `tags` operation (3m 44s, unmerged); run 2, "now make op_tags default to 5
+  instead of 10", built on run 1's branch. The first try decided after planning, so the planner read `main`,
+  didn't see `op_tags` and added it again (duplicates); now the switch happens before the checks and the
+  reading. Run 2 again: **3m 24s, done; the diff on top of run 1 is exactly 10 → 5 and its test.**
+- **Merge and undo:** `merge` brought in both runs and deleted run 1's branch; `undo` moved `main` back to the
+  exact commit before and kept the work as `…-undone`.
+- Round rollback and diff-checked reviews are covered by unit tests; memory outside the repo is set for the
+  work repo (`"memory": "outside"`), so its runs stop creating `.buckets/`.
+
 ## Lessons so far
 
 - Moving code is a job for a tool, not a model: a 1,450-line split failed after 20 min of retyping and took 3 s
