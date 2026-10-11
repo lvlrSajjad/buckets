@@ -3480,9 +3480,13 @@ class Buckets:
                 for k in ("into", "name", "where"):
                     t[k] = t.get(k) or hint["task"][k]
                 t["select"] = t.get("select") or ["logic"]
+        hints = [h for h in self.share_hints() if h["task"]]
         for t in data.get("tasks") or []:
             if not (isinstance(t, dict) and t.get("action") == "share"):
                 continue
+            pair = [clean_path(str(x)) for x in t.get("from") or []]
+            if len(hints) == 1 and not (len(pair) == 2 and all((self.repo / x).is_file() for x in pair)):
+                t["from"] = hints[0]["task"]["from"]  # the planner's paths were off; the only pair the request names
             for h in self.share_hints():
                 ht = h["task"]
                 if ht and (clean_path(str(t.get("file", ""))) == ht["file"] or set(t.get("from") or []) == set(ht["from"])):
