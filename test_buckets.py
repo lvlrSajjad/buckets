@@ -1225,15 +1225,15 @@ class BigRepoTools(unittest.TestCase):
 
     def test_request_words_find_paths_and_code(self):
         repo = make_repo({
-            "app/screens/work-order-details/screen.tsx": 'export const S = () => <Row title={"Original ETA"} />\n',
-            "app/models/work-order-details/model.ts": "export const M = { createdAt: 1, originalEta: 2 }\n",
+            "app/screens/order-details/screen.tsx": 'export const S = () => <Row title={"Original ETA"} />\n',
+            "app/models/order-details/model.ts": "export const M = { createdAt: 1, originalEta: 2 }\n",
             "app/screens/invoice/screen.tsx": "export const I = 1\n"})
-        self.assertEqual(buckets.word_runs("Does work order details have created at? Hide `x` and a/b.c"),
-                         [["work", "order", "details"], ["created", "at"]])
+        self.assertEqual(buckets.word_runs("Does order details have created at? Hide `x` and a/b.c"),
+                         [["order", "details"], ["created", "at"]])
         self.assertEqual(buckets.spellings(["created", "at"]), ["created-at", "created_at", "createdAt", "CreatedAt"])
-        leads = buckets.request_leads(repo, "Hide the Original ETA from the work order details",
+        leads = buckets.request_leads(repo, "Hide the Original ETA from the order details",
                                       buckets.list_files(repo, []))
-        self.assertIn('Paths spelling "work order details" (2 files)', leads)
+        self.assertIn('Paths spelling "order details" (2 files)', leads)
         self.assertNotIn("invoice", leads)
         self.assertIn('Code and text matching "original eta"', leads)
         self.assertIn('screen.tsx:1: export const S = () => <Row title={"Original ETA"} />', leads)   # UI text
@@ -1303,23 +1303,23 @@ class BigRepoTools(unittest.TestCase):
 
     def test_long_agent_docs_and_skills_are_cut_to_what_the_request_needs(self):
         doc = "# AGENTS\nIntro.\n" + "".join(f"## Topic {i}\n" + "filler words here. " * 40 + "\n" for i in range(30))
-        doc += "## Work orders\nThe work order details screen lives in screens/work-order-details.\n"
+        doc += "## Orders\nThe order details screen lives in screens/order-details.\n"
         repo = make_repo({"AGENTS.md": doc, "CLAUDE.md": "@AGENTS.md\n",
-                          ".github/skills/work-order-details/SKILL.md": "# Skill\nHow details rows work.\n",
+                          ".github/skills/order-details/SKILL.md": "# Skill\nHow details rows work.\n",
                           ".github/skills/linting/SKILL.md": "# Lint\n"})
-        g = buckets.guidance(repo, {}, "Hide a field from the work order details")
+        g = buckets.guidance(repo, {}, "Hide a field from the order details")
         self.assertIn("--- AGENTS.md (the parts that match this request) ---", g)
-        self.assertIn("The work order details screen lives in", g)              # the matching section
+        self.assertIn("The order details screen lives in", g)              # the matching section
         self.assertIn("Other sections, not shown: Topic 0", g)
-        self.assertIn("--- .github/skills/work-order-details/SKILL.md", g)    # the skill its words spell
+        self.assertIn("--- .github/skills/order-details/SKILL.md", g)    # the skill its words spell
         self.assertNotIn("skills/linting", g)
         self.assertLess(len(g), 9000)
 
     def test_related_repos_are_searched_and_read_never_changed(self):
         api = make_repo({"src/filter/workorder.list.config.ts": "export const C = [{ filterKey: 'priorityLevel' }]\n"})
-        repo = make_repo({"app/screens/work-order-filters/screen.tsx": "export const S = 1\n"})
+        repo = make_repo({"app/screens/order-filters/screen.tsx": "export const S = 1\n"})
         cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
-        b = buckets.Buckets(cfg, repo, "add the priority level to the work order filters")
+        b = buckets.Buckets(cfg, repo, "add the priority level to the order filters")
         b.rc["related"] = {"api": str(api)}
         facts = b.facts()
         self.assertIn("in `api` (a related repo", facts)
@@ -1896,9 +1896,9 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
         self.assertEqual(fixed["from"], ["src/app/screen.ts"])
 
     def test_shared_hook_names(self):
-        self.assertEqual(buckets.shared_hook_names("a/b/create-invoice-shared.tsx", "a/b/x/use-create-invoice-screen.tsx"),
-                         ("a/b/use-create-invoice-screen-shared.ts", "useCreateInvoiceScreenShared"))
-        self.assertEqual(buckets.shared_hook_names("a/rfp-shared.tsx", "a/x/rfp-details-screen.tsx")[1], "useRfpDetailsScreenShared")
+        self.assertEqual(buckets.shared_hook_names("a/b/billing-shared.tsx", "a/b/x/use-billing-screen.tsx"),
+                         ("a/b/use-billing-screen-shared.ts", "useBillingScreenShared"))
+        self.assertEqual(buckets.shared_hook_names("a/quote-shared.tsx", "a/x/quote-details-screen.tsx")[1], "useQuoteDetailsScreenShared")
 
     def test_validation(self):
         bad = {"id": "T1", "file": "src/thing-screen.tsx", "action": "move", "where": "ThingScreen", "into": "src/ui.tsx",

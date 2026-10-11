@@ -24,16 +24,16 @@ account (the repo's credential helper). Use it as a chat: `cd <repo> && buckets`
 Config: `~/.config/buckets/config.json` (backups `config.json.bak-*`). `planner` = the Mac's 35B,
 `offload.planner` = `advisor`, `offload.light_jobs` = false; `reader`/`thinker`/`coder` = Windows with
 `"api": "llamacpp"`. opencode has a `llamacpp_windows` provider. Repo rules: `~/Coding/ME/*` local-only;
-`~/Coding/ET/ecotrak-mobile` has explicit checks (tsc, eslint errors-only, jest in `packages/shared`)
-and `"related": {"ecotrak-api": "~/Coding/ET/web_api/ecotrak-api"}`, mode automatic. ecotrak-mobile
+`~/work/mobile-app` has explicit checks (tsc, eslint errors-only, jest in `packages/shared`)
+and `"related": {"backend-api": "~/work/backend-api"}`, mode automatic. the work repo
 itself was left exactly as found (no branches, no `.buckets/`).
 
 ## The plan, in order (what to do next)
 
 Done (field notes 20–24): MTP and caching on Windows; double review (a lone objection while checks pass is
 weighed by the other reviewer); mechanical moves (`ts_moves.cjs`: extract, compare, share, share_hook,
-unify) with dry-run suggestions, guards and live-verified results (questionnaire split 5m 14s; rfp-details,
-inventory-details, create-invoice and proposal-details merges in 4m 43s–5m 38s); the AGENTS.md rule digest;
+unify) with dry-run suggestions, guards and live-verified results (big screen split 5m 14s; pair-1,
+pair-2, pair-3 and pair-4 merges in 4m 43s–5m 38s); the AGENTS.md rule digest;
 the locale-entry check; red CI as check output; the variant inventory for questions.
 
 Next: **docs/roadmap.md, "Backlog, ranked"**: 0 (public-repo decision), then tier 1 (follow-ups on the
@@ -44,7 +44,11 @@ parallel lanes, two candidates, adaptive placement, Windows network) are tier 5 
 
 ## How to test changes (gotchas learned the hard way)
 
-- **Live runs on ecotrak-mobile:** start with `python3 <scratchpad>/capped.py 1200 buckets --local -y "<request>"`
+- **This repo is public.** Work-repo specifics (screen and function names, file sizes, its AGENTS.md
+  rules, findings like debug logs or missing locale keys) go in `docs/private/` (git-ignored; full versions
+  of the field notes, roadmap and handoff are there). The public docs say the same things generically.
+
+- **Live runs on the work repo:** start with `python3 <scratchpad>/capped.py 1200 buckets --local -y "<request>"`
   (a 20-min cap whose Ctrl-C reaches buckets: background shells ignore SIGINT otherwise); afterwards delete the
   `buckets/…` branch and the untracked `.buckets/` it creates, so the repo is as found. Verify a branch in a
   separate worktree with `node_modules` symlinked (`tsc` 10 s, eslint, jest 1,545 tests ~8 s).

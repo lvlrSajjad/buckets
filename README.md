@@ -278,14 +278,14 @@ own scoping) moves code byte for byte, and the planner only decides what goes wh
 | Task action | What it does |
 |---|---|
 | `move` | a component's logic (`select: ["logic"]`: every statement that renders nothing) or named statements into a new hook file: works out the hook's parameters (props typed from the component's props type; values from `useStores()`-style hooks or store destructures are re-derived inside instead of passed), what it returns, the private helpers that must come along, and the imports on both sides; statements that can't move (they need something set later, or kept code assigns to them) stay, with the reason |
-| `share` | two variants of a file (`screens/x/ecotrak/…` and `…/ecotrak-techs/…`): identical top-level declarations go into one shared file, identical statements inside their components into a shared hook (`use<Screen>Shared`); module state a screen assigns to stays |
+| `share` | two variants of a file (`screens/x/app-a/…` and `…/app-b/…`): identical top-level declarations go into one shared file, identical statements inside their components into a shared hook (`use<Screen>Shared`); module state a screen assigns to stays |
 
 For a request that asks to move, split, extract, merge or share code, buckets gives the planner a dry run
 of the move (or the two variants compared declaration by declaration, as TypeScript prints them, so
 formatting doesn't count) as a ready-made task, swaps in the move if the plan would retype the code,
 and drops edit tasks that would redo it by hand. The checks then decide; reviews judge the move, not
-problems the moved code already had. On ecotrak-mobile, a 3,687-line screen split in 5m 14s (it never
-finished by retyping), and inventory-details' two variants shared 110 lines with every check passing.
+problems the moved code already had. On the work repo, a 3,687-line screen split in 5m 14s (it never
+finished by retyping), and pair-2' two variants shared 110 lines with every check passing.
 
 ## The code index
 
@@ -310,11 +310,11 @@ line (tsc, ESLint, Vitest/Jest, pytest, ruff, mypy, go); the repo's own auto-fix
 files before the checks; with a check named `coverage…` (or "coverage" in the request), uncovered
 line ranges from Istanbul or coverage.py reports go to the planner.
 
-For repos with their own mechanical gates, add them as checks. For example, ecotrak-api's client
+For repos with their own mechanical gates, add them as checks. For example, backend-api's client
 impact check fails a run that would break a client screen:
 
 ```json
-{ "checks": { "client-impact": "node scripts/client-impact.js --base origin/develop --client web=../ecotrak-web" } }
+{ "checks": { "client-impact": "node scripts/client-impact.js --base origin/develop --client web=../web-app" } }
 ```
 
 ## Which machine does what
@@ -414,13 +414,13 @@ Changes under `.buckets/` never count as uncommitted work. Turn it off with `"me
 **The repo's own docs.** buckets passes the agent doc (`AGENTS.md`, `CLAUDE.md`,
 `.github/copilot-instructions.md`); a long one is cut to its opening plus the sections that mention
 the request (a 70k-character AGENTS.md costs ~3k tokens), and skill docs whose folder name the
-request spells (`.github/skills/work-order-details/SKILL.md` for "work order details") are included
+request spells (`.github/skills/details-screen/SKILL.md` for "order details") are included
 the same way.
 
 **Related repos (read-only).** A mobile app's feature often depends on the API it calls. With
-`"related": {"ecotrak-api": "~/Coding/ET/web_api/ecotrak-api"}` (in `.buckets.json` or a config
+`"related": {"backend-api": "~/work/backend-api"}` (in `.buckets.json` or a config
 `repos` rule), the search for the request's words runs there too (results labelled
-`ecotrak-api:…`), the planner can read its parts as `ecotrak-api:path:start-end`, and Claude gets read
+`backend-api:…`), the planner can read its parts as `backend-api:path:start-end`, and Claude gets read
 access to it. Runs never change a related repo.
 
 ## llama.cpp on the worker (faster reading)

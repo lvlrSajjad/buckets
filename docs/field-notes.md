@@ -361,28 +361,28 @@ default) 233–271. `--n-cpu-moe 28` overflowed the card: 65 tokens/s. On a real
 Plain `-ngl 8` (whole layers on the card, like a naive split) wrote at 12.8 tokens/s, so Ollama was
 already smarter than that.
 
-### 17. A 2,000-file React Native monorepo (ecotrak-mobile), local vs Claude (2026-10-10)
+### 17. A 2,000-file React Native monorepo (the work repo), local vs Claude (2026-10-10)
 
-ecotrak-mobile: 2,123 files (1,400 TypeScript) in `apps/` and `packages/`, with the backend
-(`ecotrak-api`, NestJS, 3,182 files) next to it. Checks set in the config's `repos` rule: `tsc` (10 s),
+the work repo: 2,123 files (1,400 TypeScript) in `apps/` and `packages/`, with the backend
+(`backend-api`, NestJS, 3,182 files) next to it. Checks set in the config's `repos` rule: `tsc` (10 s),
 eslint errors only (34 s), jest (1,545 tests, 6 s), all in `packages/shared`. Every change ran on a
 throwaway `buckets/…` branch; `main` was never touched.
 
 | Test | Planner | Time | Result |
 |---|---|---|---|
-| "Does work order details have a created date / created at field?" | local | 1m 55s → **1m 45s** | wrong files, "can't confirm" → **correct** (`work-order-details.ts:108 createdAt`) after the request-words search |
-| Hide 2 rows, vague ("the work order details") | local | 13m 17s → 11m 12s → **4m 55s** | detour via an invented file → half-done while the review said done → **clean 24-line diff** |
+| "Does order details have a created date / created at field?" | local | 1m 55s → **1m 45s** | wrong files, "can't confirm" → **correct** (`details-screen.ts:108 a date field`) after the request-words search |
+| Hide 2 rows, vague ("the order details") | local | 13m 17s → 11m 12s → **4m 55s** | detour via an invented file → half-done while the review said done → **clean 24-line diff** |
 | Hide 2 rows, files named | local | 5m 01s | correct (older code, without the coder focus fixes) |
 | 10 `react-hooks/exhaustive-deps` warnings (`time-track`) | local | 15 min cap | 10 → 1 warnings, but **changed behaviour** (an on-mount fetch now re-runs on date changes; an effect resets on data loads). Not mergeable |
-| "Show createdAt as a row in work order details, both apps" | local | 20 min cap | not done: invented a third hook file, type and import errors, the Mac advisor too slow to help |
+| "Show a date field as a row in order details, both apps" | local | 20 min cap | not done: invented a third hook file, type and import errors, the Mac advisor too slow to help |
 | Same | **Claude** (Sonnet plans and reviews) | **1m 59s, $0.51** | done; reused `utils/details-dates.ts` (next to `formatWorkOrderCompletedDate`), all 3 edits applied with no coder |
-| "Pick a search param missing from the filters and add it" | **Claude** | 8m 11s, $1.19 | works end to end (Project), **but slot 32 collides with the team filter** (`work-order-sp-name-filter.ts`); every check passed |
+| "Pick a search param missing from the filters and add it" | **Claude** | 8m 11s, $1.19 | works end to end (Project), **but slot 32 collides with another filter** (`filter-sp-name-filter.ts`); every check passed |
 | Same, backend readable (`related`) | **Claude** | 5m 21s, $1.07 | correct: slot 33, reuses the projects dropdown, typed. The plan never mentions the backend: the better result was most likely run-to-run variation |
 | `buckets review` of the slot-32 branch | **Claude** | **36 s, $0.28** | **caught the collision** with both locations, plus a type mismatch, a possible permission gate and the missing locales (from AGENTS.md), and a manual test plan |
 
 What the first runs got wrong, and the fix each led to:
 - File picking chose the API service and the store, never the screens: **request words → paths
-  and code** (`work order details` → `work-order-details/`, `created at` → `createdAt`), ~1 s.
+  and code** (`order details` → `details-screen/`, `created at` → `a date field`), ~1 s.
 - A 1,500-line screen is one function, so "the part it needs" was its first 150 lines: **the
   stretches around the request's rarer terms** instead.
 - The planner's edits named the file's path as their anchor; a coder searched 17 times (6.5 min)
@@ -491,21 +491,21 @@ the Mac plans, both machines review each round at once, plus the mechanical weak
 
 ### 22. Big-file refactors by moving code, not retyping it (2026-10-11 night)
 
-The owner's request on ecotrak-mobile: split `assessment-questionnaire-screen.tsx` (3,687 lines; ~1,450
+The owner's request on the work repo: split `big-screen.tsx` (3,687 lines; ~1,450
 lines of state, refs, effects, a save queue, validation, submit, pagination and attachment handlers
-inside one component) by moving the logic into a `useAssessmentQuestionnaire` hook, keeping the render
+inside one component) by moving the logic into a `useBigScreen` hook, keeping the render
 helpers and JSX in the screen.
 
 | Run | What happened | Time | Result |
 |---|---|---|---|
-| Baseline (retyping) | plan in 4m 13s (a good inventory, but missing `saveAnswer`, inventing an import path for a local helper, a circular import); the Windows coder retyped the hook for 15 min until the connection dropped | 20 min cap | **nothing written** |
+| Baseline (retyping) | plan in 4m 13s (a good inventory, but missing `a save function`, inventing an import path for a local helper, a circular import); the Windows coder retyped the hook for 15 min until the connection dropped | 20 min cap | **nothing written** |
 | `ts_moves.cjs extract` by hand | TypeScript's scoping picks the statements, the parameters (`navigation`), the 56 returned names, the 12 private helpers that must come along (5 exported back) and the imports; the lines move byte for byte | **2.8 s, no model** | `tsc`, eslint, all 1,545 jest tests pass; eslint warnings identical (12 → 4 + 8, just split) |
 | buckets with `move` (runs 1–5) | the local planner ignored the new rule in a 26k prompt (1), then chose `move` but put its fields in the text (2, crashed), then the guard switched a retyping plan to the move (3); false "shortcut" alarms for `any`s that only moved (36, then 16, then 7: per-file counting, Prettier dropping `;`, Prettier joining lines, the tool's `export`, the generated `navigation: any`), and a redundant "update the screen" task that spent 9 min changing nothing (4) | | each fixed in turn |
 | **buckets with `move` (run 6)** | planner chose `move` itself (the dry-run suggestion in its facts), the redundant task dropped, move 3 s, checks pass, both reviews "done" | **5m 14s** | **correct**: verified in a worktree (`tsc`, eslint, 1,545 tests) |
 
-Same idea for the drifted ecotrak / ecotrak-techs screens: `compare` pairs declarations (rfp-details:
-`CommentInput`, `AddCommentModal`, `FULL`, `statelessOutput` identical; create-invoice's hook shares ten
-number helpers, the screen is 72% alike); `share` moved rfp-details' four into `rfp-details-shared.tsx`
+Same idea for the drifted app-a / app-b screens: `compare` pairs declarations (pair-1:
+`an input component`, `a modal component`, `FULL`, `a module-level `let`` identical; pair-3's hook shares ten
+number helpers, the screen is 72% alike); `share` moved pair-1' four into `pair-1-shared.tsx`
 (245 duplicate lines gone) in 2.3 s with every check passing.
 
 Lessons: the model is good at deciding what goes where and bad at copying 1,500 lines; give it a move
@@ -513,30 +513,30 @@ and it needs only to choose it. A long prompt's rule isn't enough for the local 
 its facts plus a guard is. Checks that compare lines must expect code to move between files and be
 reformatted on the way.
 
-### 23. Merging the drifted ecotrak / ecotrak-techs variants (2026-10-11 night)
+### 23. Merging the drifted app-a / app-b variants (2026-10-11 night)
 
-Ladder step 1, rfp-details (1,563 + 718 lines): "merge the duplicated code of the two variants into
-`rfp-details-shared.tsx`, behaviour unchanged". Ten live runs; each failure was fixed before the next:
+Ladder step 1, pair-1 (1,563 + 718 lines): "merge the duplicated code of the two variants into
+`pair-1-shared.tsx`, behaviour unchanged". Ten live runs; each failure was fixed before the next:
 
 | Runs | What went wrong | Fix |
 |---|---|---|
 | 1–4 | the planner added edits to both screens next to the share (they'd redo it, or spend minutes changing nothing); the "every named file has a task" check put dropped tasks back; one bogus `move` with no destination crashed the plan | edits next to a move/share go even with exact code; files a move/share covers count as planned; a task that can't run is dropped, not fatal |
 | 5–6 | both reviewers wanted locale entries for strings that only moved (once because the formatter joined `<Text>` onto one line) | moved strings aren't new gaps; reviews are told moved code is judged as a move, its old problems out of scope |
-| 7 | only `FULL` moved: the new module-state rule refused `statelessOutput` even though everything assigning it moves too | module state moves when all its assigners move |
+| 7 | only `FULL` moved: the new module-state rule refused `a module-level `let`` even though everything assigning it moves too | module state moves when all its assigners move |
 | 8 | the reviews disagreed (first time): Windows wanted the hook in the named file and worried about the shared `let` | the hook goes into the named shared file, imports merged into one line; shared module state is stated in the note |
 | 9 | the guard swapped in the share but kept the redundant edits | the swap re-runs the drop |
 | **10** | | **5m 38s, both reviews done; verified: 342 duplicate lines out of the screens, a 170-line shared file, `tsc`, eslint, 1,545 tests pass** |
 
-What the share does now: identical top-level declarations (`FULL`, `statelessOutput`, `CommentInput`,
-`AddCommentModal`) into the shared file; identical statements inside both components into
-`useRfpDetailsScreenShared` in the same file (only those both variants can move with the same
+What the share does now: identical top-level declarations (a style constant, a module-level `let`, an input
+component and a modal component) into the shared file; identical statements inside both components into
+`usePair1Shared` in the same file (only those both variants can move with the same
 statement: 4 of 16; values from `useStores()` and store destructures are re-derived inside the hook, not
 passed); destructured names the move left unused, and their imports, removed. Planning fell from 3–6 min
 to 2m 54s once long files a move covers were shown as outlines instead of read.
 
-inventory-details, ladder step 2, live: run 1's planner wrote the shared file into a task's edits (retyping), which the guard didn't swap because the task had edits; fixed (a task writing the move's target is swapped either way). **Run 2: 4m 52s, both reviews done**; verified: 142 duplicate lines out of the screens into a 72-line shared file, `tsc`, eslint, 1,545 tests pass. The three module-level `let`s the screens assign stay.
+pair-2, ladder step 2, live: run 1's planner wrote the shared file into a task's edits (retyping), which the guard didn't swap because the task had edits; fixed (a task writing the move's target is swapped either way). **Run 2: 4m 52s, both reviews done**; verified: 142 duplicate lines out of the screens into a 72-line shared file, `tsc`, eslint, 1,545 tests pass. The three module-level `let`s the screens assign stay.
 
-create-invoice, ladder step 3 (the pair Claude struggles with; the hook is only 52% alike), live: run 1's
+pair-3, ladder step 3 (the pair Claude struggles with; the hook is only 52% alike), live: run 1's
 reviews disagreed: Windows objected to the shared module refs, a "redundant" `useStores()` and a "hook
 ordering risk" ("while valid"); none a bug, but any issue won. Fixed: when every check passes and one
 reviewer objects, the other weighs each issue (style and hypothetical risks don't count, nor claims the
@@ -547,32 +547,33 @@ near copies and real differences: the model's part (next).
 
 Survey of every variant pair's small near copies (`compare`, diff ≤ 4 lines): most are **real differences**
 that must stay apart (filter heights 88 vs 138 and 100 vs 150; `isInternalTech &&` on a permission check;
-`createWorkOrder(true)` vs `createWorkOrder()`; extra branches for copied work orders); some are
-**incidental** (`Linking.openURL(url ?? "")` vs `(url)`, `invoice?.id ?? -1`, `useCallback` vs a plain
+`create(true)` vs `create()`; extra branches for copied records); some are
+**incidental** (`Linking.openURL(url ?? "")` vs `(url)`, `record?.id ?? -1`, `useCallback` vs a plain
 function, optional chaining). Telling them apart is the model's part; `unify` then copies the chosen
-version exactly. Found on the way, for the owner: debug logging left in the techs variants
-(`console.log("handleNoWarrantyChange", …)` in create-invoice, `'[CSR-DEBUG] …'` in create-service-request-3). Questions for the owner: `statelessOutput` is now one
-variable for both variants (each app ships one, so nothing changes per app); and the 12 rfp statements that
-differ slightly are where the model's help is needed next (make them identical, then share).
+version exactly. Found on the way: leftover debug logging in one variant (details in the private notes).
+
+Questions for the owner: a module-level `let` is now one variable for both variants (each app ships one,
+so nothing changes per app); and the 12 pair-1 statements that differ slightly are where the model's help
+is needed next (make them identical, then share).
 
 ### 24. Near copies: the model picks, buckets copies (`unify`), then shares (2026-10-11 early morning)
 
-proposal-details, "merge … where a near copy differs only incidentally, use the safer version and share
-it; keep real differences". The local planner judged the two near copies right: `onAddressPress` takes
-the techs version (`Linking.openURL(url ?? "")`, null-safe); `openStatusChangeModal` differs only in quote
+pair-4, "merge … where a near copy differs only incidentally, use the safer version and share
+it; keep real differences". The local planner judged the two near copies right: `a handler` takes
+app B's version (`Linking.openURL(url ?? "")`, null-safe); `another handler` differs only in quote
 style. It wrote them as edits; they were dropped as "redoing the share" (run 1), so now an edit that makes
 a near copy match the other variant becomes a `unify` (copied exactly) and runs before the share (run 2:
-both unified in 2 s each, then shared into `useProposalDetailsScreenShared`).
+both unified in 2 s each, then shared into `usePair4Shared`).
 
-Run 2 then showed a real gap: the hook call landed after `if (!proposal) return` (lint's rules-of-hooks
-caught it). Round 2's model moved the call up, which also moved a destructure of `proposal` above the null
+Run 2 then showed a real gap: the hook call landed after `if (!record) return` (lint's rules-of-hooks
+caught it). Round 2's model moved the call up, which also moved a destructure of `record` above the null
 check (both reviewers caught the crash); round 3 broke `tsc`. Not done after 3 rounds. Fix in the tool: a
 hook call goes before an early return only when what moves past it just declares functions and its inputs
 are set by then; values set after the return are never re-derived inside the hook; otherwise the share
-refuses the hook with the reason ("it would need `addressName`, set after the early return at line 256") and
+refuses the hook with the reason ("it would need a value, set after the early return at line 256") and
 does the safe part (the unifies and `FULL`), with every check passing.
 
-Runs 3–4: the planner chose `unify` itself but with broken paths (now filled from the other variant), the share ran before the unifies (now always after), review follow-ups weren't filled (now are). **Run 4: 4m 43s, both reviews done**; verified: `onAddressPress` unified to the null-safe version, `openStatusChangeModal` to one quote style, `FULL` shared; the two unified functions stay in each screen (the hook would need `addressName`, set after the early return); `tsc`, eslint, 1,545 tests pass.
+Runs 3–4: the planner chose `unify` itself but with broken paths (now filled from the other variant), the share ran before the unifies (now always after), review follow-ups weren't filled (now are). **Run 4: 4m 43s, both reviews done**; verified: `a handler` unified to the null-safe version, `another handler` to one quote style, `FULL` shared; the two unified functions stay in each screen (the hook would need a value, set after the early return); `tsc`, eslint, 1,545 tests pass.
 
 Lessons: the local model is good at the judgment (incidental vs real) and poor at repairing a structural
 mistake across rounds (each fix introduced the next problem); the tool has to refuse what it can't do

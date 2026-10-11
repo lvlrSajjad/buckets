@@ -5,10 +5,10 @@ behind these are in [field-notes.md](field-notes.md).
 
 ## Backlog, ranked (2026-10-11, agreed with the owner)
 
-Size: S under ~1 h, M a few hours, L a day or more. Each item is tested live (ecotrak-mobile left as found).
+Size: S under ~1 h, M a few hours, L a day or more. Each item is tested live (the work repo left as found).
 
-**0. Now:** decide what to do about ecotrak-specific detail in this public repo's field notes (make the repo
-private, or move the ecotrak notes to a private file).
+**0. Now:** decide what to do about app-a-specific detail in this public repo's field notes (make the repo
+private, or move the app-a notes to a private file).
 
 **Tier 1: gaps in what exists (trust)**
 1. Follow-ups build on the previous run's unmerged branch ("now fix w in x, z" starts from `main` today). S
@@ -46,8 +46,8 @@ references through TypeScript)
 20. Red CI end to end from the PR's status (the log is already read). S
 21. Sonar issues as check output. S–M
 22. Dependabot batches and package patches. M
-23. Backend contract check (mobile calls vs ecotrak-api; hard-coded search params). L
-24. Web-parity scan (ecotrak-web as a related repo). M
+23. Backend contract check (mobile calls vs backend-api; hard-coded search params). L
+24. Web-parity scan (web-app as a related repo). M
 25. Jira tickets as the request (text). S
 26. Python for the move tools. M
 
@@ -57,18 +57,18 @@ references through TypeScript)
 28. Lighter reviews for mechanical-only runs (one reviewer when every task was a move/share/unify and the
     checks pass). S
 
-**Quick wins, any time:** merge byte-identical variant files (`more-navigator.tsx`); a leftover-debug
-check (`console.log`/`debugger` added); cleanup jobs for the 10 missing `en_us.json` entries and the debug
-logs in the techs variants; answer questions from the facts alone when they suffice; README catch-up
+**Quick wins, any time:** merge byte-identical variant files (`one navigator`); a leftover-debug
+check (`console.log`/`debugger` added); cleanup jobs for what the checks find (missing locale entries, leftover debug
+logs); answer questions from the facts alone when they suffice; README catch-up
 (`unify`, shared hooks, AGENTS.md digest, locale check, red CI, variant inventory); a pre-commit test hook
 in this repo; a "confirm" list for the owner of judgment calls made unattended (e.g. module state shared
 between variants).
 
-**When the owner OKs the spend:** Claude baselines for the questionnaire split and the create-invoice
+**When the owner OKs the spend:** Claude baselines for the big screen split and the pair-3
 merge (about $2–4), to measure what local saves.
 
-**Stays with Claude:** advanced components (the kanban board), Figma and screenshots, e2e/CI design,
-whole-screen merges behind `isEcotrak()` guards, architecture calls; buckets applies what Claude plans
+**Stays with Claude:** advanced components (the advanced board), Figma and screenshots, e2e/CI design,
+whole-screen merges behind `isAppA()` guards, architecture calls; buckets applies what Claude plans
 (`--plan-file`).
 
 ## Where it has to help (the owner's list, 2026-10-11)
@@ -78,8 +78,8 @@ What the owner uses Claude Code for, unprioritized, and where buckets stands on 
 | Job | buckets today | Next |
 |---|---|---|
 | Complex git: cherry-picks, PRs, branch management | git chores in chat, cherry-pick mode with conflict resolution, `pr` | rebase/merge of PR branches |
-| Refactors: split big files, duplicated code → functions/components used everywhere, change a function without breaking the app, join the diverged ecotrak / ecotrak-techs files | API-change impact (callers not updated) | **mechanical `move` (extract to hook) and `share` (identical code to one file)**, variant `compare` facts; LSP references/rename |
-| Scan the backend to build a mobile feature right, or find which side a bug is on (values sent/received) | related repos (`ecotrak-api`) searched with the request's words | a mechanical contract check: backend DTOs/params vs the mobile types and calls |
+| Refactors: split big files, duplicated code → functions/components used everywhere, change a function without breaking the app, join the diverged app-a / app-b files | API-change impact (callers not updated) | **mechanical `move` (extract to hook) and `share` (identical code to one file)**, variant `compare` facts; LSP references/rename |
+| Scan the backend to build a mobile feature right, or find which side a bug is on (values sent/received) | related repos (`backend-api`) searched with the request's words | a mechanical contract check: backend DTOs/params vs the mobile types and calls |
 | Jira tickets (with screenshots/videos) → fix | — | ticket intake (Jira API) into the request; images only through Claude or a vision model |
 | Unit tests and coverage | weak-test evidence for reviewers; coverage map (dormant) | coverage-driven test jobs |
 | PR conflicts | conflicts during cherry-picks | conflicts on PR branches |
@@ -90,13 +90,13 @@ What the owner uses Claude Code for, unprioritized, and where buckets stands on 
 | Fix old mistakes (hard-coded search params → backend-driven) | Claude planning did this well (field notes 17) | a pattern search (where else is it hard-coded) as facts |
 | Messy areas | | moves + shares make the cleanups mechanical |
 | Figma (MCP) for UI issues and new features | — | design specs as facts through Claude (local models can't read the designs) |
-| Advanced components (the tasks module's kanban board) | Claude planning | judgment-heavy: Claude plans, local codes and checks |
+| Advanced components (the tasks module's advanced board) | Claude planning | judgment-heavy: Claude plans, local codes and checks |
 | E2E automation tests and CI | — | CI config as a repo check; e2e runs as optional checks |
 | Git conflicts, red CI | conflicts in cherry-picks | read the failing CI log (`gh run view --log-failed`) as check output and fix like a failing check |
 | Sonar issues | — | Sonar's issue list (API/export) as check output, fixed like lint |
 | Patching packages (`patch-package`) | — | a task kind that edits `node_modules/<pkg>` and runs `npx patch-package <pkg>`; the patch file is the change |
-| Use graphify's graph where it exists (`graphify-out/graph.json`: ecotrak-mobile has 20k nodes, 69k edges, 727 communities, 8% model-inferred links) | — | optional facts: files in the same community as the request's leads, inferred links; only when its `built_at_commit` is close to HEAD; skip vendored paths (`.yarn/`); measure on the vague hide-fields request |
-| **AGENTS.md followed, not just read** | long agent docs cut to the sections matching the request (70k chars in ecotrak-mobile) | **its rules (always/never/must lines, plus the checklist sections) as a short block every plan and review sees, and the review checks the diff against each rule** |
+| Use graphify's graph where it exists (`graphify-out/graph.json`: the work repo has 20k nodes, 69k edges, 727 communities, 8% model-inferred links) | — | optional facts: files in the same community as the request's leads, inferred links; only when its `built_at_commit` is close to HEAD; skip vendored paths (`.yarn/`); measure on the vague hide-fields request |
+| **AGENTS.md followed, not just read** | long agent docs cut to the sections matching the request (70k chars in the work repo) | **its rules (always/never/must lines, plus the checklist sections) as a short block every plan and review sees, and the review checks the diff against each rule** |
 
 ## Done (2026-10-09)
 
@@ -186,7 +186,7 @@ reading ~15%, coding 0–25% (only when edits fall back to a coder). Ideas, by w
   llama.cpp can use them for speculative decoding, writing could go well past 35 tokens/s.
 - **buckets as an MCP tool for Claude Code:** Claude explores and plans, buckets runs the plan
   locally (`--plan-file` exists), returns a run id, Claude checks back and reviews.
-- **The 186 accessibility lint warnings** in ecotrak-mobile are eslint-fixable with no model; the
+- **The 186 accessibility lint warnings** in the work repo are eslint-fixable with no model; the
   431 hook-dependency warnings need Claude planning, a folder at a time.
 - **pick-dirs** still runs on vague requests (~10 s); the request-words search could choose the
   folders when it already found a clear place.
@@ -214,8 +214,8 @@ reading ~15%, coding 0–25% (only when edits fall back to a coder). Ideas, by w
 
 | Item | Why | Size |
 |---|---|---|
-| **Mechanical moves: extract to hook / module / component** (next to build). The model only picks the line ranges and the parameters; the TypeScript index works out which moved names the rest still uses (the hook's return and the screen's destructuring) and the imports; buckets moves the lines byte for byte; `tsc`/lint/tests decide | A 3,687-line screen (`assessment-questionnaire-screen.tsx`, ~1,450 lines of logic) can't be split by retyping it: ~16k tokens of edit code, ~6 min of writing on the Mac, and one changed line breaks it. The model stitches, buckets moves | Medium-large: TS first (ts_index.cjs), Python (ast) after |
-| **Merge drifted variants** (`screens/<x>/ecotrak` vs `ecotrak-techs`): a matcher pairs declarations by name (identical / near / different / one side only; prototype in `tools/variant-*.{cjs,py}`); identical ones move to shared files mechanically, the model only parameterizes near ones from their small diffs, one-sided ones stay; later, shared JSX sections to components | create-invoice defeats Claude: the hook is 52% similar, 684 one-sided lines, so a merge by retyping means holding and rewriting two 1,000–1,500-line files. Ladder: rfp-details (150 identical lines) → inventory-details (3 one-sided lines) → create-invoice (pull shared parts only) | Large; after mechanical moves |
+| **Mechanical moves: extract to hook / module / component** (next to build). The model only picks the line ranges and the parameters; the TypeScript index works out which moved names the rest still uses (the hook's return and the screen's destructuring) and the imports; buckets moves the lines byte for byte; `tsc`/lint/tests decide | A 3,687-line screen (`big-screen.tsx`, ~1,450 lines of logic) can't be split by retyping it: ~16k tokens of edit code, ~6 min of writing on the Mac, and one changed line breaks it. The model stitches, buckets moves | Medium-large: TS first (ts_index.cjs), Python (ast) after |
+| **Merge drifted variants** (`screens/<x>/app-a` vs `app-b`): a matcher pairs declarations by name (identical / near / different / one side only; prototype in `tools/variant-*.{cjs,py}`); identical ones move to shared files mechanically, the model only parameterizes near ones from their small diffs, one-sided ones stay; later, shared JSX sections to components | pair-3 defeats Claude: the hook is 52% similar, 684 one-sided lines, so a merge by retyping means holding and rewriting two 1,000–1,500-line files. Ladder: pair-1 (150 identical lines) → pair-2 (3 one-sided lines) → pair-3 (pull shared parts only) | Large; after mechanical moves |
 | **Mechanical renames** through the TypeScript language service (`rope` for Python) | A rename across packages with no planner or coder at all | Large: needs a full type-checked program per repo |
 | **`git bisect run <check>`** when a check passed at a known commit | Pins a regression to the commit that caused it, mechanically | Medium: needs a "good" commit from the request or history |
 | **Affected tests only** during rounds (Vitest `related`, Jest `--findRelatedTests`), the full suite at the end | Faster rounds on big repos | Medium |

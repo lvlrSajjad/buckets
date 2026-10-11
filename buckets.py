@@ -1472,7 +1472,7 @@ def agent_rules(repo: Path, budget: int = 5000) -> str:
 def guidance(repo: Path, rc: dict, request: str = "") -> str:
     """The repo's own guidance: its agent doc (AGENTS.md, CLAUDE.md…), cut to the parts that matter
     for this request when it's long, the skill docs whose names the request spells (.github/skills/
-    work-order-details/ for "work order details"), the README's start, and .buckets.json notes."""
+    order-details/ for "order details"), the README's start, and .buckets.json notes."""
     parts = []
     for name in GUIDANCE_FILES:
         p = repo / name
@@ -1926,7 +1926,7 @@ def spellings(words: list[str]) -> list[str]:
 
 def request_leads(repo: Path, request: str, files, limit_files: int = 12, prefix: str = "") -> str:
     """Where the request's own words appear, found without a model: folder and file names that spell
-    a phrase of it (work order details -> work-order-details/), and code or UI text that does
+    a phrase of it (order details -> order-details/), and code or UI text that does
     (created at -> createdAt, created_at, "Created At")."""
     out = []
     runs = word_runs(request)
@@ -2794,14 +2794,14 @@ def shared_hook_names(shared_file: str, variant: str) -> tuple[str, str]:
 
 
 def same_family(a: str, b: str) -> bool:
-    """Two sibling folders that are variants of one thing (`ecotrak` / `ecotrak-techs`), not two
+    """Two sibling folders that are variants of one thing (`app` / `app-pro`), not two
     unrelated packages that both have an index.ts."""
     x, y = a.split("/")[-2], b.split("/")[-2]
     return x != y and (x.startswith(y) or y.startswith(x))
 
 
-VARIANT_QUESTION = re.compile(r"\b(screens?|files?|components?|hooks?|sections?|variants?|ecotrak-techs|"
-                              r"duplicat\w*|two versions)\b.*\b(merged|duplicat\w*|variants?|versions?|ecotrak-techs)\b|"
+VARIANT_QUESTION = re.compile(r"\b(screens?|files?|components?|hooks?|sections?|variants?|"
+                              r"duplicat\w*|two versions)\b.*\b(merged|duplicat\w*|variants?|versions?)\b|"
                               r"\b(not|still|un)[- ]?merged\b", re.I)
 
 
@@ -2840,15 +2840,15 @@ def variant_inventory_text(items: list[dict]) -> str:
 
 
 def variant_pairs(request: str, files: list[str]) -> list[tuple[str, str]]:
-    """Files that are two variants of one file: the same name in sibling folders (`screens/x/ecotrak/a.tsx`
-    and `screens/x/ecotrak-techs/a.tsx`), among the files and folders the request names."""
+    """Files that are two variants of one file: the same name in sibling folders (`screens/x/app/a.tsx`
+    and `screens/x/app-pro/a.tsx`), among the files and folders the request names."""
     by_place: dict[tuple[str, str], list[str]] = {}
     for f in files:
         parts = f.split("/")
         if len(parts) >= 3 and f.endswith(MOVABLE):
             by_place.setdefault(("/".join(parts[:-2]), parts[-1]), []).append(f)
     groups = [sorted(g, key=len) for g in by_place.values() if len(g) == 2 and same_family(*g)]
-    sides = {g.split("/")[-2] for group in groups for g in group}  # "ecotrak", "ecotrak-techs": not a place
+    sides = {g.split("/")[-2] for group in groups for g in group}  # "app", "app-pro": the variants, not a place
     words = {w.strip("`'\".,:;()").rstrip("/") for w in re.split(r"\s+", request)} - sides
     def named(f: str) -> bool:
         return f in words or any("/" + w + "/" in "/" + f for w in words
@@ -3274,8 +3274,8 @@ class Buckets:
 
     @property
     def related(self) -> dict[str, Path]:
-        """Other repos this one depends on that runs may read, never change: `"related": {"ecotrak-api":
-        "~/Coding/ET/web_api/ecotrak-api"}` in .buckets.json or a config "repos" rule."""
+        """Other repos this one depends on that runs may read, never change: `"related": {"backend-api":
+        "~/work/backend-api"}` in .buckets.json or a config "repos" rule."""
         return {name: Path(os.path.expanduser(str(p))).resolve() for name, p in (self.rc.get("related") or {}).items()
                 if Path(os.path.expanduser(str(p))).is_dir()}
 

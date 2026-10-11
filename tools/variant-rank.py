@@ -1,7 +1,8 @@
 import json, subprocess, sys, difflib, os
 ts, decls, S = sys.argv[1:4]
+A, B = (sys.argv[4:6] + ["app", "app-pro"])[:2]  # the two variant folder names
 for d in sorted(os.listdir(S)):
-    a_dir, b_dir = f"{S}/{d}/ecotrak", f"{S}/{d}/ecotrak-techs"
+    a_dir, b_dir = f"{S}/{d}/{A}", f"{S}/{d}/{B}"
     if not (os.path.isdir(a_dir) and os.path.isdir(b_dir)): continue
     pairs = [f for f in os.listdir(a_dir) if f.endswith((".ts", ".tsx")) and os.path.exists(f"{b_dir}/{f}")]
     tot = {"same": 0, "near": 0, "diff": 0}; only = 0; size = 0
