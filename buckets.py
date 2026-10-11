@@ -5064,6 +5064,9 @@ def i18n_gaps(repo: Path, diff: str, files) -> list[str]:
     if not real or sum(k == k.upper() for k in real) < 0.9 * len(real):
         return []
     out, file = [], ""
+    # Strings on removed lines moved with their code (a move or share); only new ones count.
+    gone = {next(g for g in m.groups() if g).strip() for l in diff.splitlines()
+            if l.startswith("-") and not l.startswith("---") for m in UI_STRING.finditer(l[1:])}
     for line in diff.splitlines():
         if line.startswith("+++ "):
             file = line[6:] if line.startswith("+++ b/") else ""
@@ -5074,6 +5077,8 @@ def i18n_gaps(repo: Path, diff: str, files) -> list[str]:
             if m.group(5) and not file.endswith((".tsx", ".jsx")):
                 continue
             text = next(g for g in m.groups() if g).strip()
+            if text in gone:
+                continue
             if " " not in text and not text[:1].isupper() or re.search(r"https?:|[/_]|\.(png|jpg|svg)$", text):
                 continue
             gap = f"`{file}` shows \"{text}\" but `{base}` has no \"{text.upper()}\" entry"

@@ -1511,6 +1511,9 @@ class Localization(unittest.TestCase):
         self.assertEqual(len(gaps), 2, gaps)
         self.assertIn('shows "Not found yet" but `app/localization/en_us.json` has no "NOT FOUND YET" entry', gaps[0])
         self.assertIn('`app/localization/fr_ca.json` lacks 1 key(s) added to `app/localization/en_us.json`: "PICK A VENDOR"', gaps[1])
+        moved = ("--- a/app/a.tsx\n+++ b/app/a.tsx\n-    <Text>Old untranslated words</Text>\n"
+                 "--- /dev/null\n+++ b/app/shared.tsx\n+    <Text>Old untranslated words</Text>\n")
+        self.assertEqual(buckets.i18n_gaps(repo, moved, buckets.git(repo, "ls-files").split()), [])
 
 
 class RedCI(unittest.TestCase):
