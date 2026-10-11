@@ -34,7 +34,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 VERSION = "0.1.0"
 
@@ -2701,6 +2701,12 @@ def clean_path(p: str) -> str:
 
 
 MOVABLE = (".ts", ".tsx", ".js", ".jsx", ".mts", ".cts")
+MOVE_REQUEST = re.compile(r"\b(mov\w*|extract\w*|split\w*|separat\w*|pull\w*)\b", re.I)
+MOVE_HINT = """A mechanical move fits this request: this task moves the code exactly, with no retyping:
+{task}
+Dry run: it moves {moved} statements ({lines} lines) of `{where}` into `{name}` in `{into}`. The hook takes
+{params} and returns {count} values ({returns}); private helpers that move along: {helpers}.{notes}
+Plan this as T1 (copy it). Add tasks only for what the request asks beyond the move; checks run after it."""
 MERGE_WORDS = re.compile(r"\b(merg\w*|shar\w*|duplicat\w*|common|diverg\w*|join\w*|unif\w*|dedup\w*|variants?)\b", re.I)
 
 
@@ -3246,6 +3252,16 @@ class Buckets:
         leads = request_leads(self.repo, self.request, files)
         if leads:
             parts.append("Where the request's words appear (found mechanically):\n" + leads)
+        hint = self.move_hint()
+        if hint:
+            r, t = hint["report"], hint["task"]
+            parts.append(MOVE_HINT.format(
+                task=json.dumps({k: t[k] for k in ("file", "action", "where", "into", "name", "select")}),
+                moved=r["moved"], lines=r["moved_lines"], where=t["where"], name=t["name"], into=t["into"],
+                params=", ".join(f"`{p['name']}`" for p in r["params"]) or "no parameters", count=len(r["returns"]),
+                returns=", ".join(r["returns"][:12]) + (" …" if len(r["returns"]) > 12 else ""),
+                helpers=", ".join(r["helpers_moved"]) or "none",
+                notes=("\nKept in place: " + "; ".join(r["notes"][:6])) if r["notes"] else ""))
         if MERGE_WORDS.search(self.request):
             for a, b in variant_pairs(self.request, list(files))[:4]:
                 cmp = ts_moves(self.repo, {"op": "compare", "a": a, "b": b}, timeout=120)
@@ -3267,6 +3283,55 @@ class Buckets:
         if self._facts:
             say(f"  {ok()} gathered {len(shown)} code excerpt(s) and related tests mechanically, before planning")
         return self._facts
+
+    def move_hint(self) -> dict | None:
+        """When the request asks to move code out of one existing file into a new one: the move task that
+        does it mechanically, checked with a dry run. None when the request isn't that or the dry run fails."""
+        if hasattr(self, "_move_hint"):
+            return self._move_hint
+        self._move_hint = None
+        if not MOVE_REQUEST.search(self.request):
+            return None
+        sources = [f for f in paths_in_text(self.request, self.index.files) if f.endswith(MOVABLE)]
+        targets = [clean_path(m) for m in re.findall(r"[\w@.+\-/]+\.(?:tsx?|jsx?)\b", self.request)]
+        targets = [t for t in targets if t not in sources and not (self.repo / t).exists()]
+        if len(sources) != 1 or not targets:
+            return None
+        src, into = sources[0], targets[0]
+        if "/" not in into:
+            into = str(PurePosixPath(src).parent / into)
+        named = re.search(r"\buse[A-Z]\w*", self.request)
+        stem = PurePosixPath(into).stem
+        name = named.group(0) if named else re.sub(r"[-_.](\w)", lambda m: m.group(1).upper(), stem)
+        decls = self.index.outline().get(src, [])
+        if not decls or not re.fullmatch(r"[A-Za-z_$][\w$]*", name):
+            return None
+        main = max(decls, key=lambda d: d["end"] - d["line"])
+        task = {"id": "T1", "file": src, "action": "move", "where": main["name"], "into": into, "name": name,
+                "select": ["logic"], "instructions": f"Move the logic of {main['name']} into {name} (done mechanically).",
+                "done_when": "The component calls the hook; checks pass.", "edits": []}
+        d = ts_moves(self.repo, {"op": "extract", "file": src, "function": main["name"], "select": "logic",
+                                 "into": into, "name": name})
+        if not d.get("ok"):
+            detail(f"a mechanical move doesn't fit ({d.get('error', '')[:160]})")
+            return None
+        say(f"  {ok()} a mechanical move fits: {d['report']['moved_lines']} lines of {main['name']} → {name} (dry run)")
+        self._move_hint = {"task": validate_move(task, src, self.repo, "T1"), "report": d["report"]}
+        return self._move_hint
+
+    def prefer_move(self, plan: dict) -> dict:
+        """A plan that would retype the moved code (a new file with no exact code) gets the mechanical
+        move instead; the planner's other tasks stay."""
+        hint = self.move_hint()
+        if not hint or any(t["action"] == "move" for t in plan["tasks"]):
+            return plan
+        into, src = hint["task"]["into"], hint["task"]["file"]
+        if not any(t["file"] == into and not t.get("edits") for t in plan["tasks"]):
+            return plan
+        say(f"  {warn()} the plan would retype the moved code; doing it as a mechanical move instead")
+        rest = [t for t in plan["tasks"] if t["file"] not in (into, src)]
+        tasks = [hint["task"]] + rest
+        return {**plan, "tasks": [{**t, "id": f"T{n}"} for n, t in enumerate(tasks, 1)]}
 
     def context(self, with_map: bool = True) -> str:
         """Check output, mechanically gathered facts, `--like` examples and the project's notes
@@ -3855,6 +3920,7 @@ class Buckets:
                     request=self.request, checks=", ".join(checks) or "none", baseline=baseline_text,
                     context=f"\n{ctx}" if ctx else ""),
                 PLAN_SCHEMA, lambda d: validate_plan(d, self.repo, self.cfg["max_tasks"]))
+            plan = self.prefer_move(plan)
             self.run.save("plan.json", plan)
             return plan
         self.heading(3, "Reading the code and planning")
@@ -3874,6 +3940,7 @@ class Buckets:
         else:
             plan = ask_json(self.planner, self.run, "plan", SYSTEM, prompt, PLAN_SCHEMA, validate,
                             max_tokens=16000, timeout=self.timeout, **self.think_budget())
+        plan = self.prefer_move(plan)
         missing = [f for f in paths_in_text(self.request, self.index.files)
                    if plan["tasks"] and f not in {t["file"] for t in plan["tasks"]}]
         if missing:

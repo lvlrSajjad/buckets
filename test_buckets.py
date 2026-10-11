@@ -1654,6 +1654,22 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
         self.assertIn("useThing", buckets.git(self.repo, "log", "-1", "--format=%B"))
         self.assertEqual(buckets.git(self.repo, "status", "--porcelain").strip(), "")
 
+    def test_a_move_request_gets_the_move_even_when_the_plan_retypes_it(self):
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        b = buckets.Buckets(cfg, self.repo, "Split src/thing-screen.tsx: move its logic into a hook useThing in src/use-thing.ts")
+        with contextlib.redirect_stderr(io.StringIO()):
+            hint = b.move_hint()
+            self.assertEqual((hint["task"]["where"], hint["task"]["name"], hint["task"]["select"]), ("ThingScreen", "useThing", "logic"))
+            self.assertIn("A mechanical move fits this request", b.facts())
+            retyped = {"summary": "s", "tasks": [
+                {"id": "T1", "file": "src/use-thing.ts", "action": "create", "instructions": "write the hook", "edits": []},
+                {"id": "T2", "file": "src/thing-screen.tsx", "action": "edit", "instructions": "call it", "edits": []},
+                {"id": "T3", "file": "src/api.ts", "action": "edit", "instructions": "also this", "edits": []}]}
+            got = b.prefer_move(retyped)
+        self.assertEqual([(t["id"], t["action"], t["file"]) for t in got["tasks"]],
+                         [("T1", "move", "src/thing-screen.tsx"), ("T2", "edit", "src/api.ts")])
+        self.assertIsNone(buckets.Buckets(cfg, self.repo, "explain src/thing-screen.tsx").move_hint())
+
     def test_share_and_compare(self):
         a = 'import { fmt } from "../util"\n\nconst same = (x: number) => fmt(x * 2)\nconst diff = 1\n\nexport const A = () => same(diff)\n'
         b2 = 'import { fmt } from "../util"\n\nconst same = (x: number) =>\n  fmt(x * 2)\nconst diff = 2\n\nexport const B = () => same(diff)\n'
