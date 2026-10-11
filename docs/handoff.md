@@ -1,16 +1,18 @@
-# Handoff (updated 2026-10-11 night)
+# Handoff (updated 2026-10-11, before compacting again)
 
 Read this first. Details: [../README.md](../README.md), [field-notes.md](field-notes.md) (every
-measurement; 16–19 are the latest), [roadmap.md](roadmap.md), and the research in
+measurement; 20–28 are the latest), [roadmap.md](roadmap.md), and the research in
 [research/2026-10-11-local-agentic-coding.md](research/2026-10-11-local-agentic-coding.md).
 
 ## What it is
 
 `~/Coding/ME/buckets/buckets.py` (single file, Python 3.11+, no dependencies), linked as
-`~/.local/bin/buckets`, plus `ts_index.cjs` (TypeScript index) and `test_buckets.py` (160 tests, ~30 s,
+`~/.local/bin/buckets`, plus `ts_index.cjs` (TypeScript index) and `test_buckets.py` (~215 tests, ~45 s,
 sandboxed, never touch real servers). Public repo `lvlrSajjad/buckets`, pushed with the personal
 account (the repo's credential helper). Use it as a chat: `cd <repo> && buckets`. Commands: `merge`,
-`discard`, `last`, `pr`, `review` (Claude reviews the latest branch), `setup`, `--doctor`.
+`discard`, `undo` (take back the last merge), `last`, `pr`, `review` (Claude reviews the latest branch),
+`setup`, `--doctor`; flags `--local`, `-y`, `--time-limit MIN`. Mechanical moves live in `ts_moves.cjs`
+(extract, compare, share, share_hook, unify, relocate, dedupe, same_behaviour, signature, component).
 
 ## Machines and the current split (default since 2026-10-11)
 
@@ -30,17 +32,30 @@ itself was left exactly as found (no branches, no `.buckets/`).
 
 ## The plan, in order (what to do next)
 
-Done (field notes 20–24): MTP and caching on Windows; double review (a lone objection while checks pass is
-weighed by the other reviewer); mechanical moves (`ts_moves.cjs`: extract, compare, share, share_hook,
-unify) with dry-run suggestions, guards and live-verified results (big screen split 5m 14s; pair-1,
-pair-2, pair-3 and pair-4 merges in 4m 43s–5m 38s); the AGENTS.md rule digest;
-the locale-entry check; red CI as check output; the variant inventory for questions.
+Done (field notes 20–28, roadmap "Backlog, ranked"):
+- MTP and caching on Windows; double review (a lone objection while checks pass is weighed by the other
+  reviewer; the confirm step re-asks without thinking when its budget runs out).
+- Tier 1 (all): follow-ups build on the last unmerged run's branch (switch before planning); `undo`; a
+  follow-up round that breaks passing checks is undone; reviews hear which planned tasks didn't run;
+  `--time-limit`, Ctrl-C from background shells, SIGTERM; unattended stops commit half-done work on buckets'
+  own branch (never the repo's stash list); `"memory": "outside"` (set for the work repo).
+- Tier 2: `move`/extract to a hook, `share`/`share_hook`/`unify` for variants, `relocate` (to a util, every
+  importer repointed, emptied source deleted), `dedupe` (copies replaced when they behave the same, run on
+  sample inputs in a sandbox; differences shown, rechecked at review time), `signature` (a parameter or prop
+  added everywhere), `component` (a render helper becomes a component). Each has a dry-run suggestion in the
+  facts, guards against retyping, field-filling for the planner's quirks, and a live-verified run.
 
-Next: **docs/roadmap.md, "Backlog, ranked"**: 0 (public-repo decision), then tier 1 (follow-ups on the
-unmerged branch, `undo`, round rollback, diff-checked reviews, time limit, memory outside the repo), then
-the refactoring toolbox (move to util, change a signature everywhere, N-way duplicates, components, renames),
-then `measure`, the batch loop and the regression suite. Older infrastructure items (prompt cache layout,
-parallel lanes, two candidates, adaptive placement, Windows network) are tier 5 there.
+Next, agreed with the owner:
+1. **The regression suite (tier 3, item 15) before more tools:** replay the real cases (big screen split, the
+   four variant merges, relocate+dedupe, the 37-call signature change, component extraction, follow-ups, the
+   tags request, the variants question) overnight with times and pass rates; specifics in
+   `docs/private/handoff-full.md`. Each case: request, expected outcome check (files, behaviour, checks).
+2. Then item 11 (renames through the TypeScript language service), item 12 (shared hooks past early returns),
+   the rest of item 9 (copies with different names), JSX chunks by lines → components.
+3. Then tier 3 (`measure`, the batch loop), tier 4, tier 5.
+
+Known weak spots: the local planner varies run to run (guards cover it); reviewers are the weakest link
+(verify every branch yourself); each new tool needed 3–7 live attempts before a clean run.
 
 ## How to test changes (gotchas learned the hard way)
 
@@ -48,9 +63,9 @@ parallel lanes, two candidates, adaptive placement, Windows network) are tier 5 
   rules, findings like debug logs or missing locale keys) go in `docs/private/` (git-ignored; full versions
   of the field notes, roadmap and handoff are there). The public docs say the same things generically.
 
-- **Live runs on the work repo:** start with `python3 <scratchpad>/capped.py 1200 buckets --local -y "<request>"`
-  (a 20-min cap whose Ctrl-C reaches buckets: background shells ignore SIGINT otherwise); afterwards delete the
-  `buckets/…` branch and the untracked `.buckets/` it creates, so the repo is as found. Verify a branch in a
+- **Live runs on the work repo:** `buckets --local -y --time-limit 20 "<request>"` from the repo (run in the
+  background, watch the log). Afterwards: back on `main`, delete every `buckets/…` branch, check `git status` is
+  clean and `git stash list` still has its 5 entries (memory is outside the repo now, so no `.buckets/`). Verify a branch in a
   separate worktree with `node_modules` symlinked (`tsc` 10 s, eslint, jest 1,545 tests ~8 s).
 - Don't edit `ts_moves.cjs` or `ts_index.cjs` during a live run (buckets calls them as it goes); `buckets.py`
   edits are safe once a run has started.
