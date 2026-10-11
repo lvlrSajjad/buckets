@@ -1,4 +1,4 @@
-# Handoff (updated 2026-10-12 ~00:00, before compacting)
+# Handoff (updated 2026-10-12 ~01:00)
 
 Read this first. Details: [../README.md](../README.md), [field-notes.md](field-notes.md) (every
 measurement; 20–28 are the latest), [roadmap.md](roadmap.md), and the research in
@@ -68,22 +68,25 @@ Done the night of 2026-10-11 (owner's go-ahead for 8 hours, both laptops; ~22:40
 - Regression suite: `setup` commands per case; private cases `rename`, `update-conflict` added (not run yet);
   merge-inventory/rfp/proposal and signature expectations corrected (they checked lines, not what moved).
 
+Done after compacting (2026-10-12, 00:00–01:00; field notes 32):
+- `fold` (identical variant files → one file; refuses files nothing imports, `.d.ts`, copies reading their own
+  siblings, and any quoted path in the repo still resolving to a copy), `to_ref` (module `let`s → `useRef` in the
+  component; moves and shares do it first for the state they meet; `"module_state": "share"` keeps the old way),
+  `component` by `lines` (+ `jsx_outline` facts), `buckets contract` reads NestJS routes from the backend's code
+  (`nest_routes.cjs`, cached per backend state; falls back to the exported file), signature fields filled from the
+  request (+ "instead of the fixed N"). A Sonnet review of all of it found 12 issues; all fixed (commit fa58d5c).
+- Private cases added: `fold-navigator`, `chunk-component`; `merge-create-invoice` now expects no module `let` in
+  the shared file.
+
 Next (in order):
-1. **Read the A/B** started 22:45 from a frozen runner copy
-   (`<scratchpad>/runner`, `ab-opencode.log` then `ab-native.log`; `python3 regress.py --summary` style tables
-   in `~/.local/state/buckets-regress/logs/<suite>/summary.md`). Decide the coder default (native vs opencode).
-2. **Run the new cases** with the current code: `python3 regress.py rename update-conflict` (and the four that
-   failed in the baseline). Verify branches by hand as always.
-3. **Fold identical variant files** (6 pairs in the work repo, 5 byte-identical): a `fold` op in ts_moves
-   (TypeScript getEditsForFileRename for both copies → one file in the parent folder; refuse on new type
-   errors), a plan action and a hint from the variant inventory. Was being written when compacting.
-4. **Contract from code:** the backend's exported swagger is ~2.5 months stale, so most "no endpoint" results
-   are false; read NestJS routes from `@Controller`/`@Get…` decorators instead (**owner agreed**). Owner's
-   call on module state: the module-level variables were his "stateless variables"; `useRef` is the standard
-   React Native way, so when a merge or move meets module state a screen assigns, convert it to `useRef` (or
-   state) in the hook rather than sharing the module variable; reviewers should expect that.
-5. Then item 12 (shared hooks past early returns), JSX chunks → components, simframe UI checks; the other
-   session owns 29b (review thinking budget) and tier 6.
+1. **Finish reading the A/B** (runner at `<scratchpad>/runner`, frozen at 35042ea, so it has none of tonight's
+   fixes): opencode 8/12. Native so far: 3 pass; `component` failed through planner scope creep, not the coder.
+   Decide the coder default per case where the coder actually worked (coder-hide, compact-*, merge follow-ups).
+2. **Run with the current code**: `python3 regress.py rename update-conflict fold-navigator chunk-component
+   signature merge-create-invoice merge-proposal component`. Verify branches by hand.
+3. Item 12 (shared hooks past early returns) needs the owner's view: the clean ways change call sites.
+4. Dependabot batches need `gh auth login` for the work repo on the Mac (not logged in).
+5. Then JSX chunk dedupe (repeated blocks), simframe UI checks (15b); the other session owns 29b and tier 6.
 
 Known weak spots: the local planner varies run to run (guards cover it); reviewers are the weakest link
 (verify every branch yourself); each new tool needed 3–7 live attempts before a clean run.
