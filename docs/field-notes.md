@@ -647,6 +647,26 @@ missed it); run 3's reviewers objected to the inherited `any` and to a moved int
 Also found: an unattended stop had put a half-done task in the work repo's stash list. Stops now commit it on
 buckets' own branch instead; the stash was dropped, so the repo is as found.
 
+### 29. A regression suite, and opencode vs a native coder (2026-10-11)
+
+`regress.py` replays real requests on a clone it owns and checks the result (files, text, line counts, where
+changes land, tsc/eslint/jest, an answer's names). Its first run stopped itself: a coder session had edited the
+source repo instead of the clone. The cause took two tries to find. opencode takes its folder from `$PWD`, not
+from its working directory (checked: started in folder A with `PWD=B`, it writes into B), and the suite ran
+buckets from another folder. In normal use buckets runs inside the repo, so `$PWD` was right by luck. Fixed by
+setting `PWD` (and a data folder per repo path) for every opencode session.
+
+A/B on a fixed two-task plan (hide two rows in both variants of a screen; the planner's exact edits removed so
+the coder does both), two runs each:
+
+| Coder | Passed | Run time (median) | Coder time (median) | Model calls |
+|---|---|---|---|---|
+| opencode | 2/2 | 2.5 min | 76 s | 2 sessions |
+| native loop (read/search/edit/write) | 2/2 | 2.2 min | 63 s | 11–16 short turns |
+
+Close: the native loop is a little faster on a small task and just as right. Not enough to switch the
+default; it needs the larger cases (several tasks, files to search) and more runs.
+
 ## Lessons so far
 
 - Run it, don't argue about it: comparing two versions of a small function on sample inputs settles
