@@ -4625,7 +4625,10 @@ class Buckets:
                     path.write_text(text)
                     written.append(f)
             r = d["report"]
-            note = (f"moved {', '.join(r['moved'])} from {task['file']} into {task['into']}; importers updated: "
+            unused = not r["importers_updated"] and not r["still_used_here"]
+            note = ((f"nothing used {', '.join(r['moved'])} from {task['file']} before the move (no importers, no uses there), so "
+                     "its old version mattered nowhere; " if unused else "")
+                    + f"moved {', '.join(r['moved'])} from {task['file']} into {task['into']}; importers updated: "
                     f"{len(r['importers_updated'])}" + (f" ({', '.join(r['importers_updated'][:6])})" if r["importers_updated"] else "")
                     + (f"; left for you: {'; '.join(r['left'])}" if r["left"] else ""))
             self.involved = list(dict.fromkeys(self.involved + written))
@@ -4650,6 +4653,7 @@ class Buckets:
             for x in r["differ"]:
                 self.differing_copies[(x["file"], x["name"])] = (task["file"], x["diff"])
             note = (f"replaced copies with an import from {task['file']}: {'; '.join(r['replaced']) or 'none'}"
+                    + (f" ({'; '.join(r['equivalent'])})" if r.get("equivalent") else "")
                     + ("; copies that DIFFER from it, so replacing them would change behaviour (if the copy is the "
                        f"better version, unify it into {task['file']} first; otherwise keep it): "
                        + "; ".join(f"{x['file']}: {x['name']} (lines only in {task['file']} (-) or the copy (+):\n{x['diff']})"

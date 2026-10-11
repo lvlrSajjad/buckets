@@ -2158,6 +2158,30 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
         for f in ("src/a.ts", "src/b.ts"):
             self.assertIn('import { fmt } from "./utils/text"', (self.repo / f).read_text())
 
+    def test_dedupe_runs_differently_written_copies_to_compare_them(self):
+        plain = ('export const toHMS = (hhmmss: string): string => {\n  const [hoursStr, minutesStr, secondsStr] = hhmmss.split(":")\n'
+                 '  const hours = Number.parseInt(hoursStr, 10)\n  const minutes = Number.parseInt(minutesStr, 10)\n'
+                 '  const seconds = Number.parseInt(secondsStr || "0", 10)\n  return `${hours}h ${minutes}m ${seconds}s`\n}\n')
+        guarded = plain.replace('=> {\n', '=> {\n  if (!hhmmss) return "0h 0m 0s"\n', 1)
+        copy1 = ('const toHMS = (hhmmss: string): string => {\n  if (!hhmmss) {\n    return "0h 0m 0s"\n  }\n'
+                 '  const [h, m, s] = hhmmss.split(":")\n  return `${Number.parseInt(h, 10)}h ${Number.parseInt(m, 10)}m ${Number.parseInt(s || "0", 10)}s`\n}\n')
+        copy2 = copy1.replace('if (!hhmmss) {\n    return "0h 0m 0s"\n  }', 'if (!hhmmss) return "0h 0m 0s"')
+        files = {"src/utils/time.ts": plain, "src/a.ts": copy1 + "export const A = () => toHMS('')\n",
+                 "src/b.ts": copy2 + "export const B = () => toHMS('1:2')\n"}
+        for f, t in files.items():
+            (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / f).write_text(t)
+        payload = {"op": "dedupe", "file": "src/utils/time.ts", "names": ["toHMS"], "copies": ["src/a.ts", "src/b.ts"]}
+        d = buckets.ts_moves(self.repo, payload)
+        self.assertEqual(d["report"]["replaced"], [])
+        self.assertIn('runs differently: ("") gives "NaNh NaNm 0s" from the shared one, "0h 0m 0s" from the copy',
+                      d["report"]["differ"][0]["diff"])
+        (self.repo / "src/utils/time.ts").write_text(guarded)                     # the shared one gets the guard
+        d = buckets.ts_moves(self.repo, payload)
+        self.assertEqual(sorted(d["report"]["replaced"]), ["src/a.ts: toHMS", "src/b.ts: toHMS"], d["report"])
+        self.assertTrue(all("behaves the same on" in e for e in d["report"]["equivalent"]))
+        self.assertIn('import { toHMS } from "./utils/time"', d["files"]["src/a.ts"])
+
     def test_shared_hook_names(self):
         self.assertEqual(buckets.shared_hook_names("a/b/billing-shared.tsx", "a/b/x/use-billing-screen.tsx"),
                          ("a/b/use-billing-screen-shared.ts", "useBillingScreenShared"))

@@ -984,6 +984,57 @@ function relocate() {
   return { files, report: { moved: names, importers_updated: touched, still_used_here: stillHere, left } };
 }
 
+// Whether two versions of a small pure function behave the same: both are compiled and run in a sandbox
+// on sample inputs picked from their parameter types. null when it can't tell (not a self-contained
+// function, or it uses time, randomness or anything outside itself).
+const SAFE_GLOBALS = new Set(['Number', 'String', 'Boolean', 'Math', 'JSON', 'parseInt', 'parseFloat', 'isNaN',
+  'isFinite', 'Array', 'Object', 'undefined', 'NaN', 'Infinity', 'RegExp', 'Error', 'TypeError', 'console']);
+const SAMPLES = {
+  string: ['', '0', '00:00:00', '01:02:03', '1:2', '12:34', '99:99:99', 'abc', ' 1:02:03 ', '1:2:3:4', '-1:05'],
+  number: [0, 1, -1, 2.5, 59, 61, 3600000, 90061000, NaN, Infinity],
+  boolean: [true, false],
+};
+function behaviour(checker, sfA, a, sfB, b) {
+  const fnOf = (st) => {
+    if (ts.isFunctionDeclaration(st)) return st;
+    if (!ts.isVariableStatement(st) || st.declarationList.declarations.length !== 1) return null;
+    const init = st.declarationList.declarations[0].initializer;
+    return init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) ? init : null;
+  };
+  const fa = fnOf(a), fb = fnOf(b);
+  if (!fa || !fb || fa.parameters.length !== fb.parameters.length || fa.parameters.length > 3) return null;
+  const selfContained = (sf, st, fn) => references(checker, st).every(({ node, sym }) => {
+    const d = sym.declarations && sym.declarations[0];
+    if (d && d.getSourceFile() === sf && within(d, st)) return true;  // its own params and locals
+    if (d && d.getSourceFile() === sf && declaredBy(st).some((id) => id === d.name)) return true;
+    return SAFE_GLOBALS.has(node.text) && !(d && d.getSourceFile() === sf);
+  });
+  if (!selfContained(sfA, a, fa) || !selfContained(sfB, b, fb)) return null;
+  if (/\bDate\b|Math\.random|fetch\(|setTimeout|await\b/.test(a.getText(sfA) + b.getText(sfB))) return null;
+  const vm = require('vm');
+  const compile = (sf, st, fn) => {
+    const js = ts.transpileModule(`(${fn.getText(sf)})`, { compilerOptions: { target: ts.ScriptTarget.ES2019 } }).outputText;
+    return vm.runInNewContext(js, { Number, String, Boolean, Math, JSON, parseInt, parseFloat, isNaN, isFinite, Array,
+                                    Object, RegExp, Error, TypeError, console: { log() {}, warn() {}, error() {} } }, { timeout: 200 });
+  };
+  let A, B;
+  try { A = compile(sfA, a, fa); B = compile(sfB, b, fb); } catch (e) { return null; }
+  const kinds = fa.parameters.map((p) => {
+    const t = p.type ? p.type.getText(sfA) : '';
+    if (/^string/.test(t)) return [...SAMPLES.string, undefined];
+    if (/^number/.test(t)) return [...SAMPLES.number, undefined];
+    if (/^boolean/.test(t)) return SAMPLES.boolean;
+    return [...SAMPLES.string.slice(0, 5), ...SAMPLES.number.slice(0, 5), null, undefined];
+  });
+  const inputs = kinds.reduce((acc, xs) => acc.flatMap((prev) => xs.map((x) => [...prev, x])), [[]]).slice(0, 120);
+  const run = (f, args) => { try { const v = f(...args); return JSON.stringify(v === undefined ? '<undefined>' : v); } catch (e) { return `<throws ${e && e.name}>`; } };
+  for (const args of inputs) {
+    const ra = run(A, args), rb = run(B, args);
+    if (ra !== rb) return { same: false, tried: inputs.length, input: JSON.stringify(args).slice(1, -1), a: ra, b: rb };
+  }
+  return { same: true, tried: inputs.length };
+}
+
 // Copies of a function in other files replaced by an import of the one that stays: each copy that is a
 // top-level declaration identical to the original (as TypeScript prints it, `export` aside) goes.
 function dedupe() {
@@ -992,7 +1043,7 @@ function dedupe() {
   const [H, ...C] = sources;
   const top = (sf, name) => sf.statements.find((s) => declaredBy(s).some((id) => id.text === name));
   const bare = (sf, st) => normalized(st, sf).replace(/^export/, '');
-  const files = {}, replaced = [], differ = [], missing = [];
+  const files = {}, replaced = [], differ = [], missing = [], equivalent = [];
   for (const name of input.names) {
     const orig = top(H, name);
     if (!orig) throw new Error(`\`${name}\` isn't a top-level declaration in ${input.file}`);
@@ -1003,9 +1054,15 @@ function dedupe() {
     for (const name of input.names) {
       const copy = top(sf, name);
       if (!copy) { missing.push(`${rel(sf.fileName)}: ${name}`); continue; }
+      let same = null;
       if (bare(sf, copy) !== bare(H, top(H, name))) {
-        differ.push({ file: rel(sf.fileName), name, diff: lineDiff(top(H, name).getText(H), copy.getText(sf), 14) });
-        continue;
+        same = behaviour(checker, H, top(H, name), sf, copy);
+        if (!same || !same.same) {
+          const why = !same ? '' : `\n  runs differently: (${same.input}) gives ${same.a} from the shared one, ${same.b} from the copy`;
+          differ.push({ file: rel(sf.fileName), name, diff: lineDiff(top(H, name).getText(H), copy.getText(sf), 14) + why });
+          continue;
+        }
+        equivalent.push(`${rel(sf.fileName)}: ${name} (written differently, behaves the same on ${same.tried} sample inputs)`);
       }
       if (isExported(copy)) { differ.push({ file: rel(sf.fileName), name, diff: '(exported from there too; others may import it)' }); continue; }
       edits.push([fullStart(sf, copy), lineEnd(sf.text, copy.end), '']);
@@ -1020,7 +1077,7 @@ function dedupe() {
     files[rel(sf.fileName)] = mergeImports(applyEdits(sf.text, edits), [`import { ${names.join(', ')} } from "${importPath(sf.fileName, home)}"`], sf.fileName);
     replaced.push(`${rel(sf.fileName)}: ${names.join(', ')}`);
   }
-  return { files, report: { replaced, differ, missing } };
+  return { files, report: { replaced, differ, missing, equivalent } };
 }
 
 try {
