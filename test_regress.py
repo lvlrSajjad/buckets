@@ -48,6 +48,12 @@ FAKE = textwrap.dedent('''
 ''')
 
 
+def redirect_quiet():
+    import io
+    from contextlib import redirect_stdout
+    return redirect_stdout(io.StringIO())
+
+
 class Suite(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -171,8 +177,29 @@ class Suite(unittest.TestCase):
                  "checks": [{"check": "done", "ok": False}]},
                 {"suite": "2", "case": "x", "ok": True, "minutes": 6.0, "buckets": "b", "checks": []}]
         text = regress.summary(rows)
-        self.assertIn("| x | 1/2 | 6.5 min | 1/1, 5.0 min | done |", text)
+        self.assertIn("| x | 1/2 | 6.5 min | – | 1/1, 5.0 min | done |", text)
         self.assertIn("buckets b", text)
+
+    def test_overrides_reach_the_config_and_phases_come_from_the_events(self):
+        self.assertEqual(regress.parse_sets(["coder.engine=native", "coder.turns=9", "x=a b"]),
+                         {"coder": {"engine": "native", "turns": 9}, "x": "a b"})
+        self.case("hello", "add hello", {"done": True}, config={"coder": {"attempts": 1}})
+        with redirect_quiet():
+            regress.main(["--cases", str(self.tmp / "cases"), "--set", "coder.engine=native"])
+        clone = next((regress.STATE / "clones").glob("*/app"))
+        cfg = json.loads((regress.STATE / "config.json").read_text())
+        self.assertEqual(cfg["coder"], {"attempts": 1, "engine": "native"})
+        self.assertEqual(regress.results()[-1]["overrides"], {"coder": {"engine": "native"}})
+        run = self.tmp / "run"
+        run.mkdir()
+        (run / "events.jsonl").write_text("\n".join(json.dumps(e) for e in [
+            {"ev": "call", "id": 1, "label": "code-T1-1"}, {"ev": "call_end", "id": 1, "ok": True, "secs": 4.0},
+            {"ev": "call", "id": 2, "label": "code-R2T1-1"}, {"ev": "call_end", "id": 2, "ok": False, "secs": 2.5},
+            {"ev": "call", "id": 3, "label": "plan-1"}, {"ev": "call_end", "id": 3, "ok": True, "secs": 30},
+            {"ev": "tool", "id": 1, "name": "tsc"}, {"ev": "tool_end", "id": 1, "ok": True, "secs": 10}]))
+        self.assertEqual(regress.phases(run), {"code": {"secs": 6.5, "n": 2, "failed": 1},
+                                               "plan": {"secs": 30.0, "n": 1, "failed": 0},
+                                               "tsc": {"secs": 10.0, "n": 1, "failed": 0}})
 
     def test_bad_case_files_are_refused(self):
         d = self.tmp / "cases"

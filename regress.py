@@ -77,8 +77,35 @@ def load_cases(dirs: list[Path]) -> dict[str, dict]:
 
 def case_problems(c: dict) -> list[str]:
     out = [f"missing {k}" for k in ("repo", "commit", "request") if not c.get(k)]
+    out += [f"unknown field {k}" for k in c if k not in FIELDS]
     known = {"done", "max_minutes", "exists", "absent", "matches", "max_lines", "changed_within", "commands", "answer"}
     out += [f"unknown expectation {k}" for k in c.get("expect", {}) if k not in known]
+    return out
+
+
+FIELDS = {"name", "repo", "commit", "branch", "request", "follow_ups", "expect", "links", "time_limit", "args",
+          "buckets", "config", "_file"}
+
+
+def deep_merge(base: dict, more: dict) -> dict:
+    out = dict(base)
+    for k, v in more.items():
+        out[k] = deep_merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
+
+
+def parse_sets(items: list[str]) -> dict:
+    """--set coder.engine=native → {"coder": {"engine": "native"}}; values are JSON when they parse."""
+    out: dict = {}
+    for item in items:
+        key, _, raw = item.partition("=")
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            value = raw
+        for part in reversed(key.split(".")):
+            value = {part: value}
+        out = deep_merge(out, value)
     return out
 
 
@@ -147,9 +174,10 @@ def reset_clone(clone: Path, base: str, commit: str) -> None:
     git(clone, "stash", "clear")
 
 
-def config_for(clone: Path, src: Path) -> Path:
-    """The owner's config with the source repo's rules (checks, memory, related repos) also applied to the clone."""
-    cfg = json.loads(CONFIG.read_text()) if CONFIG.exists() else {}
+def config_for(clone: Path, src: Path, overrides: dict | None = None) -> Path:
+    """The owner's config with the source repo's rules (checks, memory, related repos) also applied to the clone,
+    and the case's or the suite's overrides (an A/B: `--set coder.engine=native`)."""
+    cfg = deep_merge(json.loads(CONFIG.read_text()) if CONFIG.exists() else {}, overrides or {})
     rule: dict = {}
     for pattern, r in (cfg.get("repos") or {}).items():
         if fnmatch.fnmatch(str(src), os.path.expanduser(pattern)):
@@ -185,7 +213,9 @@ def run_buckets(c: dict, clone: Path, config: Path, request: str, log: Path) -> 
     it only five minutes past that."""
     limit = float(c.get("time_limit", 20))
     cmd = list(c.get("buckets") or [sys.executable, str(HERE / "buckets.py")])
-    cmd += c.get("args", ["--local", "-y"]) + ["--time-limit", f"{limit:g}", request]
+    here = str(Path(c["_file"]).parent) if c.get("_file") else "."
+    cmd += [a.replace("{case_dir}", here) for a in c.get("args", ["--local", "-y"])]
+    cmd += ["--time-limit", f"{limit:g}", request]
     env = {**os.environ, "BUCKETS_CONFIG": str(config), "BUCKETS_STATE": str(STATE / "state"),
            "NO_COLOR": "1", "PYTHONUNBUFFERED": "1"}
     started = time.time()
@@ -215,7 +245,32 @@ def run_buckets(c: dict, clone: Path, config: Path, request: str, log: Path) -> 
             meta = {}
     return {"request": request, "exit": code, "minutes": round((time.time() - started) / 60, 1),
             "done": meta.get("done"), "branch": meta.get("branch"), "report": meta.get("report"),
-            "stopped": not meta}
+            "stopped": not meta, "phases": phases(Path(reports[-1]).parent if reports else None)}
+
+
+def phases(run_dir: Path | None) -> dict:
+    """Seconds and sessions per kind of model call (plan, review, code, …) and per tool, from the run's events."""
+    out: dict = {}
+    path = run_dir / "events.jsonl" if run_dir else None
+    if not path or not path.exists():
+        return out
+    names = {}
+    for line in path.read_text(errors="replace").splitlines():
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if e.get("ev") in ("call", "tool"):
+            label = e.get("label") or e.get("name") or "?"
+            names[(e["ev"], e["id"])] = re.sub(r"[-_]?(R?\d*T\d+|\d+)(-\d+)?$", "", label) or label
+        elif e.get("ev") in ("call_end", "tool_end"):
+            key = names.get(("call" if e["ev"] == "call_end" else "tool", e.get("id")))
+            if key:
+                slot = out.setdefault(key, {"secs": 0.0, "n": 0, "failed": 0})
+                slot["secs"] = round(slot["secs"] + (e.get("secs") or 0), 1)
+                slot["n"] += 1
+                slot["failed"] += not e.get("ok", True)
+    return out
 
 
 # ---------------------------------------------------------------- what the result must look like
@@ -297,12 +352,12 @@ def buckets_version() -> str:
     return head + ("+dirty" if dirty else "")
 
 
-def run_case(c: dict, suite: str, rep: int, logs: Path) -> dict:
+def run_case(c: dict, suite: str, rep: int, logs: Path, overrides: dict | None = None) -> dict:
     src = repo_of(c)
     before = snapshot(src)
     clone = prepare_clone(c, src)
     seed_memory(src, clone)
-    config = config_for(clone, src)
+    config = config_for(clone, src, deep_merge(c.get("config", {}), overrides or {}))
     log = logs / f"{c['name']}-{rep}.log"
     steps = []
     for request in [c["request"], *c.get("follow_ups", [])]:
@@ -322,7 +377,7 @@ def run_case(c: dict, suite: str, rep: int, logs: Path) -> dict:
     changed = differences(before, snapshot(src))
     result = {"suite": suite, "case": c["name"], "rep": rep, "ok": all(x["ok"] for x in checks) and bool(checks),
               "minutes": minutes, "slow": bool(slow and minutes > slow), "steps": steps, "checks": checks,
-              "buckets": buckets_version(), "log": str(log), "finished": datetime.now().isoformat(timespec="seconds")}
+              "buckets": buckets_version(), "log": str(log), "overrides": overrides or {}, "finished": datetime.now().isoformat(timespec="seconds")}
     if changed:
         result["ok"] = False
         result["checks"].append({"check": "repo as found", "ok": False, "detail": f"changed: {', '.join(changed)}"})
@@ -357,8 +412,9 @@ def summary(rows: list[dict], suite: str | None = None) -> str:
     suite = suite or suites[-1]
     now = [r for r in rows if r["suite"] == suite]
     earlier = [s for s in suites if s < suite]
-    out = [f"suite {suite} · buckets {now[0]['buckets']}", "",
-           "| Case | Passed | Median time | Before | Failing checks |", "|---|---|---|---|---|"]
+    sets = now[0].get("overrides") or {}
+    out = [f"suite {suite} · buckets {now[0]['buckets']}" + (f" · {json.dumps(sets)}" if sets else ""), "",
+           "| Case | Passed | Median time | Coder time | Before | Failing checks |", "|---|---|---|---|---|---|"]
     for case in dict.fromkeys(r["case"] for r in now):
         mine = [r for r in now if r["case"] == case]
         prev_suite = next((s for s in reversed(earlier) if any(r["suite"] == s and r["case"] == case for r in rows)), None)
@@ -367,7 +423,10 @@ def summary(rows: list[dict], suite: str | None = None) -> str:
         before = f"{sum(r['ok'] for r in prev)}/{len(prev)}, {median([r['minutes'] for r in prev]):.1f} min" if prev else "–"
         failing = sorted({x["check"] for r in mine for x in r["checks"] if not x["ok"]})
         slow = " (slow)" if any(r.get("slow") for r in mine) else ""
-        out.append(f"| {case} | {passed}/{len(mine)} | {median([r['minutes'] for r in mine]):.1f} min{slow} | {before} | "
+        coder = [sum(p.get("code", {}).get("secs", 0) for p in (s.get("phases") or {} for s in r.get("steps", [])))
+                 for r in mine]
+        coder_text = f"{median(coder):.0f}s" if any(coder) else "–"
+        out.append(f"| {case} | {passed}/{len(mine)} | {median([r['minutes'] for r in mine]):.1f} min{slow} | {coder_text} | {before} | "
                    f"{'; '.join(failing)[:120] or '–'} |")
     total = sum(r["ok"] for r in now)
     out += ["", f"{total}/{len(now)} passed"]
@@ -381,6 +440,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--cases", action="append", type=Path, help="a folder of case files (instead of the defaults)")
     ap.add_argument("--list", action="store_true", help="list the cases and stop")
     ap.add_argument("--summary", action="store_true", help="show the latest suite's results and stop")
+    ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                    help="a config override for every case, e.g. coder.engine=native (for A/B runs)")
     args = ap.parse_args(argv)
 
     if args.summary:
@@ -397,12 +458,13 @@ def main(argv: list[str] | None = None) -> int:
     suite = datetime.now().strftime("%Y%m%d-%H%M%S")
     logs = STATE / "logs" / suite
     logs.mkdir(parents=True, exist_ok=True)
-    say(f"suite {suite}: {len(cases)} case(s) × {args.repeat} · buckets {buckets_version()} · logs in {logs}")
+    say(f"suite {suite}: {len(cases)} case(s) × {args.repeat} · buckets {buckets_version()}"
+        + (f" · {' '.join(args.set)}" if args.set else "") + f" · logs in {logs}")
     try:
         for rep in range(1, args.repeat + 1):
             for c in cases.values():
                 say(f"  {c['name']} #{rep} …")
-                r = run_case(c, suite, rep, logs)
+                r = run_case(c, suite, rep, logs, parse_sets(args.set))
                 record(r)
                 bad = [f"{x['check']}: {x['detail']}" for x in r["checks"] if not x["ok"]]
                 say(f"    {'✓ pass' if r['ok'] else '✗ fail'} in {r['minutes']} min" + ("".join(f"\n      {b}" for b in bad)))

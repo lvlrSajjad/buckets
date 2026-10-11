@@ -1,0 +1,25 @@
+{
+  "summary": "Plan to add 'tags' git operation and its test.",
+  "tasks": [
+    {
+      "id": "T1",
+      "file": "buckets.py",
+      "action": "edit",
+      "instructions": "Add the 'tags' entry to the GIT_OPS dictionary and implement the op_tags method in GitAssistant.\n\n1. In GIT_OPS (around line 5386, after the 'remotes' entry), add:\n   \"tags\": (\"list the newest tags with their dates: {count?}\", False, False),\n\n2. In GitAssistant class (after op_log at line 5718), add:\n    def op_tags(self, a, yes):\n        count = a.get(\"count\", 10)\n        out = self.git(\"tag\", \"--sort=-creatordate\", \"--format=%(refname:short) %(creatordate:short)\")\n        return \"\\n\".join(out.splitlines()[:count])",
+      "done_when": "GIT_OPS contains 'tags' and GitAssistant has op_tags method",
+      "read_first": [],
+      "where": "\"remotes\": (\"list configured remotes and their URLs: {}\", False, False),",
+      "edits": []
+    },
+    {
+      "id": "T2",
+      "file": "test_buckets.py",
+      "action": "edit",
+      "instructions": "Add test_op_tags to GitAssistantTests in test_buckets.py.\n\nAfter the test_op_remotes method (line 2307), add:\n    def test_op_tags(self):\n        from unittest.mock import patch\n        with patch.object(self.g, \"git\", return_value=\"tag1 2023-01-01\\ntag2 2023-02-01\") as mock_git:\n            self.g.op_tags({}, False)\n        mock_git.assert_called_with(\"tag\", \"--sort=-creatordate\", \"--format=%(refname:short) %(creatordate:short)\")",
+      "done_when": "test_op_tags is added to GitAssistantTests",
+      "read_first": [],
+      "where": "def test_op_remotes(self):\n        from unittest.mock import patch\n        with patch.object(self.g, \"git\", return_value=\"\") as mock_git:\n            self.g.op_remotes({}, False)\n        mock_git.assert_called_with(\"remote\", \"-v\")",
+      "edits": []
+    }
+  ]
+}
