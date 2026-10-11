@@ -3691,12 +3691,16 @@ class Buckets:
         else:
             mem, bare = self.memory, self.context(with_map=False)
             listing = (mem.render(self.cfg.get("pick_map_tokens", 4000), named) if mem else self.code_map(files))
-            picked = ask_json(self.chores, self.run, "pick-files", SYSTEM,
-                              FILES_PROMPT.format(goal=self.goal(mode), max_files=self.cfg["max_files"],
-                                                  request=self.request, guidance=gd,
-                                                  context=f"\n{bare[:12000]}\n" if bare else "",
-                                                  map=listing),
-                              FILES_SCHEMA, check_files, think=False, max_tokens=1500, timeout=self.timeout)
+            try:
+                picked = ask_json(self.chores, self.run, "pick-files", SYSTEM,
+                                      FILES_PROMPT.format(goal=self.goal(mode), max_files=self.cfg["max_files"],
+                                                          request=self.request, guidance=gd,
+                                                          context=f"\n{bare[:12000]}\n" if bare else "",
+                                                          map=listing),
+                                      FILES_SCHEMA, check_files, think=False, max_tokens=1500, timeout=self.timeout)
+            except (ValueError, KeyError, TypeError) as e:
+                say(f"  {warn()} couldn't pick files ({str(e)[:100]}); answering from the facts")
+                picked = []
         # Files named in check output are read whether or not the model picked them.
         named = [f for f in paths_in_text(self.checks_seen, files) if f not in picked]
         picked = (picked + named)[: max(self.cfg["max_files"], len(picked))]
