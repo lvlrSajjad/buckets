@@ -2286,7 +2286,7 @@ TASK_SCHEMA = {
     "properties": {
         "id": {"type": "string"},
         "file": {"type": "string"},
-        "action": {"type": "string", "enum": ["edit", "create", "delete", "move", "share", "unify", "relocate"]},
+        "action": {"type": "string", "enum": ["edit", "create", "delete", "move", "share", "unify", "relocate", "dedupe"]},
         "instructions": {"type": "string"},
         "done_when": {"type": "string"},
         "read_first": {"type": "array", "items": {"type": "string"}},
@@ -2464,7 +2464,10 @@ text and the files it opens itself, and it cannot run commands):
   these can't do. Action "relocate" moves top-level functions, constants or types to another file (a util):
   "file" is the file they're in, "into" the file to move them to (new or existing), "select" their names;
   the system moves them exactly, exports them, and points the source file and every file that imports
-  them at the new place. Don't plan edits to those importers.
+  them at the new place. Don't plan edits to those importers. Action "dedupe" replaces other files' own
+  copies of a function with an import of the one that stays: "file" is where it lives (exported; plan it
+  after a relocate when the function is being moved), "select" its name(s); the copies are found, and
+  identical ones are replaced, copies that differ are reported. Don't hand-edit those copies.
 - Instructions must be self-contained and concrete: name the functions, types and exports to add
   or change, their signatures, and where in the file they go. Include exact code when it's short.
 - "read_first" lists other files the coder should open for context (types it must use, patterns to
@@ -2923,6 +2926,12 @@ def validate_move(t: dict, f: str, repo: Path, task_id: str) -> dict:
             raise ValueError("move: \"name\" (the new hook) and \"where\" (the component it comes from) must be names")
         return {**base, "file": f, "into": into, "name": name, "where": where.split(".")[-1],
                 "select": "logic" if not select or [x.lower() for x in select] == ["logic"] else select}
+    if t["action"] == "dedupe":
+        copies = [inside(x) for x in t.get("from") or [] if (repo / clean_path(str(x))).is_file()]
+        if not f.endswith(MOVABLE) or not select:  # the file may come from a relocate earlier in the plan
+            raise ValueError("dedupe: \"file\" is where the function lives (exported), \"select\" its name(s); \"from\" "
+                             "the files with their own copies (optional: they're found)")
+        return {**base, "file": f, "from": [c for c in copies if c != f], "select": select, "where": ""}
     if t["action"] == "relocate":
         into = inside(t.get("into"))
         if not f.endswith(MOVABLE) or not (repo / f).is_file() or not into.endswith(MOVABLE) or into == f or not select:
@@ -2949,7 +2958,7 @@ def validate_tasks(tasks: list, repo: Path, max_tasks: int, prefix: str) -> list
         if not f or f.startswith("/") or ".." in f.split("/"):
             raise ValueError(f"task file path {t['file']!r} must be relative to the repo root")
         action = t["action"]
-        if action in ("move", "share", "unify", "relocate"):
+        if action in ("move", "share", "unify", "relocate", "dedupe"):
             try:
                 out.append(validate_move(t, f, repo, f"{prefix}{len(out) + 1}"))
             except ValueError as e:
@@ -3075,6 +3084,15 @@ def file_imports(repo: Path, path: str, files) -> list[str]:
             if hit and hit != path and hit not in out:
                 out.append(hit)
     return out
+
+
+def copies_of(repo: Path, names: list[str], exclude: tuple = ()) -> list[str]:
+    """TypeScript/JavaScript files that define their own function or constant with one of these names."""
+    if not names:
+        return []
+    pattern = r"(^|[[:space:]])(const|let|var|function)[[:space:]]+(" + "|".join(map(re.escape, names)) + r")([^[:alnum:]_$]|$)"
+    out = git(repo, "grep", "-lE", pattern, "--", *[f"*{e}" for e in MOVABLE], check=False).split()
+    return [f for f in out if f not in exclude and not TEST_PATH.search(f)]
 
 
 def memory_place(repo: Path, setting) -> Path | None:
@@ -3432,7 +3450,9 @@ class Buckets:
                          + f"\nDry run: moves {', '.join(r['moved'])}; updates {len(r['importers_updated'])} importer(s)"
                          + (f" ({', '.join(r['importers_updated'][:8])})" if r["importers_updated"] else "")
                          + (f"; left for you: {'; '.join(r['left'])}" if r["left"] else "")
-                         + ". Plan it (copy it); don't plan edits to those importers.")
+                         + ". Plan it (copy it); don't plan edits to those importers."
+                         + (f"\nThese files define their own copy of it: {', '.join(rh['copies'])}. Plan, after the relocate: "
+                            + json.dumps({k: rh['dedupe'][k] for k in ('file', 'action', 'select')}) if rh.get("dedupe") else ""))
         hint = self.move_hint()
         if hint:
             r, t = hint["report"], hint["task"]
@@ -3520,9 +3540,16 @@ class Buckets:
                 detail(f"a mechanical relocate doesn't fit ({d.get('error', '')[:160]})")
                 continue
             r = d["report"]
+            copies = copies_of(self.repo, names, (src, into))
             say(f"  {ok()} a mechanical relocate fits: {', '.join(r['moved'])} → {into}, {len(r['importers_updated'])} importer(s) "
-                f"updated (dry run)")
-            self._relocate_hint = {"task": validate_move(task, src, self.repo, "T1"), "report": r}
+                f"updated (dry run)" + (f"; {len(copies)} file(s) have their own copy" if copies else ""))
+            dedupe = validate_move({"id": "T2", "file": into, "action": "dedupe", "select": names, "from": copies,
+                                    "instructions": f"Replace the other files' own copies of {', '.join(names)} with an import.",
+                                    "done_when": "", "edits": []}, into, self.repo, "T2") if copies and (self.repo / into).exists() \
+                else ({"id": "T2", "file": into, "action": "dedupe", "select": names, "from": copies, "instructions": "",
+                       "done_when": "", "edits": [], "read_first": [], "where": ""} if copies else None)
+            self._relocate_hint = {"task": validate_move(task, src, self.repo, "T1"), "report": r, "copies": copies,
+                                   "dedupe": dedupe}
             return self._relocate_hint
         return None
 
@@ -3632,6 +3659,13 @@ class Buckets:
                 for k in ("into", "name", "where"):
                     t[k] = t.get(k) or hint["task"][k]
                 t["select"] = t.get("select") or ["logic"]
+        rh = self.relocate_hint()
+        for t in data.get("tasks") or [] if rh else []:
+            if isinstance(t, dict) and t.get("action") in ("relocate", "dedupe"):
+                h = rh["task"] if t["action"] == "relocate" else (rh.get("dedupe") or {})
+                for k in ("file", "into", "select", "from"):
+                    if h.get(k) and not t.get(k):
+                        t[k] = h[k]
         pairs = [(h["compare"]["a"], h["compare"]["b"]) for h in self.share_hints()]
         for t in data.get("tasks") or []:  # a unify's "from" is the other variant of the file it changes
             if not (isinstance(t, dict) and t.get("action") == "unify"):
@@ -3689,14 +3723,18 @@ class Buckets:
         plan = {**plan, "tasks": [{**t, "id": f"T{n}"} for n, t in enumerate(converted, 1)]}
         rh = self.relocate_hint()
         if rh and not any(t["action"] == "relocate" for t in plan["tasks"]):
-            touched = {rh["task"]["file"], rh["task"]["into"], *rh["report"]["importers_updated"]}
+            touched = {rh["task"]["file"], rh["task"]["into"], *rh["report"]["importers_updated"], *(rh.get("copies") or [])}
             if any(t["file"] in touched and t["action"] in ("edit", "create") for t in plan["tasks"]):
                 say(f"  {warn()} the plan would move the code by hand; relocating it mechanically instead")
                 rest = [t for t in plan["tasks"] if t["file"] not in touched]
                 plan = {**plan, "tasks": [rh["task"]] + rest}
         relocs = [t for t in plan["tasks"] if t["action"] == "relocate"]
         if relocs and rh:
-            importers = set(rh["report"]["importers_updated"])
+            importers = set(rh["report"]["importers_updated"]) | set(rh.get("copies") or [])
+            if rh.get("dedupe") and not any(t["action"] == "dedupe" for t in plan["tasks"]):
+                at = plan["tasks"].index(relocs[0]) + 1
+                plan = {**plan, "tasks": plan["tasks"][:at] + [dict(rh["dedupe"])] + plan["tasks"][at:]}
+                say(f"  {paint('added', 'dim')} a dedupe after the relocate: {len(rh['copies'])} file(s) have their own copy")
             redo = [t for t in plan["tasks"] if t["action"] == "edit" and t["file"] in importers | {rh["task"]["file"], rh["task"]["into"]}]
             if redo:
                 say(f"  {paint('dropped', 'dim')} {', '.join(t['id'] for t in redo)}: the relocate already updates those files")
@@ -4471,7 +4509,7 @@ class Buckets:
         """One file's task: the planner's exact edits applied directly when they fit, else a coder
         session. Anything else the coder touches is put back as it was."""
         self.involved = list(dict.fromkeys(getattr(self, "involved", []) + [task["file"]]))
-        if task["action"] in ("move", "share", "unify", "relocate"):
+        if task["action"] in ("move", "share", "unify", "relocate", "dedupe"):
             return self.apply_move(task, commit)
         if task.get("edits"):
             done = self.apply_planned(task, commit)
@@ -4589,6 +4627,28 @@ class Buckets:
                 git(self.repo, "add", "-A", "--", *written)
                 git(self.repo, "commit", "--no-verify", "-q", "-m", f"buckets {task['id']}: relocate ({note[:200]})\n\n{note}")
             say(f"  {ok()} {task['id']} relocate ({int(time.time() - start)}s): {paint(note[:220], 'dim')}")
+            return {**task, "status": "done", "note": f"DONE: {note}"}
+        elif task["action"] == "dedupe":
+            copies = task.get("from") or copies_of(self.repo, task["select"], (task["file"],))
+            if not copies:
+                return {**task, "status": "failed", "note": "BLOCKED: no other file defines its own copy"}
+            d = ts_moves(self.repo, {"op": "dedupe", "file": task["file"], "names": task["select"], "copies": copies})
+            if not d.get("ok"):
+                return {**task, "status": "failed", "note": f"BLOCKED: {d.get('error', 'dedupe failed')}"}
+            written = []
+            for f, text in d["files"].items():
+                (self.repo / f).write_text(text)
+                written.append(f)
+            r = d["report"]
+            note = (f"replaced copies with an import from {task['file']}: {'; '.join(r['replaced']) or 'none'}"
+                    + (f"; copies that differ (unify them first, or keep them): {'; '.join(r['differ'])}" if r["differ"] else ""))
+            if not written:
+                return {**task, "status": "failed", "note": f"BLOCKED: {note}"}
+            self.involved = list(dict.fromkeys(self.involved + written))
+            if commit:
+                git(self.repo, "add", "-A", "--", *written)
+                git(self.repo, "commit", "--no-verify", "-q", "-m", f"buckets {task['id']}: dedupe ({note[:200]})\n\n{note}")
+            say(f"  {ok()} {task['id']} dedupe ({int(time.time() - start)}s): {paint(note[:220], 'dim')}")
             return {**task, "status": "done", "note": f"DONE: {note}"}
         elif task["action"] == "unify":
             d = ts_moves(self.repo, {"op": "unify", "from": task["from"][0], "into": task["file"], "names": task["select"]})

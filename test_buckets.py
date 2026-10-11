@@ -2091,6 +2091,33 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
                               "src/index.ts", "src/math.ts", "src/utils/price.ts"], cwd=self.repo, capture_output=True, text=True)
         self.assertEqual(tsc.returncode, 0, tsc.stdout + tsc.stderr)
 
+    def test_relocate_then_dedupe_the_copies(self):
+        fmt = "const fmt = (s: string): string => {\n  return s.trim()\n}\n"
+        files = {"src/time/helper.ts": "export " + fmt + "export const other = 1\n",
+                 "src/time/a.ts": 'import { other } from "./helper"\n\n' + fmt + "export const A = () => fmt(' x ') + other\n",
+                 "src/time/b.ts": "const fmt = (s: string): string => s.toUpperCase()\nexport const B = () => fmt('y')\n",
+                 "src/utils/dates.ts": "export const today = () => 1\n"}
+        for f, t in files.items():
+            (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / f).write_text(t)
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "time"], cwd=self.repo, check=True)
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        b = buckets.Buckets(cfg, self.repo, "Move `fmt` from src/time/helper.ts into src/utils/dates.ts and update everything that uses it")
+        with contextlib.redirect_stderr(io.StringIO()):
+            rh = b.relocate_hint()
+            self.assertEqual((rh["task"]["into"], rh["copies"]), ("src/utils/dates.ts", ["src/time/a.ts", "src/time/b.ts"]))
+            plan = b.prefer_move({"summary": "s", "tasks": [dict(rh["task"])]})
+            self.assertEqual([t["action"] for t in plan["tasks"]], ["relocate", "dedupe"])
+            got = [b.code_task(t) for t in buckets.validate_tasks(plan["tasks"], self.repo, 8, "T")]
+        self.assertEqual([g["status"] for g in got], ["done", "done"], got)
+        a = (self.repo / "src/time/a.ts").read_text()
+        self.assertNotIn("const fmt", a)
+        self.assertIn('import { fmt } from "../utils/dates"', a)
+        self.assertIn("const fmt = (s: string): string => s.toUpperCase()", (self.repo / "src/time/b.ts").read_text())  # differs: kept
+        self.assertIn("copies that differ", got[1]["note"])
+        self.assertIn("export const fmt", (self.repo / "src/utils/dates.ts").read_text())
+
     def test_shared_hook_names(self):
         self.assertEqual(buckets.shared_hook_names("a/b/billing-shared.tsx", "a/b/x/use-billing-screen.tsx"),
                          ("a/b/use-billing-screen-shared.ts", "useBillingScreenShared"))

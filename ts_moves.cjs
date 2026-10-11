@@ -982,8 +982,44 @@ function relocate() {
   return { files, report: { moved: names, importers_updated: touched, still_used_here: stillHere, left } };
 }
 
+// Copies of a function in other files replaced by an import of the one that stays: each copy that is a
+// top-level declaration identical to the original (as TypeScript prints it, `export` aside) goes.
+function dedupe() {
+  const home = abs(input.file);
+  const { checker, sources } = program([input.file, ...input.copies]);
+  const [H, ...C] = sources;
+  const top = (sf, name) => sf.statements.find((s) => declaredBy(s).some((id) => id.text === name));
+  const bare = (sf, st) => normalized(st, sf).replace(/^export/, '');
+  const files = {}, replaced = [], differ = [], missing = [];
+  for (const name of input.names) {
+    const orig = top(H, name);
+    if (!orig) throw new Error(`\`${name}\` isn't a top-level declaration in ${input.file}`);
+    if (!isExported(orig)) throw new Error(`\`${name}\` isn't exported from ${input.file}; export it (or relocate it there) first`);
+  }
+  for (const sf of C) {
+    const edits = [], names = [];
+    for (const name of input.names) {
+      const copy = top(sf, name);
+      if (!copy) { missing.push(`${rel(sf.fileName)}: ${name}`); continue; }
+      if (bare(sf, copy) !== bare(H, top(H, name))) { differ.push(`${rel(sf.fileName)}: ${name}`); continue; }
+      if (isExported(copy)) { differ.push(`${rel(sf.fileName)}: ${name} (exported from there too; others may import it)`); continue; }
+      edits.push([fullStart(sf, copy), lineEnd(sf.text, copy.end), '']);
+      names.push(name);
+    }
+    if (!names.length) continue;
+    // imports only the removed copies used go too
+    const removed = sf.statements.filter((st) => edits.some(([a]) => a === fullStart(sf, st)));
+    const imp = importBindings(sf, checker);
+    const keptRefs = sf.statements.filter((st) => !removed.includes(st) && !ts.isImportDeclaration(st)).flatMap((st) => references(checker, st));
+    pruneImports(sf, new Set(keptRefs.filter(({ sym }) => imp.has(sym)).map(({ sym }) => imp.get(sym))), edits);
+    files[rel(sf.fileName)] = mergeImports(applyEdits(sf.text, edits), [`import { ${names.join(', ')} } from "${importPath(sf.fileName, home)}"`], sf.fileName);
+    replaced.push(`${rel(sf.fileName)}: ${names.join(', ')}`);
+  }
+  return { files, report: { replaced, differ, missing } };
+}
+
 try {
-  const ops = { extract, compare, share, share_hook: shareHook, unify, relocate };
+  const ops = { extract, compare, share, share_hook: shareHook, unify, relocate, dedupe };
   if (!ops[input.op]) throw new Error(`unknown op ${input.op}`);
   process.stdout.write(JSON.stringify({ ok: true, ...ops[input.op]() }));
 } catch (e) {
