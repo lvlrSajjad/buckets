@@ -45,13 +45,22 @@ Done (field notes 20–28, roadmap "Backlog, ranked"):
   added everywhere), `component` (a render helper becomes a component). Each has a dry-run suggestion in the
   facts, guards against retyping, field-filling for the planner's quirks, and a live-verified run.
 
+Done since (2026-10-11 afternoon):
+- **The regression suite** (`regress.py`, cases in `regress/` and `docs/private/regress/`): each case runs on a
+  clone under `~/.local/state/buckets-regress/clones/` (pinned commit, the repo's rules and node_modules
+  links), never the repo itself; the suite stops if the repo's HEAD, branches, stashes or status change.
+  `python3 regress.py --list`, `regress.py <names> -n 3`, `--set coder.engine=native`, `--summary`.
+- **opencode fix:** opencode finds a project by its first commit and reopens the folder it first saw, so in
+  a clone or second worktree it edited the original. Sessions now get `XDG_DATA_HOME` per repo path.
+- **Native coder** (`coder.engine = "native"`, opt-in): buckets' own read/search/edit/write loop.
+- **`buckets live`** (port 8765): `live.html` animates `events.jsonl` live, replays finished runs.
+
 Next, agreed with the owner:
-1. **The regression suite (tier 3, item 15) before more tools:** replay the real cases (big screen split, the
-   four variant merges, relocate+dedupe, the 37-call signature change, component extraction, follow-ups, the
-   tags request, the variants question) overnight with times and pass rates; specifics in
-   `docs/private/handoff-full.md`. Each case: request, expected outcome check (files, behaviour, checks).
+1. **A/B the coder engines** with the suite (`coder-hide`, `coder-tags`, then the full set), 2-3 runs each;
+   make native the default if it's as reliable and faster. Don't edit this working copy while a buckets
+   case (`coder-tags`, `tags*`) runs: the suite treats a status change in the source repo as a stop.
 2. Then item 11 (renames through the TypeScript language service), item 12 (shared hooks past early returns),
-   the rest of item 9 (copies with different names), JSX chunks by lines → components.
+   the rest of item 9 (copies with different names), JSX chunks by lines → components; simframe UI checks.
 3. Then tier 3 (`measure`, the batch loop), tier 4, tier 5.
 
 Known weak spots: the local planner varies run to run (guards cover it); reviewers are the weakest link

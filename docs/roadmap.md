@@ -36,8 +36,17 @@ references through TypeScript)
 13. `measure`: commands run on `main` and the branch, the numbers compared (warnings, bundle size, timing,
     coverage). S–M
 14. Batch loop (`buckets each "<request>" <targets>`). S
-15. **A regression suite for buckets itself:** fixed real requests with expected outcomes (questions,
-    small and medium changes, the split, the four merges), run overnight with times and pass rates. M
+15. ~~A regression suite for buckets itself~~ **done (2026-10-11):** `regress.py` replays real requests on a
+    clone it owns (the case's repo is only read; the suite stops if it changes), checks files, text, line
+    counts, where changes land, commands and answers, and keeps times, pass rates and time per kind of
+    model call. `--set` for A/B runs. Its first run caught opencode editing the source repo from a clone
+    (fixed: a data folder per repo path).
+15a. **A native coder loop instead of opencode** (agreed 2026-10-11): buckets' own tool loop on the coder's
+    model (read, search, edit tolerant of indentation, write; edits only in the task's file), opt-in with
+    `coder.engine = "native"`. Becomes the default when the suite's A/B says it's as reliable and faster.
+    opencode stays as the fallback. M
+15b. UI checks through simframe: a saved flow (`simframe flow run`) as one more check before and after,
+    with Metro reloaded on the branch; opt-in for UI changes. M
 16. Affected tests only during rounds, the full suite at the end. M
 17. Coverage-driven test jobs. M
 18. `git bisect run <check>`. M
@@ -55,6 +64,8 @@ references through TypeScript)
 **Tier 5: speed and infrastructure**
 27. Prompt layout for cache reuse; parallel coding lanes; two candidates plus tests; plan on Windows when
     the Mac is busy; graphify communities as facts; the Windows network fix. S–M each
+28a. `buckets live`: done (2026-10-11): every run writes events.jsonl; a three.js page animates it live
+    and replays finished runs.
 28. Lighter reviews for mechanical-only runs (one reviewer when every task was a move/share/unify and the
     checks pass). S
 
