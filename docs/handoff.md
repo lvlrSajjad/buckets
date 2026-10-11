@@ -59,9 +59,13 @@ Next, agreed with the owner:
 1. **A/B the coder engines** with the suite (`coder-hide`, `coder-tags`, then the full set), 2-3 runs each;
    make native the default if it's as reliable and faster. Don't edit this working copy while a buckets
    case (`coder-tags`, `tags*`) runs: the suite treats a status change in the source repo as a stop.
-2. Then item 11 (renames through the TypeScript language service), item 12 (shared hooks past early returns),
+2. ~~Roadmap 29–30~~ measured (field notes 31): 30 is in as a syntax reflex (planned edits and coders can't leave
+   a TS/JS file unparseable); 29 is parked on `park/predictive-review`. **Next: 29b, the review thinking budget**
+   (almost half the reviews think until they're cut off), A/B'd on the suite. Suite cases `compact-prop` and
+   `compact-clean` (in `docs/private/regress/`) replay a real plan with and without a syntax slip.
+3. Then item 11 (renames through the TypeScript language service), item 12 (shared hooks past early returns),
    the rest of item 9 (copies with different names), JSX chunks by lines → components; simframe UI checks.
-3. Then tier 3 (`measure`, the batch loop), tier 4, tier 5.
+4. Then tier 3 (`measure`, the batch loop), tier 4, tier 5.
 
 Known weak spots: the local planner varies run to run (guards cover it); reviewers are the weakest link
 (verify every branch yourself); each new tool needed 3–7 live attempts before a clean run.

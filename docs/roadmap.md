@@ -65,9 +65,33 @@ references through TypeScript)
 27. Prompt layout for cache reuse; parallel coding lanes; two candidates plus tests; plan on Windows when
     the Mac is busy; graphify communities as facts; the Windows network fix. S–M each
 28a. `buckets live`: done (2026-10-11): every run writes events.jsonl; a three.js page animates it live
-    and replays finished runs.
+    and replays finished runs. Each machine shows an inner network: one inner neuron per kind of job it ran
+    (call labels without task/round suffixes, tool names), links for which job followed which; double-click
+    a machine to fly inside.
 28. Lighter reviews for mechanical-only runs (one reviewer when every task was a move/share/unify and the
     checks pass). S
+
+**Tier 6: borrowed from how a brain works** (agreed 2026-10-11; the "many machines" picture in
+`buckets live` led here; re-ranked after measuring, field notes 31). Ranked by what the runs show, not the analogy.
+29b. **Review thinking budget, next.** 44% of planner reviews and 67% of second reviews think until the budget
+    cuts them off (~60–80 s), then need another call to answer. A/B on the suite: a lower budget, or the verdict
+    first and the reasoning after; keep only what still catches what reviews caught. S–M
+30. ~~Reflexes before a model round~~ **done** as a syntax reflex (field notes 31): planned edits, the native
+    coder and any coder session can't leave a TS/JS file unparseable; 7.2 → 3.8 min on the case it targets. The
+    history showed fixers for type errors had almost nothing to fix. Still open: the mechanical moves (the
+    `signature` case's move wrote a syntax error the reflex doesn't cover). S
+33. **Best candidate wins** (lateral inhibition): two or more coders write the same task, the checks pick the
+    winner, the rest are dropped (item 27's "two candidates plus tests", generalized). Helps where checks can tell
+    candidates apart; UI changes often pass either way. M
+34. **The suite every night** (was "learn while asleep"): replay the suite on `main` nightly and report what got
+    slower or started failing; updating memory or routing from it waits for 32. S–M
+29. ~~Report surprises, not summaries~~ **parked** on branch `park/predictive-review` (field notes 31): it worked
+    and saved ~2 s per review, because reviews spend their time thinking, not reading. Worth it in a tree of many
+    machines, where each level compresses what it passes up.
+31, 35. **Mostly there already**: the light path, the check-defined review skip and named files wake little; thinking
+    is already off for routine jobs and on for plans and reviews.
+32, 36. **Wait for more machines or models**: routing by pass rates (32) and moving a dropped machine's task (36)
+    have nothing to choose between with one model on two machines.
 
 **Quick wins, any time:** merge byte-identical variant files (`one navigator`); a leftover-debug
 check (`console.log`/`debugger` added); cleanup jobs for what the checks find (missing locale entries, leftover debug

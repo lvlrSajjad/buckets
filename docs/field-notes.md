@@ -685,6 +685,42 @@ trimmed the model to make room), so the next requests read those parts back from
 in RAM there's about 3 GB and little CPU left on Windows. Checks stay on the Mac (`agent.checks` is off); shadow and
 split are kept for a machine with room to spare. The remote commands are the useful part here.
 
+### 31. Two ideas from how a brain works, measured: one kept, one parked (2026-10-11)
+
+Roadmap tier 6 came from picturing buckets as a brain. Before building, the run history (152 runs) was checked
+for where each idea would actually bite.
+
+**Reflexes (item 30), kept.** The idea was mechanical fixers before a model round. The history said otherwise:
+only ~23 rounds failed their checks after coding, and almost none on something a fixer clears (44 "cannot find
+name" errors were undefined variables in one run, not missing imports; `no-unused-vars` isn't auto-fixable). What
+did repeat: **the planner's own exact edits, pasted mechanically, leaving a .tsx file that doesn't parse** (three
+rounds that day, e.g. a stray `{` after a JSX opening tag). Python files already had a parse check there; TS/JS
+didn't. Now `ts_moves.cjs syntax` (parse only, ~0.15 s) guards planned edits (they go to the coder instead), the
+native coder's edit tool, and any coder session (one more try with the exact lines). On that real plan, replayed:
+
+| Case (2 runs each) | Before | After |
+|---|---|---|
+| the planner's plan with the stray `{` | 2/2, 7.2 min: both reviews found it, a second round fixed it | 2/2, **3.8 min**, one round |
+| the same plan without it | 2/2, 2.5 min | 2/2, 1.7 min (mostly the first run loading the model) |
+
+The full work-repo suite on it: the same 5 cases pass and the same 4 fail as before (none from this; the reflex
+didn't fire in any of them, as expected for something this rare).
+
+**Surprises only (item 29), parked** on branch `park/predictive-review`. The planner's review left out files that
+went in exactly as it wrote them (commits marked, checks naming none of them), and when everything went in that
+way with every check green, only the second reviewer looked. It worked as built and saved little: the prompt
+shrank by ~1,000 tokens (~2 s of reading), and the full skip rightly didn't fire because other callers were
+deliberately left on the old signature. A review's time isn't reading, it's thinking:
+
+| | Calls (all runs) | Thought until the budget cut it off |
+|---|---|---|
+| Planner reviews (Mac) | 95 | 42 (44%) |
+| Second reviews (Windows) | 43 | 29 (67%) |
+| Plans | 120 | 26 (22%) |
+
+A cut-off review thinks ~60–80 s, then needs another call to answer (10–20 s). That is the bigger lever (roadmap
+29b). Item 29 makes more sense in a tree of many machines, where each level has to compress what it passes up.
+
 ## Lessons so far
 
 - Run it, don't argue about it: comparing two versions of a small function on sample inputs settles
