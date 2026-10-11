@@ -1477,6 +1477,23 @@ class ReviewSkip(unittest.TestCase):
         self.assertFalse(buckets.checks_settle_job([], self.BASE, self.NOW, [], None))
 
 
+class AgentRules(unittest.TestCase):
+    def test_every_section_heading_and_one_rule_each(self):
+        long_intro = "Background. " * 600
+        doc = (f"# AGENTS.md\n{long_intro}\n## Localization: strings live in `localization/*.json`\nSome context here.\n"
+               "Never hard-code user-facing text in a component.\n\n## Reuse before you build\nOnly create a new util "
+               "when nothing existing covers it.\n```ts\nnever = 'in code'\n```\n## Release builds\nUse the script.\n")
+        repo = make_repo({"AGENTS.md": doc})
+        rules = buckets.agent_rules(repo)
+        self.assertIn("- Localization: strings live in localization/*.json: Never hard-code user-facing text in a component.", rules.replace("`", ""))
+        self.assertIn("- Reuse before you build: Only create a new util when nothing existing covers it.", rules)
+        self.assertIn("- Release builds", rules)
+        self.assertNotIn("in code", rules)
+        g = buckets.guidance(repo, {}, "add a field")
+        self.assertIn("every section's rules, in short", g)
+        self.assertEqual(buckets.agent_rules(make_repo({"README.md": "x"})), "")
+
+
 class DoubleReview(unittest.TestCase):
     """Two machines review each round; a lone "undefined"-style claim while the checks pass is confirmed
     before it can send working code back for rewriting."""

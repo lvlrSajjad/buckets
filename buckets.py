@@ -1437,6 +1437,38 @@ def doc_sections(text: str, request: str, budget: int) -> str:
             + (f"\n(Other sections, not shown: {'; '.join(titles[:30])})" if titles else ""))
 
 
+RULE_WORDS = re.compile(r"\b(must|never|always|do not|don't|only|required|instead of|not allowed|prefer)\b", re.I)
+
+
+def agent_rules(repo: Path, budget: int = 5000) -> str:
+    """The repo's agent doc (AGENTS.md, CLAUDE.md…) as a short list of its rules, so every plan and review
+    sees all of them even when the doc is too long to read whole: each section's heading (often a rule
+    itself) and its first sentences that say must / never / always / don't / only."""
+    doc = next((repo / n for n in GUIDANCE_FILES if (repo / n).is_file()), None)
+    if not doc:
+        return ""
+    text = doc.read_text(errors="replace")
+    if text.strip().startswith("@") and len(text) < 200:
+        target = repo / text.strip()[1:].split()[0]
+        text = target.read_text(errors="replace") if target.is_file() else ""
+    found = []
+    for sec in re.split(r"(?m)^(?=## )", text)[1:]:
+        title, _, body = sec.partition("\n")
+        body = re.sub(r"```.*?```", "", body, flags=re.S)
+        plain = re.sub(r"\*\*|__|`", "", re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", body))
+        sentences = [x.strip(" -*>|") for x in re.split(r"(?<=[.!?])\s+|\n\s*[-*] |\n\n", plain)]
+        rule = next((re.sub(r"\s+", " ", x) for x in sentences if RULE_WORDS.search(x) and 30 <= len(x) <= 400
+                     and x[:1].isupper()), "")
+        found.append((re.sub(r"\s+", " ", title.strip("# ").strip()), rule))
+    if not found:
+        return ""
+    # Every heading whole (many are rules themselves); the room left is shared by one sentence each.
+    room = max(60, (budget - sum(len(t) + 4 for t, _ in found)) // len(found))
+    lines = [f"- {t}" + (f": {r if len(r) <= room else r[:room - 1].rsplit(' ', 1)[0] + '…'}" if r else "")
+             for t, r in found]
+    return "\n".join(lines)[:budget]
+
+
 def guidance(repo: Path, rc: dict, request: str = "") -> str:
     """The repo's own guidance: its agent doc (AGENTS.md, CLAUDE.md…), cut to the parts that matter
     for this request when it's long, the skill docs whose names the request spells (.github/skills/
@@ -1448,6 +1480,9 @@ def guidance(repo: Path, rc: dict, request: str = "") -> str:
             text = p.read_text(errors="replace")
             if text.strip().startswith("@") and len(text) < 200:  # CLAUDE.md that just says @AGENTS.md
                 continue
+            rules = agent_rules(repo) if len(text) > 6000 else ""
+            if rules:
+                parts.append(f"--- {name}: every section's rules, in short (follow all of them) ---\n{rules}")
             parts.append(f"--- {name}{' (the parts that match this request)' if len(text) > 6000 else ''} ---\n"
                          + doc_sections(text, request, 6000))
             break
@@ -2490,7 +2525,7 @@ Rules:
 - Look for: parts of the request that are missing, wrong logic, broken imports or exports,
   leftover or duplicated code, files that should have changed but didn't, tasks that failed.
 - If not done, write follow-up tasks that fix only what's wrong. Don't redo correct work.
-{rules}
+{agent_rules}{rules}
 Reply with done, a short summary, the issues you found, and the follow-up tasks (empty when done)."""
 
 DEFINITE_CLAIM = re.compile(r"\b(undefined|not defined|never defined|isn't defined|never called|not called anywhere|"
@@ -4422,7 +4457,8 @@ class Buckets:
             shortcuts=("\nShortcuts found in the diff (must be replaced with real fixes):\n"
                        + "\n".join(f"- {h}" for h in shortcuts) + "\n") if shortcuts else "",
             impact=impact_text(api) + self.phrases_now(base) + self.weak_tests_text(base) + self.changed_code(base),
-            diff=self.diff_text(base), rules=TASK_RULES.format(max_tasks=self.cfg["max_tasks"]))
+            diff=self.diff_text(base), rules=TASK_RULES.format(max_tasks=self.cfg["max_tasks"]),
+            agent_rules=self.agent_rules_text())
 
         def validate(d):
             return {"done": bool(d["done"]), "summary": str(d["summary"]),
@@ -4443,6 +4479,11 @@ class Buckets:
                                + prompt, REVIEW_SCHEMA, validate)
         return ask_json(self.planner, self.run, f"review-{rnd}", SYSTEM, prompt, REVIEW_SCHEMA, validate,
                         max_tokens=16000, timeout=self.timeout, **self.think_budget())
+
+    def agent_rules_text(self) -> str:
+        rules = agent_rules(self.repo)
+        return ("- The repo's own rules (from its agent doc). The change must follow every one that applies; "
+                "list each it breaks as an issue, naming the rule:\n" + rules + "\n") if rules else ""
 
     def weak_tests_text(self, base: str) -> str:
         found = weak_tests(git(self.repo, "diff", "-U0", f"{base}..HEAD"))
