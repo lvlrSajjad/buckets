@@ -4467,7 +4467,8 @@ class Buckets:
             checks="\n".join(chk) or "(no checks configured)",
             shortcuts=("\nShortcuts found in the diff (must be replaced with real fixes):\n"
                        + "\n".join(f"- {h}" for h in shortcuts) + "\n") if shortcuts else "",
-            impact=impact_text(api) + self.phrases_now(base) + self.weak_tests_text(base) + self.changed_code(base),
+            impact=impact_text(api) + self.phrases_now(base) + self.weak_tests_text(base) + self.i18n_text(base)
+                   + self.changed_code(base),
             diff=self.diff_text(base), rules=TASK_RULES.format(max_tasks=self.cfg["max_tasks"]),
             agent_rules=self.agent_rules_text())
 
@@ -4490,6 +4491,11 @@ class Buckets:
                                + prompt, REVIEW_SCHEMA, validate)
         return ask_json(self.planner, self.run, f"review-{rnd}", SYSTEM, prompt, REVIEW_SCHEMA, validate,
                         max_tokens=16000, timeout=self.timeout, **self.think_budget())
+
+    def i18n_text(self, base: str) -> str:
+        gaps = i18n_gaps(self.repo, git(self.repo, "diff", f"{base}..HEAD"), self.index.files)
+        return ("\nLocale entries, checked mechanically (new user-facing strings need one):\n"
+                + "\n".join(f"- {g}" for g in gaps) + "\n") if gaps else ""
 
     def agent_rules_text(self) -> str:
         rules = agent_rules(self.repo)
@@ -4920,6 +4926,71 @@ def checks_settle_job(results: list, baseline: dict, now: dict, shortcuts: list,
             and any(not r["ok"] for r in baseline.values())
             and bool(now) and all(r["ok"] for r in now.values())
             and not shortcuts and not (api and api.get("untouched")))
+
+
+LOCALE_DIRS = ("localization", "locales", "locale", "i18n", "lang", "translations")
+BASE_LOCALES = ("en_us.json", "en-US.json", "en.json", "en_US.json", "en-us.json")
+UI_STRING = re.compile(r"""\b(?:text|title|placeholder|label|message|header|subtitle)=\{?\s*(?:"([^"{}]{2,120})"|'([^'{}]{2,120})')|"""
+                       r"""\btranslate\(\s*(?:"([^"]{2,120})"|'([^']{2,120})')|(?<![=\-])>\s*([A-Z][A-Za-z ,.'!?&:-]{2,100}[a-z.!?])\s*</""")
+
+
+def locale_files(repo: Path, files) -> tuple[str, list[str]] | None:
+    """The base locale file and its siblings, for repos whose strings live in flat JSON maps keyed by
+    the source text (`"REMEMBER ME": "Remember me"`)."""
+    for f in files:
+        parts = f.split("/")
+        if len(parts) >= 2 and parts[-2] in LOCALE_DIRS and parts[-1] in BASE_LOCALES:
+            folder = "/".join(parts[:-1])
+            others = sorted(g for g in files if g.startswith(folder + "/") and g.endswith(".json") and g != f
+                            and g.count("/") == f.count("/"))
+            return f, others
+    return None
+
+
+def i18n_gaps(repo: Path, diff: str, files) -> list[str]:
+    """User-facing strings a change adds with no entry in the base locale, and keys it adds to the base
+    locale that the other locales don't have. Only for repos keyed by the uppercased source text."""
+    found = locale_files(repo, files)
+    if not found:
+        return []
+    base, others = found
+    try:
+        keys = json.loads((repo / base).read_text())
+    except (OSError, ValueError):
+        return []
+    real = [k for k in keys if not k.startswith("#")]
+    if not real or sum(k == k.upper() for k in real) < 0.9 * len(real):
+        return []
+    out, file = [], ""
+    for line in diff.splitlines():
+        if line.startswith("+++ "):
+            file = line[6:] if line.startswith("+++ b/") else ""
+            continue
+        if not line.startswith("+") or not file.endswith((".tsx", ".jsx", ".ts", ".js")) or TEST_PATH.search(file):
+            continue
+        for m in UI_STRING.finditer(line[1:]):
+            if m.group(5) and not file.endswith((".tsx", ".jsx")):
+                continue
+            text = next(g for g in m.groups() if g).strip()
+            if " " not in text and not text[:1].isupper() or re.search(r"https?:|[/_]|\.(png|jpg|svg)$", text):
+                continue
+            gap = f"`{file}` shows \"{text}\" but `{base}` has no \"{text.upper()}\" entry"
+            if text.upper() not in keys and gap not in out:
+                out.append(gap)
+    chunk = next((c for c in diff.split("diff --git ") if c.split("\n", 1)[0].endswith(f" b/{base}")), "")
+    key = re.compile(r'"((?:[^"\\]|\\.)+)"\s*:')
+    plus = {k for l in chunk.splitlines() if l.startswith("+") and not l.startswith("+++") for k in key.findall(l)}
+    minus = {k for l in chunk.splitlines() if l.startswith("-") and not l.startswith("---") for k in key.findall(l)}
+    added = plus - minus
+    for other in others:
+        try:
+            theirs = json.loads((repo / other).read_text())
+        except (OSError, ValueError):
+            continue
+        missing = sorted(k for k in added if k not in theirs and not k.startswith("#"))
+        if missing:
+            out.append(f"`{other}` lacks {len(missing)} key(s) added to `{base}`: " + ", ".join(f'"{k}"' for k in missing[:6]))
+    return out[:15]
 
 
 TEST_PATH = re.compile(r"(^|/)(test_[^/]+\.py|[^/]+_test\.py|[^/]+\.(test|spec)\.[jt]sx?|__tests__/[^/]+\.[jt]sx?)$")

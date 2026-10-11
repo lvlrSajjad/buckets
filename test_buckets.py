@@ -1497,6 +1497,22 @@ class AgentRules(unittest.TestCase):
         self.assertEqual(buckets.agent_rules(make_repo({"README.md": "x"})), "")
 
 
+class Localization(unittest.TestCase):
+    def test_new_strings_without_a_locale_entry(self):
+        repo = make_repo({"app/localization/en_us.json": '{"SAVE": "Save", "REMEMBER ME": "Remember me"}',
+                          "app/localization/fr_ca.json": '{"SAVE": "Enregistrer", "REMEMBER ME": "Souviens-toi"}',
+                          "app/screen.tsx": "export const S = () => null\n"})
+        (repo / "app/screen.tsx").write_text('export const S = () => (\n  <>\n    <Button text="Save" />\n'
+                                             '    <Text>Pick a vendor</Text>\n    <Text text="Remember me" testID="remember_me" />\n'
+                                             '    {translate("Not found yet")}\n  </>\n)\n')
+        (repo / "app/localization/en_us.json").write_text('{"SAVE": "Save", "REMEMBER ME": "Remember me", "PICK A VENDOR": "Pick a vendor"}')
+        diff = buckets.git(repo, "diff")
+        gaps = buckets.i18n_gaps(repo, diff, buckets.git(repo, "ls-files").split())
+        self.assertEqual(len(gaps), 2, gaps)
+        self.assertIn('shows "Not found yet" but `app/localization/en_us.json` has no "NOT FOUND YET" entry', gaps[0])
+        self.assertIn('`app/localization/fr_ca.json` lacks 1 key(s) added to `app/localization/en_us.json`: "PICK A VENDOR"', gaps[1])
+
+
 class DoubleReview(unittest.TestCase):
     """Two machines review each round; a lone "undefined"-style claim while the checks pass is confirmed
     before it can send working code back for rewriting."""
