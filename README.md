@@ -167,7 +167,7 @@ Commands (in the chat, with or without `buckets` in front, or from the shell): `
 latest report), `merge` (fast-forward the latest run's branch into the branch it started from, then
 delete it), `discard` (delete it, after a y/N), `undo` (take back the last `merge`: the branch moves back and the work is kept as `buckets/…-undone`, or, if it was pushed or more commits came after, revert commits are added instead), `pr` (open a pull request for the latest run),
 `review` (Claude reviews the latest run's branch, reading the code around the change, ~$0.20–0.50),
-`setup`, `--doctor`.
+`setup`, `--doctor`, `live` (watch runs in the browser), `win …` (commands on the other machine).
 
 **When to use Claude.** Measured on a 2,000-file React Native app (field notes 17): local runs are
 reliable for questions, finding things, and changes in places they can find; they are not for
@@ -180,7 +180,8 @@ folder's `run.log`.
 
 Flags still work and override the guess: `--ask`, `--do`, `--plan-only`, `--pick C1 C2 --onto B`,
 `--like REF`, `--local`, `--claude`, `--model haiku|sonnet|opus`, `-y` (skip the 5-second
-pause), `-f request.md`, `-C <repo>`, `--doctor`.
+pause), `-f request.md`, `-C <repo>`, `--doctor`, `--time-limit MIN` (stop cleanly after MIN minutes),
+`--wait` (start when the run that's going finishes).
 
 Changes and cherry-picks need a clean working tree (buckets' own `.buckets/` notes don't count).
 They happen on a new `buckets/…` branch,
@@ -199,6 +200,64 @@ the checks run; if conflicts were resolved or checks broke, a review round check
 resolutions and fixes what broke. Commits already on the branch are skipped. Merge commits,
 binary-file conflicts and modify/delete conflicts are left for you, and the run stops at the
 first commit it can't apply (later ones may depend on it).
+
+## One run at a time
+
+Both machines' models serve one request at a time, and two runs in one repo would switch branches under
+each other. So a second buckets on the same machine stops and says what's running (`another buckets run
+is going: "…" in app, started 4m ago`); in the chat it asks whether to wait. `--wait` queues it: start
+three jobs with `--wait` and they run one after another, each with both machines to itself. `merge`,
+`discard` and `undo` wait while a run works in the same repo. The lock goes with the process, so a crash
+never leaves it stuck.
+
+## The other machine (`buckets win`)
+
+A small agent on the other machine (`tools/windows-agent.cjs`, Node and Git for Windows) takes commands
+from this one:
+
+```bash
+buckets win setup --to /Volumes/<share>/buckets-setup   # once: a token and the setup folder
+buckets win status                                      # CPU, memory, its model server, repo copies
+buckets win "nvidia-smi"                                # PowerShell there; --bash or --cmd
+buckets win --detach "C:\llama\start-buckets-server.ps1"  # servers and long jobs
+buckets win update                                      # push a new agent version; it restarts itself
+```
+
+On the other machine, once, as administrator: `powershell -ExecutionPolicy Bypass -File
+.\setup-buckets-agent.ps1` from that folder. It installs Node and Git if they're missing, starts the
+agent at login, opens its port to the local network only, and keeps the token readable by you only.
+Every request needs the token: keep the setup folder to yourself.
+
+It can also run checks in a copy of the repo there, kept in sync with git bundles (`"agent": {"checks":
+…}`): `"shadow"` runs them on both machines and logs any difference, `"split"` runs `"remote"` there and
+the rest here side by side, `"overflow"` does that only while this machine is busy and that one idle.
+Measured on the machines this was built on (field notes 30), checks there were 2.5–15 times slower and
+pushed the model out of memory, so overflow is the setting worth using there.
+
+## Watching it work (`buckets live`)
+
+Every run writes `events.jsonl` (each model session with its token counts, each tool, each step).
+`buckets live` serves `live.html` on <http://localhost:8765/>: the machines as neurons, each session a
+synapse that fires while it streams and leaves a memory mote. It follows the newest run and replays
+finished ones.
+
+## The regression suite
+
+`regress.py` replays real requests and checks what they produced, so a change to buckets is measured
+against the cases that already worked. A case is a JSON file: the repo, the commit it was verified on,
+the request (and follow-ups), and what the result must look like: files, text, line counts, where
+changes may land, commands that must pass, names an answer must give. Each case runs on a clone the suite
+owns; the repo itself is only read, and the suite stops if anything in it changed.
+
+```bash
+python3 regress.py --list
+python3 regress.py split 'merge-*' -n 3            # pass rates over three runs
+python3 regress.py --set coder.engine=native       # an A/B: the same cases with one setting changed
+python3 regress.py --summary                       # the latest suite against the one before
+```
+
+Cases come from `regress/` and `docs/private/regress/` (git-ignored, for a work repo's requests).
+Results and logs are in `~/.local/state/buckets-regress/`, with time per kind of model call.
 
 ## How the planner learns the code
 
@@ -568,6 +627,10 @@ e.g. `{"~/code/oss/*": {"mode": "local"}}`.
 
 ## Known limits (opencode 2.0.26, Ollama 0.40.x)
 
+- opencode takes its folder from `$PWD`, not from the folder it's started in, and knows a project by its
+  first commit. buckets sets both for every session (a clone or a second worktree would otherwise get
+  the original's edits). The native coder (`"coder": {"engine": "native"}`) doesn't use opencode at all.
+
 - `opencode run --format json` hangs, so the script reads plain output and judges the
   work from `git diff`.
 - `opencode run --agent X` ignores the agent's model, so the script always passes `-m`.
@@ -579,5 +642,5 @@ e.g. `{"~/code/oss/*": {"mode": "local"}}`.
 ## Tests
 
 ```bash
-python3 -m unittest -v test_buckets
+python3 -m unittest test_buckets test_regress
 ```
