@@ -4392,18 +4392,28 @@ class Buckets:
                 write(d)
                 notes.append(f"moved {', '.join(d['report']['shared'])} into {task['file']}")
                 kept_why = d["report"]["skipped"]
+                state = [n for n in d["report"]["shared"] if re.search(rf"(?m)^\s*(?:export\s+)?(?:let|var)\s+{re.escape(n)}\b",
+                                                                        d["files"].get(task["file"], ""))]
+                if state:
+                    notes.append(f"{', '.join(state)} is module state (a module-level `let`): it moved with everything that "
+                                 "assigns it, so each screen reads and writes it as before, but both variants now share one "
+                                 "copy (only matters if both are mounted at once; each app normally ships one variant)")
             else:
                 notes.append(f"top-level share not done ({d.get('error') or 'nothing could move'})")
         if inner:
             parents = {same[n]["parent"] for n in inner}
-            hook_file, hook = shared_hook_names(task["file"], a)
+            hook_file, hook = task["file"], shared_hook_names(task["file"], a)[1]  # in the shared file the request named
             d = ts_moves(self.repo, {"op": "share_hook", "files": [a, b], "function": parents.pop(), "names": inner,
                                      "into": hook_file, "name": hook}) if len(parents) == 1 else \
                 {"ok": False, "error": "the statements are in different functions"}
             if d.get("ok"):
                 write(d)
                 r = d["report"]
-                notes.append(f"moved {len(inner)} identical statements of the components into {hook} in {hook_file}; "
+                moved_names = r.get("names") or inner
+                if r.get("left"):
+                    notes.append(f"kept in each component (they depend on code that differs): {', '.join(r['left'][:10])}")
+                notes.append(f"moved {len(moved_names)} identical statements of the components ({', '.join(moved_names[:8])}) "
+                             f"into {hook} in {hook_file}; "
                              f"parameters: {', '.join(p['name'] for p in r['params']) or 'none'}; re-derived inside: "
                              f"{', '.join(r.get('rederived') or []) or 'nothing'}")
                 self.generated_lines = getattr(self, "generated_lines", set()) | {

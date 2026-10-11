@@ -1828,7 +1828,7 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
         with contextlib.redirect_stderr(io.StringIO()):
             got = b.code_task(task)
         self.assertEqual(got["status"], "done", got)
-        self.assertTrue((self.repo / "src/x/use-screen-shared.ts").is_file())
+        self.assertIn("export function useScreenShared(", (self.repo / "src/x/screen-shared.ts").read_text())  # in the named shared file
         bad = buckets.ts_moves(self.repo, {"op": "share_hook", "files": ["src/x/a/screen.tsx", "src/x/b/screen.tsx"], "function": "Screen",
                                            "names": ["onlyA"], "into": "src/x/use-other.ts", "name": "useOther"})
         self.assertFalse(bad["ok"])

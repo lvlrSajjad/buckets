@@ -190,6 +190,36 @@ function importsFor(sf, used, fromFile, toFile) {
   return lines;
 }
 
+// Import lines added to a file's text: names join an existing import of the same module (same
+// type-only-ness) instead of a second import line; anything else goes after the last import.
+function mergeImports(text, lines, fileName = 'x.tsx') {
+  let out = text;
+  for (const line of lines) {
+    const sf = ts.createSourceFile(fileName, out, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const add = ts.createSourceFile('l.ts', line, ts.ScriptTarget.Latest, true).statements[0];
+    if (!add || !ts.isImportDeclaration(add) || !add.importClause) continue;
+    const spec = add.moduleSpecifier.text;
+    const ac = add.importClause;
+    const addNamed = ac.namedBindings && ts.isNamedImports(ac.namedBindings) ? ac.namedBindings.elements.map((e) => e.getText()) : [];
+    const same = sf.statements.find((st) => ts.isImportDeclaration(st) && st.importClause && st.moduleSpecifier.text === spec
+      && !!st.importClause.isTypeOnly === !!ac.isTypeOnly && !(st.importClause.namedBindings && ts.isNamespaceImport(st.importClause.namedBindings))
+      && !(ac.namedBindings && ts.isNamespaceImport(ac.namedBindings)) && !(st.importClause.name && ac.name));
+    if (same) {
+      const sc = same.importClause;
+      const had = sc.namedBindings && ts.isNamedImports(sc.namedBindings) ? sc.namedBindings.elements.map((e) => e.getText(sf)) : [];
+      const named = [...had, ...addNamed.filter((n) => !had.includes(n))];
+      const def = sc.name ? sc.name.text : ac.name ? ac.name.text : '';
+      const parts = [def, named.length ? `{ ${named.join(', ')} }` : ''].filter(Boolean);
+      out = out.slice(0, same.getStart(sf)) + `import ${sc.isTypeOnly ? 'type ' : ''}${parts.join(', ')} from ${same.moduleSpecifier.getText(sf)}`
+        + out.slice(same.end);
+    } else {
+      const at = afterImports(sf);
+      out = out.slice(0, at) + line + '\n' + out.slice(at);
+    }
+  }
+  return out;
+}
+
 // Remove import specifiers nothing references any more (React stays: JSX may need it).
 function pruneImports(sf, stillUsed, edits) {
   for (const stmt of sf.statements) {
@@ -520,8 +550,7 @@ function analyze(sf, checker, relFile, fnName, select, target, hook) {
     edits.push(...unusedEdits);
     pruneImports(sf, stillUsed, edits);
     const names = [hook, ...sharedModule];
-    edits.push([afterImports(sf), afterImports(sf), `import { ${names.join(', ')} } from "${importPath(file, importPathTo)}"\n`]);
-    return applyEdits(text, edits);
+    return mergeImports(applyEdits(text, edits), [`import { ${names.join(', ')} } from "${importPath(file, importPathTo)}"`], file);
   };
   // Names a kept destructure set only for the moved code are now unused (lint errors): drop them,
   // and the whole statement when nothing is left and running it has no effect.
@@ -598,7 +627,7 @@ function extract() {
 function shareHook() {
   const [fa, fb] = input.files;
   const target = abs(input.into);
-  if (fs.existsSync(target)) throw new Error(`${input.into} already exists`);
+  const existing = fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : null;
   const { checker, sources: [A, B] } = program([fa, fb]);
   const fnB = input.function_b || input.function;
   // Each variant may have to keep some statements back (what's around them differs): share what both
@@ -639,9 +668,16 @@ function shareHook() {
   if (pa !== pb) throw new Error(`the hook would take different parameters in the two variants (${pa || 'none'} vs ${pb || 'none'})`);
   const returns = [...a.returns, ...b.returns.filter((r) => !a.returns.includes(r))];
   const exportNames = [...new Set([...a.sharedModule, ...b.sharedModule])];
-  const finalTarget = withJsxExtension(target, a.hasJsxMoved, a.notes);
+  const finalTarget = existing === null ? withJsxExtension(target, a.hasJsxMoved, a.notes) : target;
+  let hookFile = a.hookText(returns, exportNames);
+  if (existing !== null) {  // add to the shared file: its imports merged, the helpers and the hook after its code
+    const lines = hookFile.split('\n');
+    const imports = lines.filter((l) => l.startsWith('import ') && !l.includes(`"${importPath(target, target)}"`));
+    const rest = lines.filter((l) => !l.startsWith('import ')).join('\n').replace(/^\n+/, '');
+    hookFile = mergeImports(existing.replace(/\n*$/, '\n\n') + rest, imports, target);
+  }
   return {
-    files: { [fa]: a.fileText(finalTarget), [fb]: b.fileText(finalTarget), [rel(finalTarget)]: a.hookText(returns, exportNames) },
+    files: { [fa]: a.fileText(finalTarget), [fb]: b.fileText(finalTarget), [rel(finalTarget)]: hookFile },
     report: { ...a.report, returns, returns_a: a.returns, returns_b: b.returns, helpers_shared: exportNames,
               names, left: input.names.filter((n) => !names.includes(n)) },
   };
@@ -802,8 +838,9 @@ function share() {
     const stillUsed = new Set(keptRefs.filter(({ sym }) => imp.has(sym)).map(({ sym }) => imp.get(sym)));
     pruneImports(sf, stillUsed, edits);
     const needed = [...moving].filter((n) => keptRefs.some(({ node }) => node.text === n));
-    if (needed.length) edits.push([afterImports(sf), afterImports(sf), `import { ${needed.join(', ')} } from "${importPath(abs(file), into)}"\n`]);
-    files[file] = applyEdits(sf.text, edits);
+    files[file] = needed.length
+      ? mergeImports(applyEdits(sf.text, edits), [`import { ${needed.join(', ')} } from "${importPath(abs(file), into)}"`], file)
+      : applyEdits(sf.text, edits);
   }
   return { files, report: { shared: [...moving], skipped } };
 }
