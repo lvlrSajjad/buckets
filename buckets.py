@@ -2226,7 +2226,7 @@ def same_line(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().rstrip(";,").strip()
 
 
-def find_shortcuts(diff: str, allowed: list[str]) -> list[str]:
+def find_shortcuts(diff: str, allowed: list[str], generated: set | frozenset = frozenset()) -> list[str]:
     """Added lines that silence checks or skip tests instead of fixing the problem.
 
     Counted per file and pattern against the removed lines, so editing a line that already had
@@ -2253,6 +2253,15 @@ def find_shortcuts(diff: str, allowed: list[str]) -> list[str]:
                 removed[(file, key)] = removed.get((file, key), 0) + 1
                 k = (key, same_line(line[1:]))
                 moved[k] = moved.get(k, 0) + 1
+    # Across the whole diff: when the removed lines held at least as many of a pattern as the added
+    # ones, the change moved or rewrapped them (a formatter joins lines, a move adds `export`); only
+    # the excess can be new.
+    # `generated`: lines buckets wrote itself from existing types (a moved hook's signature).
+    diff = "\n".join(l for l in diff.splitlines() if not (l.startswith("+") and same_line(l[1:]) in generated))
+    plus = "\n".join(l[1:] for l in diff.splitlines() if l.startswith("+") and not l.startswith("+++"))
+    minus = "\n".join(l[1:] for l in diff.splitlines() if l.startswith("-") and not l.startswith("---"))
+    excess = {key: len(re.findall(pattern, plus)) - len(re.findall(pattern, minus))
+              for key, (pattern, _) in SHORTCUTS.items()}
     hits = []
     for (file, key), lines in added.items():
         fresh = []
@@ -2263,7 +2272,9 @@ def find_shortcuts(diff: str, allowed: list[str]) -> list[str]:
             else:
                 fresh.append(text)
         for text in fresh[removed.get((file, key), 0):]:
-            hits.append(f"`{file}` {SHORTCUTS[key][1]}: {text[:120]}")
+            if excess[key] > 0:
+                excess[key] -= len(re.findall(SHORTCUTS[key][0], text)) or 1
+                hits.append(f"`{file}` {SHORTCUTS[key][1]}: {text[:120]}")
     return hits
 
 
@@ -4620,9 +4631,7 @@ class Buckets:
                 self.escalate_to_mac(f"round {rnd} made no progress on {', '.join(sorted(failing))}")
             failing_before = failing
             shortcuts = find_shortcuts(git(repo, "diff", "-U0", f"{shortcut_base or base}..HEAD"),
-                                       self.rc.get("allow_shortcuts", []))
-            generated = getattr(self, "generated_lines", set())
-            shortcuts = [h for h in shortcuts if not any(g in same_line(h) for g in generated)]
+                                       self.rc.get("allow_shortcuts", []), getattr(self, "generated_lines", set()))
             if shortcuts:
                 say(f"  {warn()} {len(shortcuts)} shortcut(s) like `any` or skipped tests were added (see the report)")
             api = self.api_impact(base)

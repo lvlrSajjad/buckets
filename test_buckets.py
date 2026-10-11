@@ -254,6 +254,9 @@ class Shortcuts(unittest.TestCase):
         hits = buckets.find_shortcuts(diff, [])
         self.assertEqual(len(hits), 1)
         self.assertIn("const z = w as any", hits[0])
+        joined = ("--- a/src/screen.tsx\n+++ b/src/screen.tsx\n-const f = (\n-  q: Q,\n-  a: any,\n-) => {\n"
+                  "--- /dev/null\n+++ b/src/use-screen.ts\n+export const f = (q: Q, a: any) => {\n")
+        self.assertEqual(buckets.find_shortcuts(joined, []), [])           # a formatter joined it; `export` added
 
     def test_flags_added_lines_only(self):
         hits = buckets.find_shortcuts(self.DIFF, [])
