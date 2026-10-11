@@ -601,8 +601,28 @@ function shareHook() {
   if (fs.existsSync(target)) throw new Error(`${input.into} already exists`);
   const { checker, sources: [A, B] } = program([fa, fb]);
   const fnB = input.function_b || input.function;
-  const a = analyze(A, checker, fa, input.function, input.names, target, input.name);
-  const b = analyze(B, checker, fb, fnB, input.names, target, input.name);
+  // Each variant may have to keep some statements back (what's around them differs): share what both
+  // can move, shrinking the set until both move the same statements.
+  let names = [...input.names];
+  let a, b;
+  const movedNames = (x) => new Set(x.movedList.flatMap((st) => declaredBy(st).map((id) => id.text)));
+  for (let round = 0; round < 10; round++) {
+    a = analyze(A, checker, fa, input.function, names, target, input.name);
+    b = analyze(B, checker, fb, fnB, names, target, input.name);
+    const ma = movedNames(a), mb = movedNames(b);
+    // A name counts only when the statement declaring it is the same in both (one destructure can
+    // declare several names, and the variants' may differ).
+    const stmtText = (x, sf) => {
+      const m = new Map();
+      for (const st of x.movedList) for (const id of declaredBy(st)) m.set(id.text, normalized(st, sf));
+      return m;
+    };
+    const ta = stmtText(a, A), tb = stmtText(b, B);
+    const both = names.filter((n) => ma.has(n) && mb.has(n) && ta.get(n) === tb.get(n));
+    if (both.length === names.length) break;
+    if (!both.length) throw new Error('none of these statements can move in both variants');
+    names = both;
+  }
   const key = (list, sf) => list.map((s) => normalized(s, sf));
   const ka = key(a.movedList, A), kb = key(b.movedList, B);
   if (ka.length !== kb.length || ka.some((x, i) => x !== kb[i])) {
@@ -622,7 +642,8 @@ function shareHook() {
   const finalTarget = withJsxExtension(target, a.hasJsxMoved, a.notes);
   return {
     files: { [fa]: a.fileText(finalTarget), [fb]: b.fileText(finalTarget), [rel(finalTarget)]: a.hookText(returns, exportNames) },
-    report: { ...a.report, returns, returns_a: a.returns, returns_b: b.returns, helpers_shared: exportNames },
+    report: { ...a.report, returns, returns_a: a.returns, returns_b: b.returns, helpers_shared: exportNames,
+              names, left: input.names.filter((n) => !names.includes(n)) },
   };
 }
 
@@ -717,11 +738,12 @@ function share() {
     changed = false;
     for (const name of [...moving]) {
       const sa = topDecl(A, name), sb = topDecl(B, name);
+      // Module state is fine to move when everything that assigns it moves too.
       const assignedOutside = (sf, st) => ts.isVariableStatement(st) && !(st.declarationList.flags & ts.NodeFlags.Const)
         && declaredBy(st).some((id) => {
           const sym = checker.getSymbolAtLocation(id);
-          return sf.statements.some((other) => other !== st && references(checker, other)
-            .some(({ node, sym: s2 }) => s2 === sym && isAssigned(node)));
+          return sf.statements.some((other) => other !== st && !declaredBy(other).some((d) => moving.has(d.text))
+            && references(checker, other).some(({ node, sym: s2 }) => s2 === sym && isAssigned(node)));
         });
       const why = !sa || !sb ? 'not a module-level declaration in both files'
         : assignedOutside(A, sa) || assignedOutside(B, sb) ? 'module state the screen assigns to (an import can\'t be assigned)'
