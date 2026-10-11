@@ -534,7 +534,16 @@ statement: 4 of 16; values from `useStores()` and store destructures are re-deri
 passed); destructured names the move left unused, and their imports, removed. Planning fell from 3–6 min
 to 2m 54s once long files a move covers were shown as outlines instead of read.
 
-inventory-details, ladder step 2, live: run 1's planner wrote the shared file into a task's edits (retyping), which the guard didn't swap because the task had edits; fixed (a task writing the move's target is swapped either way). **Run 2: 4m 52s, both reviews done**; verified: 142 duplicate lines out of the screens into a 72-line shared file, `tsc`, eslint, 1,545 tests pass. The three module-level `let`s the screens assign stay. Questions for the owner: `statelessOutput` is now one
+inventory-details, ladder step 2, live: run 1's planner wrote the shared file into a task's edits (retyping), which the guard didn't swap because the task had edits; fixed (a task writing the move's target is swapped either way). **Run 2: 4m 52s, both reviews done**; verified: 142 duplicate lines out of the screens into a 72-line shared file, `tsc`, eslint, 1,545 tests pass. The three module-level `let`s the screens assign stay.
+
+create-invoice, ladder step 3 (the pair Claude struggles with; the hook is only 52% alike), live: run 1's
+reviews disagreed: Windows objected to the shared module refs, a "redundant" `useStores()` and a "hook
+ordering risk" ("while valid"); none a bug, but any issue won. Fixed: when every check passes and one
+reviewer objects, the other weighs each issue (style and hypothetical risks don't count, nor claims the
+checks rule out). **Run 2: 5m 05s, both reviews done**; verified: 117 duplicate lines out of the two hooks into
+a 52-line shared file (10 identical statements in a shared hook; its ten identical number "helpers" are
+module `let`s the hook assigns, rightly kept), `tsc`, eslint, 1,545 tests pass. What's left in this pair is
+near copies and real differences: the model's part (next). Questions for the owner: `statelessOutput` is now one
 variable for both variants (each app ships one, so nothing changes per app); and the 12 rfp statements that
 differ slightly are where the model's help is needed next (make them identical, then share).
 
