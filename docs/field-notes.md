@@ -572,6 +572,8 @@ are set by then; values set after the return are never re-derived inside the hoo
 refuses the hook with the reason ("it would need `addressName`, set after the early return at line 256") and
 does the safe part (the unifies and `FULL`), with every check passing.
 
+Runs 3–4: the planner chose `unify` itself but with broken paths (now filled from the other variant), the share ran before the unifies (now always after), review follow-ups weren't filled (now are). **Run 4: 4m 43s, both reviews done**; verified: `onAddressPress` unified to the null-safe version, `openStatusChangeModal` to one quote style, `FULL` shared; the two unified functions stay in each screen (the hook would need `addressName`, set after the early return); `tsc`, eslint, 1,545 tests pass.
+
 Lessons: the local model is good at the judgment (incidental vs real) and poor at repairing a structural
 mistake across rounds (each fix introduced the next problem); the tool has to refuse what it can't do
 safely rather than leave it to follow-up rounds.
