@@ -543,7 +543,15 @@ reviewer objects, the other weighs each issue (style and hypothetical risks don'
 checks rule out). **Run 2: 5m 05s, both reviews done**; verified: 117 duplicate lines out of the two hooks into
 a 52-line shared file (10 identical statements in a shared hook; its ten identical number "helpers" are
 module `let`s the hook assigns, rightly kept), `tsc`, eslint, 1,545 tests pass. What's left in this pair is
-near copies and real differences: the model's part (next). Questions for the owner: `statelessOutput` is now one
+near copies and real differences: the model's part (next).
+
+Survey of every variant pair's small near copies (`compare`, diff ≤ 4 lines): most are **real differences**
+that must stay apart (filter heights 88 vs 138 and 100 vs 150; `isInternalTech &&` on a permission check;
+`createWorkOrder(true)` vs `createWorkOrder()`; extra branches for copied work orders); some are
+**incidental** (`Linking.openURL(url ?? "")` vs `(url)`, `invoice?.id ?? -1`, `useCallback` vs a plain
+function, optional chaining). Telling them apart is the model's part; `unify` then copies the chosen
+version exactly. Found on the way, for the owner: debug logging left in the techs variants
+(`console.log("handleNoWarrantyChange", …)` in create-invoice, `'[CSR-DEBUG] …'` in create-service-request-3). Questions for the owner: `statelessOutput` is now one
 variable for both variants (each app ships one, so nothing changes per app); and the 12 rfp statements that
 differ slightly are where the model's help is needed next (make them identical, then share).
 
