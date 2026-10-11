@@ -534,8 +534,7 @@ statement: 4 of 16; values from `useStores()` and store destructures are re-deri
 passed); destructured names the move left unused, and their imports, removed. Planning fell from 3–6 min
 to 2m 54s once long files a move covers were shown as outlines instead of read.
 
-inventory-details by hand: 4 top-level + 12 inner statements shared, 110 lines out, all checks pass; the
-three module-level `let`s the screens assign stay. Questions for the owner: `statelessOutput` is now one
+inventory-details, ladder step 2, live: run 1's planner wrote the shared file into a task's edits (retyping), which the guard didn't swap because the task had edits; fixed (a task writing the move's target is swapped either way). **Run 2: 4m 52s, both reviews done**; verified: 142 duplicate lines out of the screens into a 72-line shared file, `tsc`, eslint, 1,545 tests pass. The three module-level `let`s the screens assign stay. Questions for the owner: `statelessOutput` is now one
 variable for both variants (each app ships one, so nothing changes per app); and the 12 rfp statements that
 differ slightly are where the model's help is needed next (make them identical, then share).
 

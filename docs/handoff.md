@@ -39,10 +39,13 @@ itself was left exactly as found (no branches, no `.buckets/`).
    share), task actions `move` and `share`, a dry-run suggestion in the planner's facts, a guard that swaps a
    retyping plan for the move, redundant edit tasks next to a move dropped. The questionnaire split: 20 min
    and nothing (retyping) → **5m 14s, correct**.
-2c. **Merge ecotrak / ecotrak-techs variants** (in progress): `compare` facts for merge/share requests, `share`
-   suggested with the identical top-level declarations. Ladder: rfp-details (running live) → inventory-details →
-   create-invoice (shared parts only). Next pieces: near copies (the model makes them identical from the small
-   diff, then `share`), identical code inside the component (extract to a shared hook first), JSX sections.
+2c. **Merge ecotrak / ecotrak-techs variants** (field notes 23): `share` moves identical top-level declarations
+   into the named shared file and identical statements inside both components into a shared hook in the same
+   file (re-deriving `useStores()`-style values, props typed from the component's props type, unused names and
+   imports cleaned). Live: rfp-details 5m 38s, inventory-details 4m 52s, both verified. create-invoice: running
+   live; by hand 10 inner statements shared, its number "helpers" are module `let`s the hook assigns (rightly
+   kept). Next: near copies (the model makes them identical from the small diff, then `share`), JSX sections
+   → components, whole-screen merges behind a `variant` prop.
 2d. **Owner's job list** (docs/roadmap.md, "Where it has to help"). Done tonight: AGENTS.md rule digest in every
    plan and review; locale-entry check for reviews (10 real gaps found in 60 ecotrak-mobile commits); red CI
    (failed GitHub Actions log as check output). Next: PR conflicts on PR branches, dependency batches,
