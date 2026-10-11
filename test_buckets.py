@@ -2182,6 +2182,33 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
         self.assertTrue(all("behaves the same on" in e for e in d["report"]["equivalent"]))
         self.assertIn('import { toHMS } from "./utils/time"', d["files"]["src/a.ts"])
 
+    def test_relocate_deletes_an_emptied_source_and_reviews_hear_usage(self):
+        files = {"src/time/helper.ts": "export const fmt = (s: string): string => s.trim()\n",
+                 "src/a.ts": "const fmt = (s: string): string => (s ? s.trim() : '')\nexport const A = () => fmt(' x ')\n",
+                 "src/utils/dates.ts": "export const today = () => 1\n"}
+        for f, t in files.items():
+            (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / f).write_text(t)
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "h"], cwd=self.repo, check=True)
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        b = buckets.Buckets(cfg, self.repo, "Move `fmt` from src/time/helper.ts into src/utils/dates.ts, including copies")
+        with contextlib.redirect_stderr(io.StringIO()):
+            rh = b.relocate_hint()
+            usage = b.usage_before_text()
+            wrong = b.fill_moves({"tasks": [{"id": "T2", "file": "src/a.ts", "action": "dedupe", "select": ["fmt"]}]})
+            got = b.code_task(buckets.validate_tasks([dict(rh["task"])], self.repo, 8, "T")[0])
+        self.assertIn("the local copy in src/a.ts", usage)
+        self.assertIn("had no users", usage)
+        self.assertEqual(wrong["tasks"][0]["file"], "src/utils/dates.ts")            # aimed at the shared one
+        self.assertIn("was deleted", got["note"])
+        self.assertFalse((self.repo / "src/time/helper.ts").exists())
+        delete = buckets.validate_tasks([{"id": "T3", "file": "src/a.ts", "action": "delete", "instructions": "",
+                                          "done_when": "", "edits": []}], self.repo, 8, "T")[0]
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(b.code_task(delete)["status"], "done")
+        self.assertFalse((self.repo / "src/a.ts").exists())
+
     def test_shared_hook_names(self):
         self.assertEqual(buckets.shared_hook_names("a/b/billing-shared.tsx", "a/b/x/use-billing-screen.tsx"),
                          ("a/b/use-billing-screen-shared.ts", "useBillingScreenShared"))

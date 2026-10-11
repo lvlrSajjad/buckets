@@ -3660,6 +3660,9 @@ class Buckets:
                     t[k] = t.get(k) or hint["task"][k]
                 t["select"] = t.get("select") or ["logic"]
         rh = self.relocate_hint()
+        for t in data.get("tasks") or [] if rh else []:  # a dedupe aimed at a copy instead of the shared one
+            if isinstance(t, dict) and t.get("action") == "dedupe" and clean_path(str(t.get("file", ""))) in (rh.get("copies") or []):
+                t["file"], t["from"] = rh["task"]["into"], []
         for t in data.get("tasks") or [] if rh else []:
             if isinstance(t, dict) and t.get("action") in ("relocate", "dedupe"):
                 h = rh["task"] if t["action"] == "relocate" else (rh.get("dedupe") or {})
@@ -3667,7 +3670,8 @@ class Buckets:
                     if h.get(k) and not t.get(k):
                         t[k] = h[k]
         for t in data.get("tasks") or []:  # a unify's source named only in its instructions
-            if isinstance(t, dict) and t.get("action") == "unify" and not t.get("from"):
+            src = [clean_path(str(x)).lstrip("/") for x in (t.get("from") or []) if isinstance(t, dict)]
+            if isinstance(t, dict) and t.get("action") == "unify" and not any(x and (self.repo / x).is_file() for x in src):
                 f = clean_path(str(t.get("file", ""))).lstrip("/")
                 named = [p for p in paths_in_text(str(t.get("instructions", "")), self.index.files) if p != f]
                 if named:
@@ -4517,6 +4521,12 @@ class Buckets:
         self.involved = list(dict.fromkeys(getattr(self, "involved", []) + [task["file"]]))
         if task["action"] in ("move", "share", "unify", "relocate", "dedupe"):
             return self.apply_move(task, commit)
+        if task["action"] == "delete":  # the coder can't delete files; nothing to decide here anyway
+            git(self.repo, "rm", "-q", "--", task["file"])
+            if commit:
+                git(self.repo, "commit", "--no-verify", "-q", "-m", f"buckets {task['id']}: delete {task['file']}")
+            say(f"  {ok()} {task['id']} deleted {task['file']}")
+            return {**task, "status": "done", "note": f"DONE: deleted {task['file']}"}
         if task.get("edits"):
             done = self.apply_planned(task, commit)
             if done:
@@ -4625,12 +4635,19 @@ class Buckets:
                     path.write_text(text)
                     written.append(f)
             r = d["report"]
+            src = self.repo / task["file"]
+            left = re.sub(r"(?m)^\s*(import\b.*|//.*|/\*.*|\*.*|)$", "", src.read_text()).strip() if src.exists() else ""
+            if not left and not self.index.importers([task["file"]]).get(task["file"]):
+                src.unlink()
+                written.append(task["file"])
+                r["deleted_source"] = True
             unused = not r["importers_updated"] and not r["still_used_here"]
             note = ((f"nothing used {', '.join(r['moved'])} from {task['file']} before the move (no importers, no uses there), so "
                      "its old version mattered nowhere; " if unused else "")
                     + f"moved {', '.join(r['moved'])} from {task['file']} into {task['into']}; importers updated: "
                     f"{len(r['importers_updated'])}" + (f" ({', '.join(r['importers_updated'][:6])})" if r["importers_updated"] else "")
-                    + (f"; left for you: {'; '.join(r['left'])}" if r["left"] else ""))
+                    + (f"; left for you: {'; '.join(r['left'])}" if r["left"] else "")
+                    + (f"; {task['file']} was left empty and nothing imports it, so it was deleted" if r.get("deleted_source") else ""))
             self.involved = list(dict.fromkeys(self.involved + written))
             if commit:
                 git(self.repo, "add", "-A", "--", *written)
@@ -4993,7 +5010,8 @@ class Buckets:
             checks="\n".join(chk) or "(no checks configured)",
             shortcuts=("\nShortcuts found in the diff (must be replaced with real fixes):\n"
                        + "\n".join(f"- {h}" for h in shortcuts) + "\n") if shortcuts else "",
-            impact=impact_text(api) + self.phrases_now(base) + self.removed_copies_text(base) + self.weak_tests_text(base) + self.i18n_text(base)
+            impact=impact_text(api) + self.phrases_now(base) + self.usage_before_text() + self.removed_copies_text(base)
+                   + self.weak_tests_text(base) + self.i18n_text(base)
                    + self.changed_code(base),
             diff=self.diff_text(base), rules=TASK_RULES.format(max_tasks=self.cfg["max_tasks"]),
             agent_rules=self.agent_rules_text(),
@@ -5036,6 +5054,23 @@ class Buckets:
         rules = agent_rules(self.repo)
         return ("- The repo's own rules (from its agent doc). The change must follow every one that applies; "
                 "list each it breaks as an issue, naming the rule:\n" + rules + "\n") if rules else ""
+
+    def usage_before_text(self) -> str:
+        """For a relocate: how the app used the moved functions before this change, so a reviewer judges
+        behaviour by what the app actually ran, not by one copy."""
+        rh = self.relocate_hint() if hasattr(self, "_relocate_hint") else None
+        if not rh:
+            return ""
+        names, r = rh["task"]["select"], rh["report"]
+        users = [f"its importers: {', '.join(r['importers_updated'])}"] if r["importers_updated"] else []
+        if r.get("still_used_here"):
+            users.append(f"{rh['task']['file']} itself")
+        users += [f"the local copy in {c}" for c in rh.get("copies") or []]
+        return (f"\nBefore this change, the app used {', '.join(f'`{n}`' for n in names)} through: "
+                + ("; ".join(users) if users else "nothing")
+                + (f". The version in {rh['task']['file']} itself had no users, so changing it to match the copies the app ran "
+                   "keeps the app's behaviour." if not r["importers_updated"] and not r.get("still_used_here") and rh.get("copies") else ".")
+                + "\n")
 
     def removed_copies_text(self, base: str) -> str:
         """Copies a dedupe found to differ from the shared version that the change removed anyway: their
