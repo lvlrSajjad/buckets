@@ -373,7 +373,7 @@ throwaway `buckets/…` branch; `main` was never touched.
 | "Does order details have a created date / created at field?" | local | 1m 55s → **1m 45s** | wrong files, "can't confirm" → **correct** (`details-screen.ts:108 a date field`) after the request-words search |
 | Hide 2 rows, vague ("the order details") | local | 13m 17s → 11m 12s → **4m 55s** | detour via an invented file → half-done while the review said done → **clean 24-line diff** |
 | Hide 2 rows, files named | local | 5m 01s | correct (older code, without the coder focus fixes) |
-| 10 `react-hooks/exhaustive-deps` warnings (`time-track`) | local | 15 min cap | 10 → 1 warnings, but **changed behaviour** (an on-mount fetch now re-runs on date changes; an effect resets on data loads). Not mergeable |
+| 10 `react-hooks/exhaustive-deps` warnings (one module) | local | 15 min cap | 10 → 1 warnings, but **changed behaviour** (an on-mount fetch now re-runs on date changes; an effect resets on data loads). Not mergeable |
 | "Show a date field as a row in order details, both apps" | local | 20 min cap | not done: invented a third hook file, type and import errors, the Mac advisor too slow to help |
 | Same | **Claude** (Sonnet plans and reviews) | **1m 59s, $0.51** | done; reused `utils/details-dates.ts` (next to `formatWorkOrderCompletedDate`), all 3 edits applied with no coder |
 | "Pick a search param missing from the filters and add it" | **Claude** | 8m 11s, $1.19 | works end to end (Project), **but slot 32 collides with another filter** (`filter-sp-name-filter.ts`); every check passed |
