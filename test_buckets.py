@@ -2288,15 +2288,15 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
             buckets.validate_tasks([{**ch["task"], "name": "lowercase"}], self.repo, 8, "T")
 
     def test_the_component_hint_reads_the_prose_and_tolerates_misspelled_helpers(self):
-        screen = ("export const S = () => {\n  const renderAssessmentAssetCard = () => <i />\n  const renderRefrenceImage = () => <b />\n"
-                  "  return <div>{renderAssessmentAssetCard()}{renderRefrenceImage()}</div>\n}\n")
-        (self.repo / "src/assessment-screen.tsx").write_text(screen)
+        screen = ("export const S = () => {\n  const renderOrderSummaryCard = () => <i />\n  const renderProfilPicture = () => <b />\n"
+                  "  return <div>{renderOrderSummaryCard()}{renderProfilPicture()}</div>\n}\n")
+        (self.repo / "src/order-screen.tsx").write_text(screen)
         commit_all(self.repo, "screen")
         cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
-        b = buckets.Buckets(cfg, self.repo, "Turn the reference image part of src/assessment-screen.tsx into a ReferenceImage component")
+        b = buckets.Buckets(cfg, self.repo, "Turn the profile picture part of src/order-screen.tsx into a ProfilePicture component")
         with contextlib.redirect_stderr(io.StringIO()):
             ch = b.component_hint()
-        self.assertEqual(ch["task"]["select"], ["renderRefrenceImage"])
+        self.assertEqual(ch["task"]["select"], ["renderProfilPicture"])
 
     def test_shared_hook_names(self):
         self.assertEqual(buckets.shared_hook_names("a/b/billing-shared.tsx", "a/b/x/use-billing-screen.tsx"),
