@@ -2943,9 +2943,14 @@ def validate_move(t: dict, f: str, repo: Path, task_id: str) -> dict:
             v = re.sub(r"^\s*(?:default|value|defaults? to|=)\s*[:=]?\s*", "", v.strip(), flags=re.I).strip()
             m = re.fullmatch(r"\{(.*)\}", v, re.S)
             return m.group(1).strip() if m and not re.search(r"[:,]|\.\.\.", m.group(1)) else v
-        return {**base, "file": f, "where": where,
-                "param": {k: (unbrace(str(param[k])) if k in ("default", "value") else str(param[k]).strip())
-                          for k in ("name", "type", "default", "value") if param.get(k) not in (None, "")}}
+        out = {k: (unbrace(str(param[k])) if k in ("default", "value") else str(param[k]).strip())
+               for k in ("name", "type", "default", "value") if param.get(k) not in (None, "")}
+        for k in ("default", "value"):  # "number = 2000", "duration = 2000": the planner repeating the name or type
+            if k in out:
+                m = re.fullmatch(r"([A-Za-z_$][\w$]*)\s*(?::\s*[^=]+)?=\s*(.+)", out[k], re.S)
+                if m and m.group(1) in (out.get("name"), out.get("type"), "number", "string", "boolean"):
+                    out[k] = m.group(2).strip()
+        return {**base, "file": f, "where": where, "param": out}
     if t["action"] == "dedupe":
         copies = [inside(x) for x in t.get("from") or [] if (repo / clean_path(str(x))).is_file()]
         if not f.endswith(MOVABLE) or not select:  # the file may come from a relocate earlier in the plan
