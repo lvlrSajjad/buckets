@@ -1566,6 +1566,127 @@ class DoubleReview(unittest.TestCase):
         self.assertNotIn("test_value", found)
 
 
+class Moves(unittest.TestCase):
+    """Mechanical moves: the code moves exactly; parameters, returns, helpers and imports come from
+    TypeScript's scoping."""
+    SCREEN = """import React, { useEffect, useState } from "react"
+import { Text } from "./ui"
+import { fetchThing, formatThing } from "./api"
+
+const clean = (s: string) => s.trim()
+const label = (s: string) => `[${s}]`
+
+export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
+  const [thing, setThing] = useState<string>("")
+  // load once per id
+  useEffect(() => {
+    fetchThing(id).then((t) => setThing(clean(t)))
+  }, [id])
+  const onSave = () => setThing(label(thing))
+  const renderTitle = () => <Text>{label(title)}</Text>
+  const late = 3
+  const usesLate = () => late + 1
+
+  return (
+    <>
+      {renderTitle()}
+      <Text onPress={onSave}>{formatThing(thing)}</Text>
+    </>
+  )
+}
+"""
+
+    def setUp(self):
+        if not (TS_PKG.exists() and shutil.which("node")):
+            self.skipTest("needs node and a typescript package")
+        self.repo = make_repo({"src/thing-screen.tsx": self.SCREEN, "src/ui.tsx": "export const Text = (p: any) => null\n",
+                               "src/api.ts": "export const fetchThing = async (id: number) => ''\nexport const formatThing = (s: string) => s\n",
+                               "tsconfig.json": '{"compilerOptions": {"jsx": "react-jsx", "strict": true, "noEmit": true, "skipLibCheck": true}}'})
+        (self.repo / "node_modules").mkdir()
+        (self.repo / "node_modules/typescript").symlink_to(TS_PKG)
+        (self.repo / ".git/info/exclude").write_text("node_modules\n")
+
+    def test_extract_moves_the_logic_into_a_hook(self):
+        d = buckets.ts_moves(self.repo, {"op": "extract", "file": "src/thing-screen.tsx", "function": "ThingScreen",
+                                         "select": "logic", "into": "src/use-thing.ts", "name": "useThing"})
+        self.assertTrue(d["ok"], d)
+        hook, screen = d["files"]["src/use-thing.ts"], d["files"]["src/thing-screen.tsx"]
+        r = d["report"]
+        self.assertEqual([p["name"] for p in r["params"]], ["id"])          # title is only used by what stays
+        self.assertEqual(r["returns"], ["thing", "onSave"])                  # setThing isn't used outside
+        self.assertEqual(r["helpers_moved"], ["clean", "label"])
+        self.assertEqual(r["helpers_shared"], ["label"])                     # the render helper still uses it
+        self.assertIn("export function useThing({ id }: { id: number }) {", hook)
+        self.assertIn("  // load once per id\n  useEffect(() => {\n    fetchThing(id).then((t) => setThing(clean(t)))\n  }, [id])\n", hook)
+        self.assertIn('import { useEffect, useState } from "react"', hook)
+        self.assertIn('import { fetchThing } from "./api"', hook)
+        self.assertIn("export const label = ", hook)
+        self.assertNotIn("export const clean", hook)
+        self.assertIn("  const { thing, onSave } = useThing({ id })\n  const renderTitle", screen)
+        self.assertIn('import { useThing, label } from "./use-thing"', screen)
+        self.assertIn('import { formatThing } from "./api"', screen)          # fetchThing went with the logic
+        self.assertNotIn("useEffect", screen)
+        self.assertNotIn("const clean", screen)
+        self.assertIn("const late = 3", hook)                                  # pure logic moves too...
+        self.assertNotIn("usesLate", screen)
+
+    def test_a_statement_that_needs_what_stays_after_the_call_stays(self):
+        src = self.SCREEN.replace("  const late = 3\n", "").replace("  return (", "  const late = renderTitle() ? 3 : 4\n\n  return (")
+        (self.repo / "src/thing-screen.tsx").write_text(src)
+        d = buckets.ts_moves(self.repo, {"op": "extract", "file": "src/thing-screen.tsx", "function": "ThingScreen",
+                                         "select": "logic", "into": "src/use-thing.ts", "name": "useThing"})
+        self.assertTrue(d["ok"], d)
+        self.assertIn("const usesLate = () => late + 1", d["files"]["src/thing-screen.tsx"])
+        self.assertTrue(any("usesLate" in n for n in d["report"]["notes"]))
+
+    def test_move_task_through_buckets(self):
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        b = buckets.Buckets(cfg, self.repo, "split the thing screen")
+        task = buckets.validate_tasks([{"id": "T1", "file": "src/thing-screen.tsx", "action": "move", "where": "ThingScreen",
+                                        "into": "src/use-thing.ts", "name": "useThing", "select": ["logic"],
+                                        "instructions": "", "done_when": "", "edits": []}], self.repo, 8, "T")[0]
+        self.assertEqual(task["select"], "logic")
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = b.code_task(task)
+        self.assertEqual(got["status"], "done", got)
+        self.assertIn("returns 2 values", got["note"])
+        self.assertTrue((self.repo / "src/use-thing.ts").is_file())
+        self.assertIn("useThing", buckets.git(self.repo, "log", "-1", "--format=%B"))
+        self.assertEqual(buckets.git(self.repo, "status", "--porcelain").strip(), "")
+
+    def test_share_and_compare(self):
+        a = 'import { fmt } from "../util"\n\nconst same = (x: number) => fmt(x * 2)\nconst diff = 1\n\nexport const A = () => same(diff)\n'
+        b2 = 'import { fmt } from "../util"\n\nconst same = (x: number) =>\n  fmt(x * 2)\nconst diff = 2\n\nexport const B = () => same(diff)\n'
+        for f, t in {"src/a/screen.ts": a, "src/b/screen.ts": b2, "src/util.ts": "export const fmt = (n: number) => `${n}`\n"}.items():
+            (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / f).write_text(t)
+        c = buckets.ts_moves(self.repo, {"op": "compare", "a": "src/a/screen.ts", "b": "src/b/screen.ts"})
+        status = {p["name"]: p["status"] for p in c["pairs"]}
+        self.assertEqual(status["same"], "identical")                          # formatting doesn't count
+        self.assertEqual(status["diff"], "near")                               # 1 vs 2: a near copy
+        self.assertEqual((status["A"], status["B"]), ("only_a", "only_b"))
+        d = buckets.ts_moves(self.repo, {"op": "share", "files": ["src/a/screen.ts", "src/b/screen.ts"],
+                                         "names": ["same", "diff"], "into": "src/shared.ts"})
+        self.assertTrue(d["ok"], d)
+        self.assertEqual(d["report"]["shared"], ["same"])
+        self.assertEqual(d["report"]["skipped"][0]["name"], "diff")
+        self.assertIn('import { fmt } from "./util"', d["files"]["src/shared.ts"])
+        self.assertIn("export const same", d["files"]["src/shared.ts"])
+        for f in ("src/a/screen.ts", "src/b/screen.ts"):
+            self.assertIn('import { same } from "../shared"', d["files"][f])
+            self.assertNotIn("fmt", d["files"][f])                             # its only user moved out
+
+    def test_validation(self):
+        bad = {"id": "T1", "file": "src/thing-screen.tsx", "action": "move", "where": "ThingScreen", "into": "src/ui.tsx",
+               "name": "useThing", "select": [], "instructions": "", "done_when": "", "edits": []}
+        with self.assertRaisesRegex(ValueError, "must be a new"):
+            buckets.validate_tasks([bad], self.repo, 8, "T")
+        with self.assertRaisesRegex(ValueError, "TypeScript or JavaScript"):
+            buckets.validate_tasks([{**bad, "file": "README.md", "into": "src/x.ts"}], self.repo, 8, "T")
+        with self.assertRaisesRegex(ValueError, "share"):
+            buckets.validate_tasks([{**bad, "action": "share", "from": ["src/ui.tsx"], "select": ["x"]}], self.repo, 8, "T")
+
+
 class Offload(unittest.TestCase):
     MODELS = {"planner": {"model": "advisor-m"}, "reader": {"model": "reader-m"},
               "thinker": {"model": "thinker-m", "opencode_model": "prov/thinker-m"},

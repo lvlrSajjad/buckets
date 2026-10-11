@@ -3,6 +3,30 @@
 What's left, roughly in the order I'd do it, with why and how big. Measured results and the history
 behind these are in [field-notes.md](field-notes.md).
 
+## Where it has to help (the owner's list, 2026-10-11)
+
+What the owner uses Claude Code for, unprioritized, and where buckets stands on each:
+
+| Job | buckets today | Next |
+|---|---|---|
+| Complex git: cherry-picks, PRs, branch management | git chores in chat, cherry-pick mode with conflict resolution, `pr` | rebase/merge of PR branches |
+| Refactors: split big files, duplicated code → functions/components used everywhere, change a function without breaking the app, join the diverged ecotrak / ecotrak-techs files | API-change impact (callers not updated) | **mechanical `move` (extract to hook) and `share` (identical code to one file)**, variant `compare` facts; LSP references/rename |
+| Scan the backend to build a mobile feature right, or find which side a bug is on (values sent/received) | related repos (`ecotrak-api`) searched with the request's words | a mechanical contract check: backend DTOs/params vs the mobile types and calls |
+| Jira tickets (with screenshots/videos) → fix | — | ticket intake (Jira API) into the request; images only through Claude or a vision model |
+| Unit tests and coverage | weak-test evidence for reviewers; coverage map (dormant) | coverage-driven test jobs |
+| PR conflicts | conflicts during cherry-picks | conflicts on PR branches |
+| Multi-language (i18n) | agent docs cut to the matching sections | mechanical: hard-coded strings, keys missing from a locale |
+| Lint/tsc quality | checks decide "done"; shortcuts (`any`, ignores) blocked | |
+| Dependabot batches | — | dependency inventory, upgrade one at a time with checks |
+| Mirror a feature that works on web | related repos | web repo as related, a parity search |
+| Fix old mistakes (hard-coded search params → backend-driven) | Claude planning did this well (field notes 17) | a pattern search (where else is it hard-coded) as facts |
+| Messy areas | | moves + shares make the cleanups mechanical |
+| Figma (MCP) for UI issues and new features | — | design specs as facts through Claude (local models can't read the designs) |
+| Advanced components (the tasks module's kanban board) | Claude planning | judgment-heavy: Claude plans, local codes and checks |
+| E2E automation tests and CI | — | CI config as a repo check; e2e runs as optional checks |
+| Git conflicts, red CI | conflicts in cherry-picks | read the failing CI log (`gh run view --log-failed`) as check output and fix like a failing check |
+| Sonar issues | — | Sonar's issue list (API/export) as check output, fixed like lint |
+
 ## Done (2026-10-09)
 
 - Plan skeletons from parsed check errors: check-only jobs are planned with no model; follow-up

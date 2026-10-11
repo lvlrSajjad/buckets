@@ -1162,6 +1162,19 @@ def dir_summary(files: dict[str, int], depth: int = 2) -> dict[str, list[int]]:
 
 
 INDEX_SCRIPT = Path(__file__).resolve().parent / "ts_index.cjs"
+MOVES_SCRIPT = Path(__file__).resolve().parent / "ts_moves.cjs"
+
+
+def ts_moves(repo: Path, payload: dict, timeout: int = 300) -> dict:
+    """Run one ts_moves.cjs operation (extract, compare, share); {"ok": False, "error"} on any failure."""
+    if not shutil.which("node") or not MOVES_SCRIPT.exists():
+        return {"ok": False, "error": "node (and ts_moves.cjs) are needed for mechanical moves"}
+    try:
+        r = subprocess.run(["node", str(MOVES_SCRIPT)], input=json.dumps({**payload, "repo": str(repo)}),
+                           cwd=repo, capture_output=True, text=True, timeout=timeout)
+        return json.loads(r.stdout) if r.stdout.strip() else {"ok": False, "error": r.stderr.strip()[-300:] or "no output"}
+    except (subprocess.TimeoutExpired, json.JSONDecodeError) as e:
+        return {"ok": False, "error": str(e)[:300]}
 TS_EXT = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
 
 
@@ -2212,7 +2225,7 @@ TASK_SCHEMA = {
     "properties": {
         "id": {"type": "string"},
         "file": {"type": "string"},
-        "action": {"type": "string", "enum": ["edit", "create", "delete"]},
+        "action": {"type": "string", "enum": ["edit", "create", "delete", "move", "share"]},
         "instructions": {"type": "string"},
         "done_when": {"type": "string"},
         "read_first": {"type": "array", "items": {"type": "string"}},
@@ -2222,6 +2235,10 @@ TASK_SCHEMA = {
                                              "mode": {"type": "string", "enum": ["append", "after", "before", "replace"]},
                                              "code": {"type": "string"}},
             "required": ["at", "mode", "code"]}},
+        "into": {"type": "string"},
+        "name": {"type": "string"},
+        "select": {"type": "array", "items": {"type": "string"}},
+        "from": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["id", "file", "action", "instructions", "done_when", "where", "edits"],
 }
@@ -2367,7 +2384,17 @@ Repository guidance:
 
 TASK_RULES = """Task rules (a small coding model runs each task in a fresh session; it sees only the task
 text and the files it opens itself, and it cannot run commands):
-- Each task changes exactly ONE file: action "edit", "create" or "delete".
+- Each task changes exactly ONE file: action "edit", "create" or "delete" (or "move"/"share", below).
+- Moving code between files (splitting a big file, pulling a component's logic into a hook, putting
+  code that two files both have into one shared file): don't retype it, and don't put the moved code
+  in "edits". Plan action "move" (TypeScript/JavaScript): "file" is the file the code is in, "where"
+  the component or function it's in, "into" the new file, "name" the new hook's name, and "select"
+  ["logic"] (every statement that renders nothing: state, refs, effects, handlers) or the names or
+  line ranges ("120-180") of the statements to move. The system moves the code exactly and works out
+  the hook's parameters, what it returns, the helpers that must come along and the imports. Action
+  "share": "file" is the shared file (new or existing), "from" the two files that have the same code,
+  "select" the names of the identical top-level declarations to move there; both files then import
+  them. Plan other tasks only for what a move can't do (renaming, making two near-copies identical).
 - Instructions must be self-contained and concrete: name the functions, types and exports to add
   or change, their signatures, and where in the file they go. Include exact code when it's short.
 - "read_first" lists other files the coder should open for context (types it must use, patterns to
@@ -2673,6 +2700,38 @@ def clean_path(p: str) -> str:
     return p
 
 
+MOVABLE = (".ts", ".tsx", ".js", ".jsx", ".mts", ".cts")
+
+
+def validate_move(t: dict, f: str, repo: Path, task_id: str) -> dict:
+    """A mechanical move ("move": a component's logic into a new hook file; "share": identical
+    declarations of two files into one), checked before anything runs."""
+    def inside(p: str) -> str:
+        p = clean_path(str(p or ""))
+        if not p or p.startswith("/") or ".." in p.split("/"):
+            raise ValueError(f"path {p!r} in task {t.get('id', task_id)} must be relative to the repo root")
+        return p
+    select = [str(x).strip() for x in t.get("select") or [] if str(x).strip()]
+    base = {"id": task_id, "action": t["action"], "instructions": str(t.get("instructions") or "").strip(),
+            "done_when": str(t.get("done_when") or "").strip(), "read_first": [], "edits": []}
+    if t["action"] == "move":
+        into, name, where = inside(t.get("into")), str(t.get("name") or "").strip(), str(t.get("where") or "").strip()
+        if not f.endswith(MOVABLE) or not (repo / f).is_file():
+            raise ValueError(f"move: {f!r} must be an existing TypeScript or JavaScript file")
+        if not into.endswith(MOVABLE) or (repo / into).exists():
+            raise ValueError(f"move: \"into\" ({into!r}) must be a new .ts/.tsx/.js file")
+        if not re.fullmatch(r"[A-Za-z_$][\w$]*", name) or not re.fullmatch(r"[A-Za-z_$][\w$]*", where.split(".")[-1]):
+            raise ValueError("move: \"name\" (the new hook) and \"where\" (the component it comes from) must be names")
+        return {**base, "file": f, "into": into, "name": name, "where": where.split(".")[-1],
+                "select": "logic" if not select or [x.lower() for x in select] == ["logic"] else select}
+    sources = [inside(x) for x in t.get("from") or []]
+    if len(sources) != 2 or not all((repo / x).is_file() and x.endswith(MOVABLE) for x in sources):
+        raise ValueError("share: \"from\" must name the two existing TypeScript/JavaScript files that both have the code")
+    if not f.endswith(MOVABLE) or not select:
+        raise ValueError("share: \"file\" is the shared .ts/.tsx file and \"select\" the names to move into it")
+    return {**base, "file": f, "from": sources, "select": select, "where": ""}
+
+
 def validate_tasks(tasks: list, repo: Path, max_tasks: int, prefix: str) -> list[dict]:
     out = []
     for t in tasks[:max_tasks]:
@@ -2680,6 +2739,9 @@ def validate_tasks(tasks: list, repo: Path, max_tasks: int, prefix: str) -> list
         if not f or f.startswith("/") or ".." in f.split("/"):
             raise ValueError(f"task file path {t['file']!r} must be relative to the repo root")
         action = t["action"]
+        if action in ("move", "share"):
+            out.append(validate_move(t, f, repo, f"{prefix}{len(out) + 1}"))
+            continue
         exists = (repo / f).is_file()
         if action in ("edit", "delete") and not exists:
             if action == "delete":
@@ -3860,6 +3922,8 @@ class Buckets:
         """One file's task: the planner's exact edits applied directly when they fit, else a coder
         session. Anything else the coder touches is put back as it was."""
         self.involved = list(dict.fromkeys(getattr(self, "involved", []) + [task["file"]]))
+        if task["action"] in ("move", "share"):
+            return self.apply_move(task, commit)
         if task.get("edits"):
             done = self.apply_planned(task, commit)
             if done:
@@ -3945,6 +4009,48 @@ class Buckets:
                 f"buckets {task['id']}: {task['action']} {task['file']}\n\n{task['instructions'][:1500]}")
         note = f"applied the planned edit{'s' if len(task['edits']) != 1 else ''} directly"
         say(f"  {ok()} {task['id']} {task['file']} ({int(time.time() - start)}s): {paint(note, 'dim')}")
+        return {**task, "status": "done", "note": f"DONE: {note}"}
+
+    def apply_move(self, task: dict, commit: bool) -> dict:
+        """A move or share done mechanically by ts_moves.cjs: the code is moved exactly, never retyped.
+        When it can't be done, the task fails with the reason, for the review to plan around."""
+        start = time.time()
+        if task["action"] == "move":
+            payload = {"op": "extract", "file": task["file"], "function": task["where"], "select": task["select"],
+                       "into": task["into"], "name": task["name"]}
+        else:
+            payload = {"op": "share", "files": task["from"], "names": task["select"], "into": task["file"]}
+        d = ts_moves(self.repo, payload)
+        if not d.get("ok"):
+            why = d.get("error", "it didn't run")
+            say(f"  {warn()} {task['id']}: the {task['action']} couldn't be done ({why[:160]})")
+            return {**task, "status": "failed", "note": f"BLOCKED: {why}"}
+        written = []
+        for f, text in d["files"].items():
+            path = (self.repo / f).resolve()
+            if self.repo.resolve() not in path.parents:
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+            written.append(f)
+        self.involved = list(dict.fromkeys(self.involved + written))
+        r = d["report"]
+        if task["action"] == "move":
+            note = (f"moved {r['moved']} statements ({r['moved_lines']} lines) of {task['where']} into "
+                    f"{task['name']} in {', '.join(f for f in written if f != task['file'])}; parameters: "
+                    f"{', '.join(p['name'] for p in r['params']) or 'none'}; returns {len(r['returns'])} values; "
+                    f"helpers moved along: {', '.join(r['helpers_moved']) or 'none'}"
+                    + (f"; notes: {'; '.join(r['notes'])}" if r["notes"] else ""))
+        else:
+            note = (f"moved {', '.join(r['shared']) or 'nothing'} into {task['file']}"
+                    + (f"; not moved: {'; '.join(x['name'] + ' (' + x['why'] + ')' for x in r['skipped'])}" if r["skipped"] else ""))
+        if not written or (task["action"] == "share" and not r["shared"]):
+            say(f"  {warn()} {task['id']}: nothing was moved ({note[:160]})")
+            return {**task, "status": "failed", "note": f"BLOCKED: {note}"}
+        if commit:
+            git(self.repo, "add", "-A", "--", *written)
+            git(self.repo, "commit", "--no-verify", "-q", "-m", f"buckets {task['id']}: {task['action']} ({note[:200]})\n\n{note}")
+        say(f"  {ok()} {task['id']} {task['action']} ({int(time.time() - start)}s): {paint(note[:220], 'dim')}")
         return {**task, "status": "done", "note": f"DONE: {note}"}
 
     def changed_code(self, base: str, budget: int = 14000) -> str:
