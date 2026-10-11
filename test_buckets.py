@@ -1787,6 +1787,10 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
                                                   "instructions": "write it", "done_when": "", "where": "", "edits": []}]}
             got = b.prefer_move(retyped)
         self.assertEqual([t["action"] for t in got["tasks"]], ["share"])
+        with contextlib.redirect_stderr(io.StringIO()):
+            extra = b.prefer_move({"summary": "s", "tasks": [dict(got["tasks"][0]), {"id": "T2", "file": "src/a/screen.ts",
+                                   "action": "edit", "instructions": "import it", "done_when": "", "where": "", "edits": []}]})
+        self.assertEqual([t["action"] for t in extra["tasks"]], ["share"])
         sparse = {"summary": "s", "tasks": [{"id": "T1", "file": "src/screen-shared.ts", "action": "share", "instructions": "",
                                              "done_when": "", "where": "", "edits": []}]}
         task = buckets.validate_plan(b.fill_moves(sparse), self.repo, 8)["tasks"][0]

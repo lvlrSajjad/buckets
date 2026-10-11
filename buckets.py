@@ -3457,9 +3457,9 @@ class Buckets:
         """A plan that would retype the moved code (a new file with no exact code) gets the mechanical
         move instead; the planner's other tasks stay. Next to a move, edit tasks on its two files with
         no exact code go: the move already rewires them (one such task spent 9 minutes changing nothing)."""
-        moves = [t for t in plan["tasks"] if t["action"] == "move"]
+        moves = [t for t in plan["tasks"] if t["action"] in ("move", "share")]
         if moves:
-            mine = {f for t in moves for f in (t["file"], t["into"])}
+            mine = {f for t in moves for f in ([t["file"], t["into"]] if t["action"] == "move" else [t["file"], *t["from"]])}
             extra = [t for t in plan["tasks"] if t["action"] in ("edit", "create") and t["file"] in mine and not t.get("edits")]
             if extra:
                 say(f"  {paint('dropped', 'dim')} {', '.join(t['id'] for t in extra)}: the move already does "
