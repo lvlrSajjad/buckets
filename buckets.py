@@ -3319,6 +3319,19 @@ class Buckets:
         self._move_hint = {"task": validate_move(task, src, self.repo, "T1"), "report": d["report"]}
         return self._move_hint
 
+    def fill_moves(self, data: dict) -> dict:
+        """Move tasks often come back with their details in the instructions instead of the fields;
+        fill what's missing from the dry-run suggestion when the task moves the same file."""
+        hint = self.move_hint()
+        if not hint or not isinstance(data, dict):
+            return data
+        for t in data.get("tasks") or []:
+            if isinstance(t, dict) and t.get("action") == "move" and clean_path(str(t.get("file", ""))) == hint["task"]["file"]:
+                for k in ("into", "name", "where"):
+                    t[k] = t.get(k) or hint["task"][k]
+                t["select"] = t.get("select") or ["logic"]
+        return data
+
     def prefer_move(self, plan: dict) -> dict:
         """A plan that would retype the moved code (a new file with no exact code) gets the mechanical
         move instead; the planner's other tasks stay."""
@@ -3929,7 +3942,7 @@ class Buckets:
                                     max_tasks=self.cfg["max_tasks"], request=self.request,
                                     checks=", ".join(checks) or "none", baseline=baseline_text,
                                     guidance=guidance(self.repo, self.rc, self.request), material=material)
-        validate = lambda d: validate_plan(d, self.repo, self.cfg["max_tasks"])
+        validate = lambda d: validate_plan(self.fill_moves(d), self.repo, self.cfg["max_tasks"])
         target = (self.escalate("research ended without a confirmed cause")
                   if getattr(self, "research_unsure", False)
                   and self.cfg.get("offload", {}).get("escalate_unsure_research") else None)
@@ -3992,10 +4005,18 @@ class Buckets:
                 messages.append({"role": "user", "content": f"That wasn't a usable plan ({e}). Reply with only the "
                                  "plan as the JSON object."})
                 break
-        content, _, _, _ = chat_turn(self.planner, self.run, "plan-final", messages + [
-            {"role": "user", "content": "Reply now with only the plan as the JSON object."}],
-            schema=PLAN_SCHEMA, think=False, max_tokens=16000, timeout=self.timeout)
-        return validate(extract_json(content))
+        ask = messages + [{"role": "user", "content": "Reply now with only the plan as the JSON object."}]
+        content, _, _, _ = chat_turn(self.planner, self.run, "plan-final", ask, schema=PLAN_SCHEMA, think=False,
+                                     max_tokens=16000, timeout=self.timeout)
+        try:
+            return validate(extract_json(content))
+        except (ValueError, KeyError, TypeError) as e:
+            say(f"  {warn()} the plan was rejected ({str(e)[:120]}); asking once more")
+            content, _, _, _ = chat_turn(self.planner, self.run, "plan-final-retry", ask + [
+                {"role": "assistant", "content": content},
+                {"role": "user", "content": f"That plan was rejected: {e}\nReply with only the corrected plan as the JSON object."}],
+                schema=PLAN_SCHEMA, think=False, max_tokens=16000, timeout=self.timeout)
+            return validate(extract_json(content))
 
     def lookup(self, call: dict, asked: int) -> str:
         """Run one of the planner's look-ups: read and search here, exactly; ask on the reader."""

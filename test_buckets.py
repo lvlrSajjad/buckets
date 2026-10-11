@@ -1669,6 +1669,10 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
         self.assertEqual([(t["id"], t["action"], t["file"]) for t in got["tasks"]],
                          [("T1", "move", "src/thing-screen.tsx"), ("T2", "edit", "src/api.ts")])
         self.assertIsNone(buckets.Buckets(cfg, self.repo, "explain src/thing-screen.tsx").move_hint())
+        sparse = {"summary": "s", "tasks": [{"id": "T1", "file": "src/thing-screen.tsx", "action": "move",
+                                             "instructions": "into: src/use-thing.ts", "done_when": "", "where": "", "edits": []}]}
+        filled = buckets.validate_plan(b.fill_moves(sparse), self.repo, 8)["tasks"][0]
+        self.assertEqual((filled["into"], filled["name"], filled["where"]), ("src/use-thing.ts", "useThing", "ThingScreen"))
 
     def test_share_and_compare(self):
         a = 'import { fmt } from "../util"\n\nconst same = (x: number) => fmt(x * 2)\nconst diff = 1\n\nexport const A = () => same(diff)\n'
