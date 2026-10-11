@@ -88,6 +88,20 @@ class ComponentByLines(unittest.TestCase):
         apply(self.repo, d)
         self.assertEqual(tsc_errors(self.repo), "")
 
+    def test_the_same_block_written_again_becomes_the_same_element(self):
+        row = '      <section>\n        <b>{p.title}</b>\n      </section>\n'
+        repo = make_repo({"src/s.tsx": 'export function Skel(p: { title: string; items: string[] }) {\n  return (\n    <div>\n'
+                                       + row + row.replace("      ", "        ") + '      {p.items.map((title) => (\n        <section>\n'
+                                       '          <b>{title}</b>\n        </section>\n      ))}\n' + row + '    </div>\n  )\n}\n'})
+        d = component(repo, file="src/s.tsx", function="Skel", lines=[4, 6], into="src/row.tsx", name="Row")
+        self.assertTrue(d["ok"], d)
+        screen = d["files"]["src/s.tsx"]
+        self.assertEqual(screen.count("<Row p={p} />"), 3, screen)              # the copy indented differently too
+        self.assertIn("<b>{title}</b>", screen)                                 # a different `title`: not a copy
+        self.assertEqual(len(d["report"]["copies"]), 2)
+        apply(repo, d)
+        self.assertEqual(tsc_errors(repo), "")
+
     def test_a_name_the_file_already_has_is_refused(self):
         d = component(self.repo, file="src/list.tsx", function="ListScreen", lines=[10, 12], into="src/item.tsx", name="Item")
         self.assertFalse(d["ok"])

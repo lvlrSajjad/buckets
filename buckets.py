@@ -5700,7 +5700,9 @@ class Buckets:
             # its prop types are written from the screen's own types: not shortcuts the model added
             self.generated_lines = getattr(self, "generated_lines", set()) | {same_line(t) for t in r.get("prop_types", [])} | {
                 same_line(l) for f in written for l in d["files"][f].splitlines() if f"const {task['name']} = (" in l}
-            what = task["select"][0] if task["select"] else f"lines {task['lines'][0]}-{task['lines'][1]} of {task['where']}"
+            what = task["select"][0] if task["select"] else f"lines {task['lines'][0]}-{task['lines'][1]} of {task['where']}" + (
+                f" (and {len(d['report']['copies'])} identical copies of it, at lines {', '.join(map(str, d['report']['copies']))})"
+                if d["report"].get("copies") else "")
             note = (f"turned {what} into <{task['name']}> in {task['into']}: {r['calls']} use(s) now render it; props: "
                     f"{', '.join(r['props'])}" + (f"; re-derived inside: {', '.join(r['rederived'])}" if r["rederived"] else "")
                     + (f"; notes: {'; '.join(r['notes'])}" if r["notes"] else ""))

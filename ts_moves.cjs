@@ -1606,13 +1606,33 @@ function wrapChunk() {
   const lines = text.slice(start, end).split('\n').map((l, i) => (i === 0 ? pad + l : pad + l.slice(Math.min(col, l.length - l.trimStart().length))));
   const body = chunk ? lines.join('\n') : `${indent}  <>\n${lines.join('\n')}\n${indent}  </>`;
   const sig = params.map((p) => (p.type ? `${p.name}: ${p.type}` : p.name)).join(', ');
-  const decl = `${indent}const ${helper} = (${sig}) => (\n${body}\n${indent})\n\n`;
+  const decl = `${indent}const ${helper} = (${sig}) => (\n${body}\n${indent})\n`;
   const call = `${helper}(${params.map((p) => p.name).join(', ')})`;
-  const parent = nodes[0].parent;
-  const inJsx = ts.isJsxElement(parent) || ts.isJsxFragment(parent);
-  const out = applyEdits(text, [[lineStart(text, stmt.getStart(sf)), lineStart(text, stmt.getStart(sf)), decl],
-                                [start, end, inJsx ? `{${call}}` : call]]);
-  return { text: out, helper, params: params.map((p) => p.name) };
+  const at = (n) => (ts.isJsxElement(n.parent) || ts.isJsxFragment(n.parent) ? `{${call}}` : call);
+  const edits = [[lineStart(text, stmt.getStart(sf)), lineStart(text, stmt.getStart(sf)), decl], [start, end, at(nodes[0])]];
+  // the same block written again in the component (a list of skeleton rows): each copy becomes the same call,
+  // when its names are the same things (a parameter's name may be another callback's own `item`)
+  const copies = [];
+  if (chunk) {
+    const norm = (n) => n.getText(sf).replace(/\s+/g, ' ');
+    const want = norm(chunk);
+    const names = new Map(references(checker, chunk).map((r) => [r.node.text, r.sym]));
+    const paramNames = new Set(params.map((p) => p.name));
+    const look = (n) => {
+      if (n === chunk) return;
+      if (isJsx(n) && norm(n) === want) {
+        const st = fn.body.statements.find((x) => x.getStart(sf) <= n.getStart(sf) && x.getEnd() >= n.getEnd());
+        const same = references(checker, n).every((r) => (paramNames.has(r.node.text)
+          ? !!(r.sym.declarations || []).some((d) => st && within(d, st) && !(d.pos >= n.pos && d.end <= n.end))
+          : names.get(r.node.text) === r.sym));
+        if (same && st && st.getStart(sf) >= stmt.getStart(sf)) { copies.push(n); edits.push([n.getStart(sf), n.getEnd(), at(n)]); return; }
+      }
+      ts.forEachChild(n, look);
+    };
+    look(fn.body);
+  }
+  const out = applyEdits(text, edits);
+  return { text: out, helper, params: params.map((p) => p.name), copies: copies.map((n) => lineOf(sf, n.getStart(sf))) };
 }
 
 // A render helper inside a component (`const renderRow = (item) => <...>`) becomes a component in its own
@@ -1622,10 +1642,12 @@ function component() {
   const file = abs(input.file), target = abs(input.into);
   if (fs.existsSync(target)) throw new Error(`${input.into} already exists`);
   if (!/^[A-Z][\w$]*$/.test(input.name || '')) throw new Error('the component name must start with a capital letter');
+  let wrapped = null;
   if (input.lines) {  // a chunk by lines: a render helper first (in memory), then the same as for one
     const w = wrapChunk();
     OVERRIDES.set(path.resolve(file), w.text);
     input.helper = w.helper;
+    wrapped = w;
   }
   const { checker, sources: [sf] } = program([input.file]);
   const text = sf.text;
@@ -1818,7 +1840,8 @@ function component() {
   }
   const bodyText = ts.isBlock(hbody) ? hbody.getText(sf) : `{\n${preludeText}  return (\n    ${exprText}\n  )\n}`;
   const finalBody = ts.isBlock(hbody) && preludeText ? `{\n${preludeText}${hbody.getText(sf).slice(1)}` : bodyText;
-  const compText = [importsFor(sf, usedImports, file, target).join('\n'), ...moduleMoved.map((st) => chunk(st, sharedBack.includes(declaredBy(st)[0].text))),
+  const importLines = importsFor(sf, usedImports, file, target).join('\n');
+  const compText = [importLines && importLines + '\n', ...moduleMoved.map((st) => chunk(st, sharedBack.includes(declaredBy(st)[0].text))),
                     `export const ${input.name} = (${sig}) => ${finalBody}\n`].filter(Boolean).join('\n');
   // the screen: calls become elements, the helper goes
   const edits = [[fullStart(sf, helperStmt), lineEnd(text, helperStmt.end), '']];
@@ -1828,7 +1851,11 @@ function component() {
     hparams.forEach((p, i) => { if (c.arguments[i]) attrs.push(`${p.name.text}={${c.arguments[i].getText(sf)}}`); });
     for (const [sym] of free) attrs.push(`${sym.name}={${sym.name}}`);
     if (keyMoves) attrs.unshift(`key={${keyAt(c)}}`);
-    edits.push([c.getStart(sf), c.end, `<${input.name}${attrs.length ? ' ' + attrs.join(' ') : ''} />`]);
+    const el = `<${input.name}${attrs.length ? ' ' + attrs.join(' ') : ''} />`;
+    const box = c.parent;  // `{renderX()}` among JSX children: the element itself, not `{<X />}`
+    if (ts.isJsxExpression(box) && box.expression === c && (ts.isJsxElement(box.parent) || ts.isJsxFragment(box.parent)))
+      edits.push([box.getStart(sf), box.end, el]);
+    else edits.push([c.getStart(sf), c.end, el]);
   }
   const imp = importBindings(sf, checker);
   const stillUsed = new Set(keptRefs.filter(({ sym }) => imp.has(sym)).map(({ sym }) => imp.get(sym)));
@@ -1838,7 +1865,8 @@ function component() {
   else if (keyAttr) notes.push('the helper set `key` on its root element; in a list, React needs the key on the new element where it is used');
   return { files: { [input.file]: screen, [rel(target)]: compText },
            report: { props: props.map((p) => p.name), prop_types: props.map((p) => `${p.name}${p.optional ? '?' : ''}: ${p.type}`), calls: calls.length, rederived: [...prelude.keys()].map((st) => declaredBy(st)[0] ? declaredBy(st)[0].text : '?'),
-                     helpers_moved: moduleMoved.map((st) => declaredBy(st)[0].text), notes } };
+                     helpers_moved: moduleMoved.map((st) => declaredBy(st)[0].text), notes,
+                     ...(wrapped ? { copies: wrapped.copies } : {}) } };
 }
 
 // Does `name` in one text behave like `name` in another (e.g. the shared version now vs a copy as it was)?
