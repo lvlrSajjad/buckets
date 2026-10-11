@@ -3,6 +3,8 @@ import ast
 import contextlib
 import io
 import json
+import os
+from datetime import datetime, timedelta
 import shutil
 import subprocess
 import tempfile
@@ -1539,6 +1541,55 @@ class RedCI(unittest.TestCase):
         self.assertNotIn("##[group]", got)
         self.assertTrue(buckets.CI_WORDS.search("the pipeline is failing"))
         self.assertFalse(buckets.CI_WORDS.search("add a city field"))
+
+
+class FollowUps(unittest.TestCase):
+    """A follow-up request starts from the previous run's unmerged branch, so its work is there."""
+
+    def setUp(self):
+        self.repo = make_repo({"src/cart.ts": "export const total = 1\n", "src/user.ts": "export const name = 'a'\n"})
+        self.main = buckets.git(self.repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        buckets.git(self.repo, "switch", "-q", "-c", "buckets/add-tax")
+        (self.repo / "src/cart.ts").write_text("export const total = 1\nexport const tax = 2\n")
+        commit_all(self.repo, "add tax")
+        buckets.git(self.repo, "switch", "-q", self.main)
+
+    def record(self, minutes_ago=5, branch="buckets/add-tax"):
+        run = buckets.Run(self.repo)
+        when = (datetime.now() - timedelta(minutes=minutes_ago)).isoformat(timespec="seconds")
+        (run.dir / "meta.json").write_text(json.dumps({"repo": str(self.repo), "kind": "code", "request": "add a tax to the cart",
+                                                       "done": True, "branch": branch, "merge_into": self.main, "finished": when}))
+
+    def test_what_counts_as_a_follow_up(self):
+        self.record()
+        got = buckets.earlier_unmerged(self.repo, "now round the tax in src/cart.ts")
+        self.assertEqual((got["branch"], got["overlap"]), ("buckets/add-tax", ["cart", "cart.ts", "src/cart.ts"]))
+        self.assertIsNotNone(buckets.earlier_unmerged(self.repo, "also show it in the header"))   # follow-up words, recent
+        self.assertIsNone(buckets.earlier_unmerged(self.repo, "rename the user module"))         # unrelated
+        self.record(minutes_ago=300)
+        self.assertIsNone(buckets.earlier_unmerged(self.repo, "also show it in the header"))     # too long ago
+        self.assertIsNotNone(buckets.earlier_unmerged(self.repo, "fix cart.ts"))                 # names its file
+
+    def test_merged_or_elsewhere_is_not_built_on(self):
+        self.record()
+        buckets.git(self.repo, "merge", "-q", "--ff-only", "buckets/add-tax")
+        self.assertIsNone(buckets.earlier_unmerged(self.repo, "fix cart.ts"))                    # nothing unmerged
+
+    def test_merge_tidies_the_branch_it_built_on(self):
+        self.record()
+        buckets.git(self.repo, "switch", "-q", "-c", "buckets/round-tax", "buckets/add-tax")
+        (self.repo / "src/cart.ts").write_text("export const total = 1\nexport const tax = 2.0\n")
+        commit_all(self.repo, "round")
+        buckets.git(self.repo, "switch", "-q", self.main)
+        run = buckets.Run(self.repo)
+        (run.dir / "meta.json").write_text(json.dumps({"repo": str(self.repo), "kind": "code", "request": "round the tax",
+                                                       "done": True, "branch": "buckets/round-tax", "merge_into": self.main,
+                                                       "builds_on": "buckets/add-tax"}))
+        os.utime(run.dir / "meta.json")
+        msg = buckets.merge_run(self.repo)
+        self.assertIn("buckets/add-tax, which it built on, is in too and was deleted", msg)
+        self.assertIn("tax = 2.0", (self.repo / "src/cart.ts").read_text())
+        self.assertFalse(buckets.branch_exists(self.repo, "buckets/add-tax"))
 
 
 class DoubleReview(unittest.TestCase):

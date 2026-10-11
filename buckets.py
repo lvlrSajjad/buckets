@@ -3459,6 +3459,23 @@ class Buckets:
         say(f"  {ok()} read the failed CI run on {branch}: {r['name']}{stale}")
         return f"CI run that failed: {r['name']}: {r['displayTitle']} ({r['url']}){stale}\n{log}"
 
+    def build_on(self) -> dict | None:
+        """Whether this run starts from the previous run's unmerged branch: asked in an interactive chat,
+        automatic with -y (or `follow_ups: "always"`), never with `follow_ups: "never"`."""
+        policy = self.cfg.get("follow_ups", "ask")
+        if policy == "never":
+            return None
+        prev = earlier_unmerged(self.repo, self.request)
+        if not prev:
+            return None
+        why = (f"it names {', '.join(prev['overlap'][:3])}" if prev["overlap"]
+               else f"it reads as a follow-up to the run {prev['age_min']} min ago")
+        what = f"the last run (\"{' '.join(prev['request'].split())[:70]}\") isn't merged yet and {why}"
+        if policy == "always" or getattr(self, "assume_yes", False) or not interactive():
+            say(f"  {ok()} building on {paint(prev['branch'], 'cyan')}: {what}")
+            return prev
+        return prev if ask_yes(f"  {cap(what)}. Build on its branch ({prev['branch']})?") else None
+
     def move_hint(self) -> dict | None:
         """When the request asks to move code out of one existing file into a new one: the move task that
         does it mechanically, checked with a dry run. None when the request isn't that or the dry run fails."""
@@ -5210,13 +5227,17 @@ class Buckets:
             finish(self, "plan", bool(plan["tasks"]), None, None, path)
             return 0 if plan["tasks"] or plan_only else 1
 
-        base = git(repo, "rev-parse", "HEAD").strip()
         start_branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        prev = self.build_on()
+        if prev:  # start from the last run's unmerged work; merging later brings in both
+            git(repo, "checkout", "-q", prev["branch"])
+            self.builds_on = prev["branch"]
+        base = git(repo, "rev-parse", "HEAD").strip()
         if start_branch == "HEAD":  # detached
             start_branch = base
         branch = f"buckets/{slug(self.request)}-{datetime.now().strftime('%m%d-%H%M')}"
         git(repo, "checkout", "-q", "-b", branch)
-        say(f"  working on a new branch: {paint(branch, 'cyan')}")
+        say(f"  working on a new branch: {paint(branch, 'cyan')}" + (f" (on top of {prev['branch']})" if prev else ""))
 
         try:
             rounds, verdict, now = self.rounds(plan, plan["tasks"], base, checks, baseline)
@@ -5812,6 +5833,7 @@ def finish(b, kind: str, done: bool | None, branch: str | None, merge_into: str 
                 f"{paint('buckets review', 'bold')} (about $0.20–0.50; it reads the code around the change too)")
     meta = {"repo": str(b.repo), "kind": kind, "request": b.request, "done": done, "branch": branch,
             "merge_into": merge_into, "report": str(report), "finished": datetime.now().isoformat(timespec="seconds"),
+            "builds_on": getattr(b, "builds_on", None),
             "minutes": round((time.time() - _T0) / 60, 1), "claude_usd": round(b.cost, 3)}
     (b.run.dir / "meta.json").write_text(json.dumps(meta, indent=2))
     remember(b, kind, done, branch, merge_into, report)
@@ -5894,6 +5916,30 @@ def last_branch(repo: Path) -> dict:
     return d
 
 
+FOLLOW_UP = re.compile(r"\b(also|now|then|too|again|it|that|those|these|them|same|as well|previous|last (?:change|run|one))\b", re.I)
+
+
+def earlier_unmerged(repo: Path, request: str, minutes: int = 60) -> dict | None:
+    """The previous run, when the new request builds on it and its work isn't merged yet: it names a file
+    or name that run changed, or it's a follow-up ("also", "now", "it") within `minutes` of it. None otherwise."""
+    d = next((d for d in runs_newest_first(repo, ("code", "pick")) if d.get("branch")), None)
+    if not d or not branch_exists(repo, d["branch"]):
+        return None
+    here = git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    if here != d.get("merge_into") or git(repo, "rev-list", "--count", f"{here}..{d['branch']}").strip() in ("", "0"):
+        return None
+    changed = git(repo, "diff", "--name-only", f"{here}...{d['branch']}").split()
+    names = set(changed) | {PurePosixPath(f).name for f in changed} | {PurePosixPath(f).stem for f in changed}
+    overlap = sorted(n for n in names if len(n) >= 4 and re.search(rf"(?<![\w-]){re.escape(n)}(?![\w-])", request))
+    try:
+        age = (datetime.now() - datetime.fromisoformat(d.get("finished", ""))).total_seconds() / 60
+    except ValueError:
+        age = 10 ** 6
+    if overlap or (age <= minutes and FOLLOW_UP.search(request)):
+        return {**d, "overlap": overlap, "changed": changed, "age_min": int(age)}
+    return None
+
+
 def merge_run(repo: Path) -> str:
     """Fast-forward the latest run's branch into the branch it started from and delete it."""
     d = next((d for d in runs_newest_first(repo, ("code", "pick")) if d.get("branch")
@@ -5911,7 +5957,12 @@ def merge_run(repo: Path) -> str:
         raise RuntimeError(f"{into} has moved since the run, so it can't fast-forward; merge it yourself: "
                            f"git merge {branch}")
     git(repo, "branch", "-q", "-d", branch)
-    return f"merged {branch} into {into} and deleted the branch (nothing pushed){note}"
+    older = d.get("builds_on")
+    tidied = ""
+    if older and branch_exists(repo, older) and subprocess.run(["git", "branch", "-q", "-d", older], cwd=repo,
+                                                              capture_output=True).returncode == 0:
+        tidied = f"; {older}, which it built on, is in too and was deleted"
+    return f"merged {branch} into {into} and deleted the branch (nothing pushed){tidied}{note}"
 
 
 CLAUDE_REVIEW_PROMPT = """A smaller local model made the change below for this request. Review it the way a
@@ -7051,6 +7102,7 @@ def run_request(b, cfg: dict, args, repo: Path) -> int:
             parts.append("done when the checks pass")
         if b.mode != "claude" and intent != "pick":
             parts.append(f"reading: {b.reading()}")
+        b.assume_yes = args.yes
         countdown("  " + " · ".join(parts), 0 if args.yes else 5)
         if (b.mode != "claude" and intent == "code" and route and route["difficulty"] != "light"
                 and claude_ready(cfg)):
