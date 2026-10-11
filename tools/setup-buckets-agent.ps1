@@ -32,7 +32,8 @@ Remove-Item -Force "$here\agent.token"  # the copy that came here (perhaps throu
 # The loop restarts the agent when it updates itself (or crashes).
 $start = @"
 while (`$true) {
-  & node "$Home_\windows-agent.cjs" --root "$Home_\repos" --token-file "$Home_\agent.token" --port $Port *>> "$Home_\agent.log"
+  & node "$Home_\windows-agent.cjs" --root "$Home_\repos" --token-file "$Home_\agent.token" --port $Port 2>&1 |
+    Out-File -Append -Encoding utf8 "$Home_\agent.log"  # UTF-8, so the log reads right from the Mac too
   Start-Sleep -Seconds 2
 }
 "@
