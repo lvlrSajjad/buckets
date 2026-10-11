@@ -3748,5 +3748,66 @@ class Each(unittest.TestCase):
         self.assertIn("2 of 3 done", text)
 
 
+class UpdateBranch(unittest.TestCase):
+    """--update: the base merged into a new branch made from the branch, conflicts resolved, the branch untouched."""
+
+    def setUp(self):
+        self.repo = make_repo({"a.txt": "one\ntwo\nthree\n", "b.txt": "b\n"})
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.repo, check=True, capture_output=True, text=True).stdout
+        self.g = g
+        g("branch", "-M", "main")
+        g("checkout", "-q", "-b", "feature")
+        (self.repo / "a.txt").write_text("one\nTWO from feature\nthree\n")
+        g("commit", "-qam", "feature change")
+        g("checkout", "-q", "main")
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        self.b = buckets.Buckets(cfg, self.repo, "bring feature up to date with main")
+
+    def run_update(self):
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            return self.b.update_branch("feature", "main")
+
+    def test_a_clean_merge_needs_no_model(self):
+        (self.repo / "b.txt").write_text("b from main\n")
+        self.g("commit", "-qam", "main change")
+        feature = self.g("rev-parse", "feature")
+        with mock.patch.object(buckets, "ask_json", side_effect=AssertionError("no model needed")):
+            self.assertEqual(self.run_update(), 0)
+        new = [b for b in self.g("branch", "--list", "buckets/update-*").split() if b != "*"][0]
+        self.assertEqual(self.g("show", f"{new}:b.txt"), "b from main\n")
+        self.assertIn("TWO from feature", self.g("show", f"{new}:a.txt"))
+        self.assertEqual(self.g("rev-parse", "feature"), feature)  # the branch itself didn't move
+        self.assertEqual(self.g("rev-parse", "--abbrev-ref", "HEAD").strip(), "main")
+
+    def test_conflicts_are_planned_with_both_sides_changes(self):
+        (self.repo / "a.txt").write_text("one\nTWO from main\nthree\n")
+        self.g("commit", "-qam", "main change")
+        prompts = []
+        def fake_ask(cfg, run, label, system, prompt, schema, validate, **kw):
+            prompts.append(prompt)
+            return validate({"summary": "s", "tasks": [{"file": "a.txt", "action": "edit", "instructions": "combine",
+                                                        "done_when": "no markers", "read_first": [], "edits": []}]})
+        def fake_code(task, commit=True):
+            (self.repo / "a.txt").write_text("one\nTWO from feature and main\nthree\n")
+            return {**task, "status": "done", "note": "DONE"}
+        def fake_rounds(plan, tasks, base, checks, baseline, **kw):
+            return [], {"done": True, "summary": "both kept", "issues": [], "tasks": []}, kw["now"]
+        with mock.patch.object(buckets, "ask_json", fake_ask), mock.patch.object(self.b, "code_task", fake_code), \
+                mock.patch.object(self.b, "rounds", fake_rounds):
+            self.assertEqual(self.run_update(), 0)
+        self.assertIn("TWO from main", prompts[0])        # what main changed
+        self.assertIn("TWO from feature", prompts[0])     # what the branch changed
+        self.assertIn("<<<<<<<", prompts[0])               # the file with its markers
+        new = [b for b in self.g("branch", "--list", "buckets/update-*").split() if b != "*"][0]
+        self.assertEqual(self.g("show", f"{new}:a.txt"), "one\nTWO from feature and main\nthree\n")
+        self.assertEqual(len(self.g("log", "-1", "--format=%P", new).split()), 2)  # a merge commit
+
+    def test_an_up_to_date_branch_is_left_alone(self):
+        self.g("merge", "-q", "feature")  # main has the feature, and the feature has everything main has
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.b.update_branch("feature", "main"), 0)
+        self.assertIn("already has everything", err.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

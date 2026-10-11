@@ -234,6 +234,18 @@ the rest here side by side, `"overflow"` does that only while this machine is bu
 Measured on the machines this was built on (field notes 30), checks there were 2.5–15 times slower and
 pushed the model out of memory, so overflow is the setting worth using there.
 
+## Bringing a branch or PR up to date (`--update`)
+
+```bash
+buckets --update 123                    # pull request 123: its base merged into its branch
+buckets --update my-feature --from origin/develop
+```
+
+The base is merged into a new `buckets/update-…` branch made from yours, so your branch doesn't move until
+`buckets merge` (a fast-forward; pushing stays yours). Conflicts are planned with what each side changed
+since the branch started, every marker has to go, then the checks run and, if anything was resolved or
+broke, a review. A PR number goes through `gh` (the repo's account); its branch is fetched first.
+
 ## The same request for many targets (`buckets each`)
 
 ```bash

@@ -2956,6 +2956,27 @@ The files now, with conflict markers (between <<<<<<< and ======= is the target 
 between ======= and >>>>>>> is the commit being applied):
 {files_text}"""
 
+MERGE_CONFLICT_PROMPT = """Bringing branch `{branch}` up to date with `{base}` (merging `{base}` into it) hit
+conflicts. Plan how to resolve them.
+
+Conflicted files: {files}
+
+For each conflicted file write ONE task (action "edit") that tells the coder exactly what the final file
+must contain at each conflict block: keep both sides' intent: the branch's own change, applied on top of
+what `{base}` changed since the branch started (give the exact combined code). Never drop either side's
+change without saying why. The result must contain no conflict markers (<<<<<<<, =======, >>>>>>>).
+{rules}
+
+What `{base}` changed in these files since the branch started:
+{theirs}
+
+What the branch `{branch}` changed in them:
+{ours}
+
+The files now, with conflict markers (between <<<<<<< and ======= is the branch `{branch}`, between
+======= and >>>>>>> is `{base}`):
+{files_text}"""
+
 RESEARCH_SCHEMA = {
     "type": "object",
     "properties": {
@@ -6113,8 +6134,9 @@ class Buckets:
 
     # -- cherry-pick mode
 
-    def resolve_conflicts(self, sha: str, subject: str, files: list[str]) -> tuple[bool, str]:
-        """Plan and apply a resolution for each conflicted file; True when no markers are left."""
+    def resolve_conflicts(self, sha: str, subject: str, files: list[str], prompt: str | None = None) -> tuple[bool, str]:
+        """Plan and apply a resolution for each conflicted file; True when no markers are left. `prompt`: a ready
+        planning prompt (a merge's, say); a cherry-pick's otherwise."""
         repo = self.repo
         for f in files:
             path = repo / f
@@ -6122,14 +6144,15 @@ class Buckets:
                 return False, f"`{f}` was deleted on one side (modify/delete conflict); resolve it by hand"
             if b"\0" in path.read_bytes()[:8192]:
                 return False, f"`{f}` is a binary file; resolve it by hand"
-        body = git(repo, "log", "-1", "--format=%b", sha).strip()
-        patch = git(repo, "show", "--format=", sha, "--", *files)
-        if len(patch) > 20000:
-            patch = patch[:20000] + "\n… (cut off)"
-        files_text = "\n\n".join(numbered(repo, f, self.cfg["max_file_chars"]) for f in files)
-        prompt = CONFLICT_PROMPT.format(sha=sha[:10], subject=subject, body=body or "(no description)",
-                                        files=", ".join(files), patch=patch, files_text=files_text,
-                                        rules=TASK_RULES.format(max_tasks=len(files)))
+        if prompt is None:
+            body = git(repo, "log", "-1", "--format=%b", sha).strip()
+            patch = git(repo, "show", "--format=", sha, "--", *files)
+            if len(patch) > 20000:
+                patch = patch[:20000] + "\n… (cut off)"
+            files_text = "\n\n".join(numbered(repo, f, self.cfg["max_file_chars"]) for f in files)
+            prompt = CONFLICT_PROMPT.format(sha=sha[:10], subject=subject, body=body or "(no description)",
+                                            files=", ".join(files), patch=patch, files_text=files_text,
+                                            rules=TASK_RULES.format(max_tasks=len(files)))
 
         def validate(d):
             plan = validate_plan(d, repo, len(files) + 2, f"C{sha[:7]}-")
@@ -6159,6 +6182,98 @@ class Buckets:
             else:
                 return False, f"conflict markers still in `{t['file']}` after two tries"
         return True, "resolved " + ", ".join(f"`{f}`" for f in files)
+
+    def update_branch(self, branch: str, base: str) -> int:
+        """Bring `branch` up to date with `base` (a PR whose base moved on): `base` merged into a new buckets branch
+        made from `branch`, conflicts resolved with both sides' changes shown, then checks and a review. `branch`
+        itself doesn't change until you `buckets merge` (a fast-forward)."""
+        repo = self.repo
+        if changed_paths(repo):
+            die(dirty_tree(repo))
+        require_identity(repo)
+        head = git(repo, "rev-parse", "--verify", f"{branch}^{{commit}}").strip()
+        base_sha = git(repo, "rev-parse", "--verify", f"{base}^{{commit}}").strip()
+        start_branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        if start_branch == "HEAD":
+            start_branch = git(repo, "rev-parse", "HEAD").strip()
+        if subprocess.run(["git", "merge-base", "--is-ancestor", base_sha, head], cwd=repo).returncode == 0:
+            say(f"{ok()} {branch} already has everything in {base}; nothing to do")
+            return 0
+        fork = git(repo, "merge-base", head, base_sha).strip()
+        behind = git(repo, "rev-list", "--count", f"{head}..{base_sha}").strip()
+        self.heading(2, f"Merging {base} into {branch} ({behind} commit(s) behind)")
+        new = f"buckets/update-{slug(branch, 24)}-{datetime.now().strftime('%m%d-%H%M')}"
+        git(repo, "checkout", "-q", "-b", new, head)
+        say(f"  working on a new branch: {paint(new, 'cyan')} (from {branch}; {branch} itself is unchanged)")
+        checks = self.checks_with_index(detect_checks(repo, self.rc))
+        baseline = run_checks(repo, checks, self.run, "baseline", self.cfg["check_timeout_s"], agent=self.cfg.get("agent"))
+        self.surface_before = self.index.surface()
+        subject, step = f"merge {base} into {branch}", {"sha": base_sha, "subject": f"merge {base}", "status": "clean", "note": ""}
+        try:
+            r = subprocess.run(["git", "merge", "--no-ff", "--no-edit", base_sha, "-m", f"Merge {base} into {branch}"],
+                               cwd=repo, capture_output=True, text=True)
+            conflicted = [f for f in git(repo, "diff", "--name-only", "--diff-filter=U").split("\n") if f]
+            if r.returncode != 0 and not conflicted:
+                git(repo, "merge", "--abort", check=False)
+                step.update(status="failed", note=" ".join((r.stderr or r.stdout).split())[:200])
+            elif conflicted:
+                say(f"  {warn()} conflicts in {', '.join(conflicted)}")
+                cut = lambda t: t if len(t) <= 15000 else t[:15000] + "\n… (cut off)"
+                prompt = MERGE_CONFLICT_PROMPT.format(
+                    branch=branch, base=base, files=", ".join(conflicted), rules=TASK_RULES.format(max_tasks=len(conflicted)),
+                    theirs=cut(git(repo, "diff", fork, base_sha, "--", *conflicted)),
+                    ours=cut(git(repo, "diff", fork, head, "--", *conflicted)),
+                    files_text="\n\n".join(numbered(repo, f, self.cfg["max_file_chars"]) for f in conflicted))
+                resolved, note = self.resolve_conflicts(base_sha, subject, conflicted, prompt=prompt)
+                if not resolved:
+                    git(repo, "merge", "--abort", check=False)
+                    step.update(status="failed", note=note)
+                else:
+                    git(repo, "add", "--", *conflicted)
+                    subprocess.run(["git", "commit", "--no-verify", "--no-edit"], cwd=repo, capture_output=True, text=True,
+                                   check=True, env={**os.environ, "GIT_EDITOR": "true"})
+                    step.update(status="resolved", note=note)
+                    say(f"  {ok()} merged after resolving the conflicts")
+            else:
+                say(f"  {ok()} merged cleanly")
+            after = git(repo, "rev-parse", "HEAD").strip()
+            self.heading(3, "Checks after the merge")
+            now = run_checks(repo, checks, self.run, "merged", self.cfg["check_timeout_s"], agent=self.cfg.get("agent"))
+            regressions = [n for n, c in now.items() if baseline.get(n, {}).get("ok") and not c["ok"]]
+            rounds, verdict = [], None
+            if step["status"] != "failed" and (regressions or step["status"] == "resolved"):
+                why = ([f"conflicts were resolved in {', '.join(conflicted)}"] if step["status"] == "resolved" else []) \
+                    + ([f"checks now fail: {', '.join(regressions)}"] if regressions else [])
+                plan = {"summary": f"Merged {base} into {branch}; " + "; ".join(why) + ". Check the resolutions keep both "
+                        "sides' changes and fix anything the merge broke.", "tasks": []}
+                rounds, verdict, now = self.rounds(plan, [], head, checks, baseline, shortcut_base=after,
+                                                   now=now, code_step=4, review_step=4)
+            else:
+                self.heading(4, "Review: not needed" + (" (it merged cleanly and the checks pass)" if step["status"] == "clean"
+                                                          else ""))
+        except KeyboardInterrupt:
+            clear_status()
+            subprocess.run(["git", "merge", "--abort"], cwd=repo, capture_output=True)
+            say(f"stopped: {leave_branch(repo, new, start_branch, head)}")
+            raise SystemExit(130)
+        except Exception as e:
+            clear_status()
+            subprocess.run(["git", "merge", "--abort"], cwd=repo, capture_output=True)
+            say(f"stopped by an error ({type(e).__name__}: {e}): {leave_branch(repo, new, start_branch, head)}")
+            raise
+        done = step["status"] != "failed" and (verdict is None or verdict["done"]) \
+            and not [n for n, c in now.items() if baseline.get(n, {}).get("ok") and not c["ok"]]
+        report = render_pick_report(self, [step], [(base_sha, f"merge {base}")], rounds, verdict, checks, baseline, now,
+                                    new, head, start_branch, branch, done).replace("cherry-pick onto", f"bring up to date with {base}:", 1)
+        path = self.run.dir / "report.md"
+        path.write_text(report)
+        if not changed_paths(repo):
+            git(repo, "checkout", "-q", start_branch)
+        if step["status"] == "failed" and git(repo, "rev-parse", new).strip() == head:
+            git(repo, "branch", "-q", "-D", new)
+        print(report)
+        finish(self, "pick", done, new if branch_exists(repo, new) else None, branch, path)
+        return 0 if done else 2
 
     def pick(self, refs: list[str], onto: str = "") -> int:
         repo = self.repo
@@ -8563,6 +8678,9 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--do", action="store_true", help="code mode: plan, code, check, review")
     mode.add_argument("--doctor", action="store_true", help="check servers, models and repo checks")
     mode.add_argument("--pick", nargs="+", metavar="COMMIT", help="cherry-pick commits or ranges (a..b)")
+    mode.add_argument("--update", metavar="BRANCH|PR",
+                      help="bring a branch (or a pull request's branch: 123) up to date with its base, conflicts resolved")
+    ap.add_argument("--from", dest="from_base", metavar="BASE", help="with --update: the base (default: the PR's, else origin's default)")
     ap.add_argument("--onto", help="with --pick: the branch to pick onto (default: the current branch)")
     ap.add_argument("-y", "--yes", action="store_true", help="start without the 5-second pause")
     ap.add_argument("--time-limit", type=float, metavar="MIN", help="stop cleanly after MIN minutes (like Ctrl-C)")
@@ -8636,6 +8754,8 @@ def main(argv: list[str] | None = None) -> int:
             request = json.loads(Path(args.plan_file).read_text()).get("summary") or f"plan from {args.plan_file}"
         except (OSError, ValueError):
             request = f"plan from {args.plan_file}"
+    if not request.strip() and args.update:
+        request = f"bring {args.update} up to date" + (f" with {args.from_base}" if args.from_base else "")
     if not request.strip() and args.pick:
         request = f"cherry-pick {' '.join(args.pick)} onto {args.onto or 'the current branch'}"
     if not request.strip():
@@ -8733,8 +8853,41 @@ def chat_loop(argv: list[str]) -> int:
         print(file=sys.stderr)
 
 
+def update_target(repo: Path, ref: str, base: str | None, rc: dict) -> tuple[str, str]:
+    """The branch and base for --update: a PR number (123, #123, "pr 123") through gh, else a branch name (its base
+    origin's default branch). The PR's branch is fetched, and made a local branch if there's none yet."""
+    m = re.fullmatch(r"(?:pr\s*)?#?(\d+)", ref.strip(), re.I)
+    env = {**os.environ, **{k: os.path.expanduser(v) for k, v in (rc.get("env") or {}).items()}}
+    if m:
+        r = subprocess.run(["gh", "pr", "view", m.group(1), "--json", "headRefName,baseRefName"], cwd=repo,
+                           capture_output=True, text=True, env=env)
+        if r.returncode:
+            die(f"couldn't read pull request {m.group(1)}: {r.stderr.strip()[:200]}")
+        d = json.loads(r.stdout)
+        ref, base = d["headRefName"], base or f"origin/{d['baseRefName']}"
+        subprocess.run(["git", "fetch", "-q", "origin", d["headRefName"], d["baseRefName"]], cwd=repo, env=env)
+        if not branch_exists(repo, ref):
+            git(repo, "branch", "-q", "--track", ref, f"origin/{ref}")
+            say(f"  made a local branch {ref} from origin/{ref}")
+    if base is None:
+        default = git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False).strip()
+        base = default or "main"
+        if default:
+            subprocess.run(["git", "fetch", "-q", "origin", default.split("/", 1)[1]], cwd=repo, env=env)
+    return ref, base
+
+
 def run_request(b, cfg: dict, args, repo: Path) -> int:
     try:
+        if getattr(args, "update", None):
+            branch, base = update_target(repo, args.update, args.from_base, b.rc)
+            b.total = 4
+            b.heading(1, "Understanding your request")
+            say(f"  bring {branch} up to date with {base} → local (free), on a new branch")
+            b.assume_yes = args.yes
+            UNATTENDED["on"] = UNATTENDED["on"] or bool(args.yes)
+            start_time_limit(args.time_limit or cfg.get("time_limit_min"))
+            return b.update_branch(branch, base)
         intent = ("info" if args.ask else "pick" if args.pick
                   else "code" if (args.do or args.plan_only or args.plan_file) else None)
         if args.plan_file:
