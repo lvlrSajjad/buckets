@@ -85,6 +85,11 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);overflow:hi
 .chips{display:flex;gap:4px;justify-content:center;min-height:16px;margin-top:2px}
 .chips u{text-decoration:none;font-size:10px;padding:1px 6px;border-radius:99px;background:rgba(0,0,0,.55);border:1px solid var(--c);color:var(--c)}
 .slabel{font-size:10px;padding:0 5px;border-radius:99px;background:rgba(0,0,0,.5);color:var(--c);white-space:nowrap}
+.ilabel{font-size:10px;color:var(--c);white-space:nowrap;text-shadow:0 0 6px #000,0 0 2px #000;pointer-events:none}
+#focusHint{position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:4;font-size:12px;color:var(--dim);padding:5px 12px;
+  border-radius:99px;background:rgba(6,9,18,.75);border:1px solid var(--line);pointer-events:none;opacity:0;transition:opacity .4s}
+#focusHint b{color:var(--c)}
+#focusHint.show{opacity:1}
 .corelabel{font-size:11px;letter-spacing:.3em;text-transform:uppercase;color:#cfe0ff;opacity:.8;text-shadow:0 0 8px #000}
 
 /* controls */
@@ -153,6 +158,7 @@ body.hud-min #log,body.hud-min #cards,body.hud-min #request{display:none}
 <div id="result" class="panel"><b></b><span></span></div>
 <button id="hudToggle" title="Toggle HUD (H)">HUD</button>
 <div id="tip"></div>
+<div id="focusHint"></div>
 
 <footer id="controls" class="panel">
   <div class="seg" id="modeSeg"><button data-m="live">LIVE</button><button data-m="replay">REPLAY</button></div>
@@ -161,7 +167,7 @@ body.hud-min #log,body.hud-min #cards,body.hud-min #request{display:none}
   <div class="seg replay-only" id="speeds"></div>
   <input id="scrub" type="range" min="0" max="1000" value="0" aria-label="position">
   <span id="clock" class="mono"></span>
-  <div id="legend"><span><i style="background:#8fa0ff"></i>thinking</span><span><i style="background:#4fd1ff"></i>answer</span><span><i style="background:#fff"></i>prompt in</span><span><i style="background:#4ade80"></i>pass</span><span><i style="background:#ff5a6b"></i>fail</span></div>
+  <div id="legend"><span><i style="background:#8fa0ff"></i>thinking</span><span><i style="background:#4fd1ff"></i>answer</span><span><i style="background:#fff"></i>prompt in</span><span><i style="background:#4ade80"></i>pass</span><span><i style="background:#ff5a6b"></i>fail</span><span title="each inner neuron is one kind of job that machine ran; links are which job followed which">double-click a machine to look inside</span></div>
 </footer>
 
 <script type="module">
@@ -184,7 +190,7 @@ const STEP_COLORS = [0x5b7cff, 0x5b7cff, 0x20c9b0, 0xa06bff, 0xf5c242, 0xff6b9a]
 const RESULT_COLORS = {true:0x4ade80, false:0xff5a6b, null:0x5ab0ff};
 const THINK_TINT = new THREE.Color(0x7a6cff);
 const GREEN = new THREE.Color(0x4ade80), RED = new THREE.Color(0xff5a6b), WHITE = new THREE.Color(0xffffff), GOLD = new THREE.Color(0xffd166);
-const MAX_PARTICLES = 4000, MAX_MOTES = 400, IDLE_SECS = 3, EST_TPS_FALLBACK = 40;
+const MAX_PARTICLES = 4000, MAX_MOTES = 400, IDLE_SECS = 3, EST_TPS_FALLBACK = 40, SEE_REST = .35;
 const SPEEDS = [1, 5, 10, 20, 60];
 
 /* ───────────────────────── helpers ───────────────────────── */
@@ -255,13 +261,14 @@ addEventListener('resize', resize);
 
 /* ───────────────────────── shaders ───────────────────────── */
 const BODY_VS = `varying vec3 vN,vV,vP; void main(){ vN=normalize(normalMatrix*normal); vec4 mv=modelViewMatrix*vec4(position,1.); vV=normalize(-mv.xyz); vP=position; gl_Position=projectionMatrix*mv; }`;
-const BODY_FS = `uniform vec3 uColor,uThinkColor; uniform float uThink,uEnergy,uTime; varying vec3 vN,vV,vP;
+// uSee 0 = solid body, 1 = a thin membrane you can see the inner neurons through (machines only; the core stays opaque)
+const BODY_FS = `uniform vec3 uColor,uThinkColor; uniform float uThink,uEnergy,uTime,uSee; varying vec3 vN,vV,vP;
 void main(){
   float f=pow(1.-abs(dot(normalize(vN),normalize(vV))),2.);
   float sp=mix(1.,2.4,uThink);
   float p=.5+.5*sin(vP.x*2.6+uTime*1.3*sp)*sin(vP.y*3.1-uTime*1.1*sp)*sin(vP.z*2.8+uTime*.9*sp);
   vec3 c=mix(uColor,uThinkColor,uThink*.7);
-  gl_FragColor=vec4(c*(.12+.5*f+.45*p*uEnergy)*(.5+uEnergy*.7),1.);
+  gl_FragColor=vec4(c*(.12+.5*f+.45*p*uEnergy)*(.5+uEnergy*.7),mix(1.,.12+.88*f,uSee));
 }`;
 const GLOW_FS = `uniform vec3 uColor; uniform float uI; varying vec3 vN,vV,vP;
 void main(){ float f=pow(1.-abs(dot(normalize(vN),normalize(vV))),2.6); gl_FragColor=vec4(uColor*1.6,f*uI); }`;
@@ -287,7 +294,7 @@ function additive(extra) {
 const coreGroup = new THREE.Group(); scene.add(coreGroup);
 const core = (() => {
   const color = new THREE.Color(STEP_COLORS[0]);
-  const bodyU = {uColor: {value: color}, uThinkColor: {value: THINK_TINT}, uThink: {value: 0}, uEnergy: {value: .5}, uTime: {value: 0}};
+  const bodyU = {uColor: {value: color}, uThinkColor: {value: THINK_TINT}, uThink: {value: 0}, uEnergy: {value: .5}, uTime: {value: 0}, uSee: {value: 0}};
   const body = new THREE.Mesh(new THREE.SphereGeometry(1.15, 48, 32), new THREE.ShaderMaterial({uniforms: bodyU, vertexShader: BODY_VS, fragmentShader: BODY_FS}));
   const glowU = {uColor: {value: color}, uI: {value: 1}};
   const glow = new THREE.Mesh(new THREE.SphereGeometry(1.75, 32, 24), additive({uniforms: glowU, vertexShader: BODY_VS, fragmentShader: GLOW_FS}));
@@ -310,9 +317,9 @@ for (const [key, m] of Object.entries(MACHINES)) neurons[key] = buildNeuron(key,
 function buildNeuron(key, m) {
   const color = new THREE.Color(m.color), pos = new THREE.Vector3(...m.pos);
   const group = new THREE.Group(); group.position.copy(pos); scene.add(group);
-  const bodyU = {uColor: {value: color}, uThinkColor: {value: THINK_TINT}, uThink: {value: 0}, uEnergy: {value: .3}, uTime: {value: 0}};
+  const bodyU = {uColor: {value: color}, uThinkColor: {value: THINK_TINT}, uThink: {value: 0}, uEnergy: {value: .3}, uTime: {value: 0}, uSee: {value: SEE_REST}};
   const geo = key === 'tools' ? new THREE.OctahedronGeometry(m.r * 1.25, 0) : new THREE.SphereGeometry(m.r, 48, 32);
-  const body = new THREE.Mesh(geo, new THREE.ShaderMaterial({uniforms: bodyU, vertexShader: BODY_VS, fragmentShader: BODY_FS}));
+  const body = new THREE.Mesh(geo, new THREE.ShaderMaterial({uniforms: bodyU, vertexShader: BODY_VS, fragmentShader: BODY_FS, transparent: true, depthWrite: false}));
   const glowU = {uColor: {value: color}, uI: {value: .6}};
   const glow = new THREE.Mesh(key === 'tools' ? new THREE.OctahedronGeometry(m.r * 1.8, 0) : new THREE.SphereGeometry(m.r * 1.55, 32, 24),
     additive({uniforms: glowU, vertexShader: BODY_VS, fragmentShader: GLOW_FS}));
@@ -326,8 +333,150 @@ function buildNeuron(key, m) {
   const title = el('b', null, m.name), sub = el('i', null, m.sub), chips = el('div', 'chips');
   dom.append(title, sub, chips);
   const label = new CSS2DObject(dom); label.position.copy(pos).add(new THREE.Vector3(0, -(m.r * 1.5 + 0.6), 0)); scene.add(label);
-  return {key, m, group, body, bodyU, glowU, pos, color, label, sub, chips, open: 0, energy: key === 'claude' ? .2 : .3, kick: 0, think: 0, thinkTarget: 0, active: new Map(), dirty: true, r: m.r};
+  // the inner network: it doesn't spin with the body, so the world positions of its curves stay put for the particles
+  const inner = new THREE.Group(); inner.position.copy(pos); scene.add(inner);
+  return {key, m, group, body, bodyU, glowU, pos, color, label, sub, chips, open: 0, energy: key === 'claude' ? .2 : .3, kick: 0, think: 0, thinkTarget: 0, active: new Map(), dirty: true, r: m.r,
+    inner, nodes: new Map(), links: new Map(), lastKey: null, see: SEE_REST};
 }
+
+/* ───────────────────────── inside a machine: one inner neuron per kind of job ─────────────────────────
+   Real data only: an inner neuron is a call label the machine ran (plan, review, survey, code…) or a tool
+   (tsc, jest, ts_moves…); its synapse to the membrane is that call; a link between two inner neurons means
+   one job followed the other on this machine, brighter the more often it did. */
+const INNER_ORDER = [0, 6, 3, 9, 1, 7, 4, 10, 2, 8, 5, 11];
+// the kind of job, without its task, round, machine or retry (code-R2T1 → code, second-review-1-windows → second-review)
+function innerKey(label) {
+  return String(label || '?').split(/[:\s]/)[0].replace(/-(R?\d*T?\d+|mac|windows|claude|retry)(?=-|$)/g, '') || '?';
+}
+
+function innerNode(n, key, color) {
+  let nd = n.nodes.get(key);
+  if (nd) return nd;
+  const i = n.nodes.size, slot = INNER_ORDER[i % 12] + 12 * Math.floor(i / 12), r = rng(key.length * 131 + key.charCodeAt(0));
+  const y = 1 - (slot % 12 + .5) / 12 * 2, rad = Math.sqrt(1 - y * y), th = slot * 2.39996 + r() * .4;
+  const local = new THREE.Vector3(Math.cos(th) * rad, y, Math.sin(th) * rad).multiplyScalar(n.r * (.42 + r() * .16 + .12 * Math.floor(i / 12)));
+  const s = n.r * .07;
+  const mat = new THREE.MeshBasicMaterial({color: color.clone(), transparent: true, opacity: .8, blending: THREE.AdditiveBlending, depthWrite: false});
+  const ball = new THREE.Mesh(new THREE.SphereGeometry(s, 14, 10), mat);
+  const glowU = {uColor: {value: color.clone()}, uI: {value: .6}};
+  const glow = new THREE.Mesh(new THREE.SphereGeometry(s * 2.6, 16, 12), additive({uniforms: glowU, vertexShader: BODY_VS, fragmentShader: GLOW_FS}));
+  // a few short dendrites so it reads as a neuron, not a dot
+  const pts = [];
+  for (let k = 0; k < 5; k++) {
+    const d = new THREE.Vector3(r() - .5, r() - .5, r() - .5).normalize();
+    let p = d.clone().multiplyScalar(s);
+    for (let j = 0; j < 3; j++) { const q = p.clone().addScaledVector(d.add(new THREE.Vector3(r() - .5, r() - .5, r() - .5).multiplyScalar(.8)).normalize(), s * (1.1 + r())); pts.push(p, q); p = q; }
+  }
+  const dendMat = new THREE.LineBasicMaterial({color: color.clone(), transparent: true, opacity: .4, blending: THREE.AdditiveBlending, depthWrite: false});
+  const dend = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts), dendMat);
+  const g = new THREE.Group(); g.position.copy(local); g.add(ball, glow, dend);
+  for (const o of [ball, glow, dend]) o.renderOrder = 1;
+  n.inner.add(g);
+  const dom = el('div', 'ilabel', key); dom.style.setProperty('--c', '#' + color.getHexString());
+  const lab = new CSS2DObject(dom); lab.position.set(0, -s * 3.2, 0); g.add(lab);
+  nd = {key, n, machine: n.key, g, mat, glowU, dendMat, dom, lab, base: color.clone(), world: local.clone().add(n.pos), open: new Set(),
+    energy: 0, kick: 0, think: 0, fail: 0, calls: 0, fails: 0, tokOut: 0, secs: 0, inner: true};
+  n.nodes.set(key, nd);
+  return nd;
+}
+
+// a call's path inside the machine: from where its synapse meets the membrane to its inner neuron
+function innerPath(syn, nd) {
+  const n = nd.n, a = syn.curve.v2.clone(), b = nd.world.clone();
+  const ctl = a.clone().lerp(b, .5).lerp(n.pos, .45);
+  const curve = new THREE.QuadraticBezierCurve3(a, ctl, b); curve.ends = [null, nd];
+  const mesh = new THREE.Mesh(new THREE.TubeGeometry(curve, 16, .011, 5, false), syn.mat);
+  mesh.frustumCulled = false; mesh.renderOrder = 1; scene.add(mesh);
+  return {node: nd, curve, mesh};
+}
+
+// one job followed another on this machine
+function innerLink(n, from, to, color) {
+  if (!from || from === to) return;
+  const id = [from.key, to.key].sort().join('|');
+  let lk = n.links.get(id);
+  if (!lk) {
+    const [a, b] = id.split('|').map((k) => n.nodes.get(k));
+    const ctl = a.world.clone().lerp(b.world, .5).lerp(n.pos, .55);
+    const curve = new THREE.QuadraticBezierCurve3(a.world.clone(), ctl, b.world.clone()); curve.ends = [a, b];
+    const mat = new THREE.LineBasicMaterial({color: n.color.clone().lerp(WHITE, .25), transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false});
+    const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(curve.getPoints(24)), mat);
+    line.renderOrder = 1; line.frustumCulled = false; scene.add(line);
+    lk = {a, b, curve, line, mat, count: 0, flash: 0};
+    n.links.set(id, lk);
+  }
+  lk.count++; lk.flash = 1;
+  if (!S.fast) for (let k = 0; k < 4; k++) emitAlong(lk.curve, lk.a === from ? 1 : -1, color, .1, k * .07);
+}
+
+function clearInner(n) {
+  for (const nd of n.nodes.values()) {
+    n.inner.remove(nd.g); nd.dom.remove();
+    nd.g.traverse((o) => { o.geometry?.dispose(); o.material?.dispose(); });
+  }
+  for (const lk of n.links.values()) { scene.remove(lk.line); lk.line.geometry.dispose(); lk.mat.dispose(); }
+  n.nodes.clear(); n.links.clear(); n.lastKey = null;
+}
+
+// how see-through a machine is: a little at rest, fully once the camera is close (or you double-clicked it)
+function updateInner(n, dt, time) {
+  const d = camera.position.distanceTo(n.pos), near = clamp((n.r * 9 - d) / (n.r * 5), 0, 1);
+  const target = Math.max(n.key === 'tools' ? SEE_REST * .6 : SEE_REST, near, focus.n === n ? 1 : 0);
+  n.see = lerp(n.see, target, 1 - Math.exp(-dt * 4));
+  n.bodyU.uSee.value = n.see;
+  const vis = .3 + .7 * n.see, labOn = clamp((n.see - .55) * 3, 0, 1);
+  for (const nd of n.nodes.values()) {
+    let thinking = 0;
+    for (const c of nd.open) if (c.phase === 'stream' && c.thinkFrac > .5) thinking = 1;
+    nd.energy = lerp(nd.energy, nd.open.size ? 1 : .25, 1 - Math.exp(-dt * 3));
+    nd.kick *= Math.exp(-dt * 4); nd.fail *= Math.exp(-dt * 1.2);
+    nd.think = lerp(nd.think, thinking, 1 - Math.exp(-dt * 2));
+    const col = nd.base.clone().lerp(THINK_TINT, nd.think * .65).lerp(RED, nd.fail);
+    nd.mat.color.copy(col); nd.glowU.uColor.value.copy(col); nd.dendMat.color.copy(col);
+    nd.mat.opacity = vis * (.35 + .65 * nd.energy);
+    nd.glowU.uI.value = vis * (.25 + nd.energy * .9 + nd.kick * 1.4);
+    nd.dendMat.opacity = vis * (.2 + .35 * nd.energy);
+    nd.g.scale.setScalar(1 + nd.kick * .6 + .06 * Math.sin(time * 2.2 + nd.world.x) * nd.energy);
+    nd.dom.style.opacity = Math.max(labOn, nd.open.size && n.see > .45 ? .85 : 0);
+  }
+  for (const lk of n.links.values()) {
+    lk.flash *= Math.exp(-dt * 1.5);
+    lk.mat.opacity = vis * (.06 + .05 * Math.min(lk.count, 8)) + lk.flash * .6 * vis;
+  }
+}
+
+/* double-click a machine to fly inside it; double-click empty space or press Esc to come back */
+const focus = {n: null, fly: null};
+const HOME_TARGET = new THREE.Vector3(0, .4, -1);
+function flyTo(target, dist) {
+  const dir = camera.position.clone().sub(controls.target).normalize();
+  focus.fly = {t: 0, fromT: controls.target.clone(), toT: target.clone(), fromP: camera.position.clone(), toP: target.clone().addScaledVector(dir, dist)};
+  controls.autoRotate = false; clearTimeout(idleTimer);
+}
+function setFocus(n) {
+  focus.n = n;
+  controls.minDistance = n ? n.r * 1.6 : 8;
+  if (n) flyTo(n.pos, n.r * 4.2); else flyTo(HOME_TARGET, Math.max(25.5, camera.position.distanceTo(HOME_TARGET) > 30 ? 30 : 26));
+  const h = $('#focusHint');
+  if (n) { h.style.setProperty('--c', n.m.css); h.innerHTML = `inside <b>${esc(n.m.name)}</b> · one inner neuron per kind of job · Esc to leave`; }
+  h.classList.toggle('show', !!n);
+}
+function stepFly(dt) {
+  const f = focus.fly; if (!f) return;
+  f.t = Math.min(1, f.t + dt / 1.2);
+  const e = f.t * f.t * (3 - 2 * f.t);
+  controls.target.lerpVectors(f.fromT, f.toT, e); camera.position.lerpVectors(f.fromP, f.toP, e);
+  if (f.t >= 1) { focus.fly = null; idleTimer = setTimeout(() => controls.autoRotate = true, 6000); }
+}
+const ray = new THREE.Raycaster();
+renderer.domElement.addEventListener('dblclick', (e) => {
+  ray.setFromCamera(new THREE.Vector2(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1), camera);
+  const hit = ray.intersectObjects(Object.values(neurons).map((n) => n.body))[0];
+  const n = hit && Object.values(neurons).find((x) => x.body === hit.object);
+  userTouchedCamera = true;
+  setFocus(n && n !== focus.n ? n : null);
+});
+addEventListener('keydown', (e) => { if (e.key === 'Escape' && focus.n) setFocus(null); });
 
 function dendrites(r, color, rand) {
   const g = new THREE.Group();
@@ -369,12 +518,12 @@ const P = (() => {
   const o = {N, cursor: 0,
     pos: new Float32Array(N * 3), col: new Float32Array(N * 3), size: new Float32Array(N), alpha: new Float32Array(N),
     t: new Float32Array(N), spd: new Float32Array(N), dir: new Int8Array(N), life: new Float32Array(N), baseSize: new Float32Array(N),
-    vel: new Float32Array(N * 3), off: new Float32Array(N * 3), curve: new Array(N).fill(null), alive: new Uint8Array(N)};
+    vel: new Float32Array(N * 3), off: new Float32Array(N * 3), curve: new Array(N).fill(null), next: new Array(N).fill(null), alive: new Uint8Array(N)};
   const g = new THREE.BufferGeometry();
   const attr = (a, n, name) => { const b = new THREE.BufferAttribute(a, n); b.setUsage(THREE.DynamicDrawUsage); g.setAttribute(name, b); return b; };
   o.aPos = attr(o.pos, 3, 'position'); o.aCol = attr(o.col, 3, 'aColor'); o.aSize = attr(o.size, 1, 'aSize'); o.aAlpha = attr(o.alpha, 1, 'aAlpha');
   o.points = new THREE.Points(g, additive({uniforms: {uScale: pointScale}, vertexShader: PT_VS, fragmentShader: PT_FS}));
-  o.points.frustumCulled = false; scene.add(o.points);
+  o.points.frustumCulled = false; o.points.renderOrder = 1; scene.add(o.points);
   return o;
 })();
 const tmpV = new THREE.Vector3();
@@ -382,10 +531,10 @@ const tmpV = new THREE.Vector3();
 function nextSlot() { const i = P.cursor; P.cursor = (P.cursor + 1) % P.N; return i; }
 function setColor(i, c, k = 1) { P.col[i * 3] = c.r * k; P.col[i * 3 + 1] = c.g * k; P.col[i * 3 + 2] = c.b * k; }
 
-// a particle that travels along a synapse; dir +1 = core→machine, -1 = machine→core
-function emitAlong(curve, dir, color, size, delay = 0) {
+// a particle that travels along a synapse; dir +1 = core→machine, -1 = machine→core; `next` is the curve it carries on along
+function emitAlong(curve, dir, color, size, delay = 0, next = null) {
   const i = nextSlot();
-  P.alive[i] = 1; P.curve[i] = curve; P.dir[i] = dir; P.t[i] = -delay; P.spd[i] = .55 + Math.random() * .45; P.baseSize[i] = size;
+  P.alive[i] = 1; P.curve[i] = curve; P.next[i] = next; P.dir[i] = dir; P.t[i] = -delay; P.spd[i] = .55 + Math.random() * .45; P.baseSize[i] = size;
   P.off[i * 3] = (Math.random() - .5) * .3; P.off[i * 3 + 1] = (Math.random() - .5) * .3; P.off[i * 3 + 2] = (Math.random() - .5) * .3;
   setColor(i, color, 1.3);
 }
@@ -407,7 +556,7 @@ function updateParticles(dt) {
       P.t[i] += P.spd[i] * dt;
       const t = P.t[i];
       if (t < 0) { P.alpha[i] = 0; P.size[i] = 0; continue; }
-      if (t >= 1) { arrive(c, P.dir[i]); kill(i); continue; }
+      if (t >= 1) { arrive(c, P.dir[i]); if (P.next[i]) { P.curve[i] = P.next[i]; P.next[i] = null; P.t[i] = 0; } else kill(i); continue; }
       c.getPoint(P.dir[i] > 0 ? t : 1 - t, tmpV);
       const w = Math.sin(Math.PI * t);
       P.pos[i * 3] = tmpV.x + P.off[i * 3] * w; P.pos[i * 3 + 1] = tmpV.y + P.off[i * 3 + 1] * w; P.pos[i * 3 + 2] = tmpV.z + P.off[i * 3 + 2] * w;
@@ -422,8 +571,9 @@ function updateParticles(dt) {
   }
   P.aPos.needsUpdate = P.aCol.needsUpdate = P.aSize.needsUpdate = P.aAlpha.needsUpdate = true;
 }
-function kill(i) { P.alive[i] = 0; P.alpha[i] = 0; P.size[i] = 0; P.curve[i] = null; }
+function kill(i) { P.alive[i] = 0; P.alpha[i] = 0; P.size[i] = 0; P.curve[i] = null; P.next[i] = null; }
 function arrive(c, dir) {
+  if (c.ends) { const nd = c.ends[dir > 0 ? 1 : 0]; if (nd) nd.kick = Math.min(nd.kick + .12, 1); return; }
   if (dir < 0) core.kick = Math.min(core.kick + .035, 1);
   else if (c.machine && neurons[c.machine]) neurons[c.machine].kick = Math.min(neurons[c.machine].kick + .06, 1);
 }
@@ -451,6 +601,7 @@ function makeSynapse(seed, machine, color, radius, kind) {
   return {curve, machine, mesh, mat, u: mat.uniforms, lab, labEl: domEl, grow: 0, fade: 1, ended: false, endAge: 0, flash: 0, kind};
 }
 function disposeSynapse(s) {
+  if (s.inner) { scene.remove(s.inner.mesh); s.inner.mesh.geometry.dispose(); }
   scene.remove(s.mesh); scene.remove(s.lab); s.lab.element.remove();
   s.mesh.geometry.dispose(); s.mat.dispose();
 }
@@ -532,7 +683,7 @@ function resetScene() {
   for (const s of synapses.splice(0)) disposeSynapse(s);
   motes.length = 0; M.geo.setDrawRange(0, 0);
   clearParticles();
-  for (const n of Object.values(neurons)) { n.open = 0; n.active.clear(); n.dirty = true; n.thinkTarget = 0; n.kick = 0; }
+  for (const n of Object.values(neurons)) { n.open = 0; n.active.clear(); n.dirty = true; n.thinkTarget = 0; n.kick = 0; clearInner(n); }
   core.kick = 0;
   S = freshState();
   applyAmbient(0);
@@ -603,10 +754,11 @@ function onCall(e) {
   const syn = makeSynapse(e.id * 7 + 3, mk, color, .03 + .02 * clamp(call.promptTokens / 20000, 0, 1), 'call');
   syn.owner = call; syn.curve.machine = mk; call.syn = syn; syn.labEl.textContent = e.label;
   synapses.push(syn);
+  enterInner(n, syn, call, innerKey(e.label), color);
   if (S.fast) { syn.grow = 1; }
   else {
     const white = color.clone().lerp(WHITE, .55), cnt = clamp(Math.round(call.promptTokens / 300), 5, 44);
-    for (let i = 0; i < cnt; i++) emitAlong(syn.curve, 1, white, .17, i / cnt * 1.1);
+    for (let i = 0; i < cnt; i++) emitAlong(syn.curve, 1, white, .17, i / cnt * 1.1, syn.inner.curve);
   }
 }
 
@@ -628,6 +780,7 @@ function onCallEnd(e) {
   if (e.tokens_in != null) { mach.tokIn += e.tokens_in - c.promptTokens; c.tokensIn = e.tokens_in; } else c.tokensIn = c.promptTokens;
   if (e.tokens_out != null) { mach.tokOut += e.tokens_out - c.tokens; c.tokens = e.tokens_out; }
   c.tokensOut = c.tokens;
+  leaveInner(c);
   mach.open = Math.max(0, mach.open - 1); n.open = Math.max(0, n.open - 1); n.active.delete('c' + c.id); n.dirty = true;
   if (c.ok) mach.ok++; else mach.fail++;
   const s = c.syn; s.ended = true; s.failed = !c.ok; s.endAge = S.fast ? 99 : 0;
@@ -638,6 +791,20 @@ function onCallEnd(e) {
   } else if (!S.fast) n.kick = Math.max(n.kick, .7);
   addMote(c, performance.now() / 1000 - (S.fast ? 5 : 0));
   refreshThink(c.machine);
+}
+
+// a call or tool run reaches its inner neuron (made the first time this kind of job shows up on the machine)
+function enterInner(n, syn, job, key, color) {
+  const nd = innerNode(n, key, color);
+  syn.inner = innerPath(syn, nd); job.node = nd;
+  innerLink(n, n.nodes.get(n.lastKey), nd, color.clone().lerp(WHITE, .3));
+  n.lastKey = key;
+  nd.open.add(job); nd.calls++; nd.kick = 1;
+}
+function leaveInner(job) {
+  const nd = job.node; if (!nd) return;
+  nd.open.delete(job); nd.tokOut += job.tokensOut || 0; nd.secs += job.secs || 0;
+  if (!job.ok) { nd.fails++; nd.fail = 1; } else nd.kick = Math.max(nd.kick, .7);
 }
 
 function refreshThink(mk) {
@@ -654,8 +821,9 @@ function onTool(e) {
   mach.calls++; mach.open++; n.open++; n.active.set('t' + e.id, e.name); n.dirty = true; n.kick = 1;
   const syn = makeSynapse(e.id * 13 + 900, 'tools', color, .028, 'tool');
   syn.owner = t; syn.curve.machine = 'tools'; t.syn = syn; syn.labEl.textContent = e.name; synapses.push(syn);
+  enterInner(n, syn, t, innerKey(e.name), color);
   if (S.fast) syn.grow = 1;
-  else for (let i = 0; i < 8; i++) emitAlong(syn.curve, 1, color, .15, i * .08);
+  else for (let i = 0; i < 8; i++) emitAlong(syn.curve, 1, color, .15, i * .08, syn.inner.curve);
 }
 
 function onToolEnd(e) {
@@ -664,6 +832,7 @@ function onToolEnd(e) {
   t.open = false; t.ok = e.ok !== false; t.secs = e.secs;
   mach.open = Math.max(0, mach.open - 1); n.open = Math.max(0, n.open - 1); n.active.delete('t' + t.id); n.dirty = true;
   if (t.ok) mach.ok++; else mach.fail++;
+  leaveInner(t);
   const s = t.syn; s.ended = true; s.failed = !t.ok; s.endAge = S.fast ? 99 : 0;
   const color = t.tkind === 'move' ? GOLD : t.ok ? GREEN : RED;
   s.u.uColor.value.copy(color);
@@ -717,7 +886,7 @@ function stepSimulation(dt, realNow) {
     if (c.phase === 'stream' && !S.fast) emitStream(c, dt);
   }
   // tool synapses shed small pulses while running
-  for (const t of S.tools.values()) if (t.open && Math.random() < dt * 14) emitAlong(t.syn.curve, 1, TOOL_COLOR[t.tkind] || TOOL_COLOR.check, .12);
+  for (const t of S.tools.values()) if (t.open && Math.random() < dt * 14) emitAlong(t.syn.curve, 1, TOOL_COLOR[t.tkind] || TOOL_COLOR.check, .12, 0, t.syn.inner.curve);
   if (!S.ended && S.t0 != null) accrue(S.now);
 }
 
@@ -727,7 +896,7 @@ function emitStream(c, dt) {
   while (c.emitAcc >= 1 && n++ < 10) {
     c.emitAcc -= 1;
     const think = Math.random() < c.thinkFrac;
-    emitAlong(c.syn.curve, -1, think ? c.thinkColor : c.color, think ? .15 : .19);
+    emitAlong(c.syn.inner.curve, -1, think ? c.thinkColor : c.color, think ? .15 : .19, 0, c.syn.curve);
   }
   if (c.emitAcc > 10) c.emitAcc = 0;
 }
@@ -744,6 +913,7 @@ function updateNeurons(dt, time) {
     n.group.scale.setScalar(1 + .035 * Math.sin(time * (1.4 + n.open)) * (.4 + n.energy) + n.kick * .14);
     n.group.rotation.y += dt * (n.key === 'tools' ? .6 : .12);
     if (n.dirty) { n.dirty = false; renderChips(n); }
+    updateInner(n, dt, time);
   }
   // core
   core.kick *= Math.exp(-dt * 3);
@@ -843,6 +1013,7 @@ function updateTip(dt) {
     if (d < bestD) { bestD = d; best = item; }
   };
   for (const m of motes) consider(m.call, m.p.x, m.p.y, m.p.z, 3);
+  for (const n of Object.values(neurons)) if (n.see > .5) for (const nd of n.nodes.values()) consider(nd, nd.world.x, nd.world.y, nd.world.z, 4);
   const q = new THREE.Vector3();
   for (const s of synapses) {
     if (s.fade < .2) continue;
@@ -855,7 +1026,13 @@ function showTip(c) {
   const mk = c.machine, col = MACHINES[mk].css;
   const open = c.open;
   let html;
-  if (c.kind === 'tool' || c.isTool) {
+  if (c.inner) {
+    const n = c.n, unit = n.key === 'tools' ? 'run' : 'call';
+    html = `<b style="color:${col}">${esc(c.key)}</b> · inside ${MACHINES[mk].name}<br>${c.calls} ${unit}${c.calls === 1 ? '' : 's'}` +
+      (c.fails ? ` · <span style="color:var(--bad)">${c.fails} failed</span>` : '') + (c.open.size ? ` · ${c.open.size} running` : '') +
+      (n.key !== 'tools' && c.tokOut ? `<br>out ${fmt(c.tokOut)} tokens` : '') + (c.secs ? `<br>${c.secs.toFixed(1)} s in all` : '') +
+      [...n.links.values()].filter((l) => l.a === c || l.b === c).map((l) => `<br><span class="dim">↔ ${esc((l.a === c ? l.b : l.a).key)} ×${l.count}</span>`).join('');
+  } else if (c.kind === 'tool' || c.isTool) {
     html = `<b style="color:${col}">${esc(c.name || c.label)}</b> · tools<br>${esc(c.tkind || '')} · ${open ? 'running' : c.ok ? 'passed' : 'failed'}${c.secs != null ? '<br>' + c.secs + ' s' : ''}`;
   } else {
     const secs = c.secs != null ? c.secs + ' s' : Math.max(0, S.now - c.t).toFixed(1) + ' s so far';
@@ -1343,6 +1520,7 @@ function frame() {
   stars.rotation.y += dt * .004;
   updateHud(realNow, S.hudDirty); S.hudDirty = false;
   updateTip(dt);
+  stepFly(dt);
   controls.update();
   composer.render();
   labelRenderer.render(scene, camera);
