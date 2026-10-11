@@ -721,6 +721,29 @@ deliberately left on the old signature. A review's time isn't reading, it's thin
 A cut-off review thinks ~60–80 s, then needs another call to answer (10–20 s). That is the bigger lever (roadmap
 29b). Item 29 makes more sense in a tree of many machines, where each level has to compress what it passes up.
 
+### 32. The night's toolbox: fold, refs, chunks, and routes read from the code (2026-10-12)
+
+- **Fold** (identical variant files → one file in the parent folder, importers repointed by TypeScript's
+  file-rename edits). On the work repo the inventory listed 6 "identical" pairs; 5 were per-app config files
+  (bundler, linter, env, a `.d.ts`) that tools find by location and nothing imports. Folding those would have
+  broken the builds, so fold refuses a pair nothing imports. One real pair is left (a navigator, folded in a
+  34 s dry run, type-checked). Byte-identical copies can still be different code: when their relative imports
+  point at their own siblings, the moved texts differ, and fold refuses.
+- **Module state into refs** (the owner's call: `useRef`, not module variables). On four real screens a dry run
+  converted 1–16 variables each and left exported ones and ones shared by two components, each with the reason.
+  Shares and moves now do this first, so a merge shares refs in the hook instead of one module variable that
+  both variants write. The report says what changes: a ref starts again on each mount.
+- **A JSX chunk by lines → a component**: the chunk becomes a typed render helper in memory, then the existing
+  component op runs. A `key` on its root moves to the new element.
+- **Contract from the code**: the backend's exported swagger was 2.5 months stale. Reading the NestJS
+  controllers and DTOs instead took 7 s, and the results went from 292 fitting calls of 337 to 310. "Missing
+  required" findings dropped from 15 to 0: the swagger had marked named query params required. Most of what's
+  left looks real (routes since removed or renamed). Two were matcher limits, both fixed: words compared with
+  case, and an unresolved part that couldn't match a literal route.
+- **opencode A/B, opencode half**: 8 of 12. Two of the failures were buckets bugs, now fixed. The planner
+  dropped the new parameter's default and the value every call should pass, then three rounds hand-edited 37
+  calls in 18 min (the request's words fill those fields now). And one plan overflowed the planner's context.
+
 ## Lessons so far
 
 - Run it, don't argue about it: comparing two versions of a small function on sample inputs settles

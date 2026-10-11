@@ -25,17 +25,19 @@ references through TypeScript)
 8. ~~Change a signature everywhere~~ **done for adding a parameter or prop** (`signature`, field notes 27);
    renaming or reordering one is left for item 11. M
 9. Code copied 3–4 times that drifted apart: **partly done** (`dedupe`: same-named top-level copies replaced
-   by an import when they behave the same, run on sample inputs; differences shown). Still to do: finding
-   copies with different names (clone detection), copies inside components. M–L
-10. ~~Turn part of a screen into a component~~ **done for render helpers** (`component`, field notes 28); a JSX
-    chunk picked by lines is still to do. M
-11. Renames across files through the TypeScript language service. S once 8 exists
+   by an import when they behave the same, run on sample inputs; differences shown; copies under other names
+   that are identical once renamed: `find_copies` + aliases, field notes 32). Still to do: copies inside
+   components. Identical variant files: `fold` (one file in the parent folder, importers repointed). M–L
+10. ~~Turn part of a screen into a component~~ **done** (`component`, field notes 28): render helpers, and a JSX
+    chunk by lines (the facts list the screen's JSX blocks with line ranges). M
+11. ~~Renames across files through the TypeScript language service~~ **done** (`rename`). S
 12. Shared hooks for code after an early return, or code that differs slightly. M
+12a. ~~Module state into refs~~ **done** (`to_ref`, the owner's call): module-level `let`s one component uses
+    become `useRef`s; moves and shares do it first for the state they meet.
 
 **Tier 3: confidence and measurement**
-13. `measure`: commands run on `main` and the branch, the numbers compared (warnings, bundle size, timing,
-    coverage). S–M
-14. Batch loop (`buckets each "<request>" <targets>`). S
+13. ~~`measure`~~ **done** (`buckets measure`): commands run on `main` and the branch, the numbers compared. S–M
+14. ~~Batch loop~~ **done** (`buckets each "<request>" <targets>`). S
 15. ~~A regression suite for buckets itself~~ **done (2026-10-11):** `regress.py` replays real requests on a
     clone it owns (the case's repo is only read; the suite stops if it changes), checks files, text, line
     counts, where changes land, commands and answers, and keeps times, pass rates and time per kind of
@@ -48,15 +50,16 @@ references through TypeScript)
 15b. UI checks through simframe: a saved flow (`simframe flow run`) as one more check before and after,
     with Metro reloaded on the branch; opt-in for UI changes. M
 16. Affected tests only during rounds, the full suite at the end. M
-17. Coverage-driven test jobs. M
-18. `git bisect run <check>`. M
+17. ~~Coverage-driven test jobs~~ **done** (coverage facts for test requests). M
+18. ~~`git bisect run <check>`~~ **done** (`buckets bisect`). M
 
 **Tier 4: workflows from the owner's list**
-19. Conflicts on PR branches. M
-20. Red CI end to end from the PR's status (the log is already read). S
+19. ~~Conflicts on PR branches~~ **done** (`--update BRANCH|PR`). M
+20. ~~Red CI end to end from the PR's status~~ **done** (the PR's branch is checked out). S
 21. Sonar issues as check output. S–M
 22. Dependabot batches and package patches. M
-23. Backend contract check (mobile calls vs backend-api; hard-coded search params). L
+23. ~~Backend contract check~~ **done** (`buckets contract`; a NestJS backend's routes read from its code, field
+    notes 32). Hard-coded search params still to do. L
 24. Web-parity scan (web-app as a related repo). M
 25. Jira tickets as the request (text). S
 26. Python for the move tools. M
