@@ -9,6 +9,8 @@
 //   share    move declarations that are identical in two variants into one shared file.
 //   syntax   whether a file's text parses (a reflex after an edit; no types).
 //   rename   a top-level declaration gets a new name in every file of the project (TypeScript's own rename).
+//   find_copies  functions in other files that are a shared file's exported functions under other names.
+//   dedupe   copies replaced by an import of the shared function ("aliases" lets a copy under another name go too).
 //
 // Input: one JSON object on stdin with "op" and the op's fields; output: one JSON object on stdout.
 // Files in the output are full new texts (paths relative to the repo); nothing is written here.
@@ -28,7 +30,12 @@ const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 const repo = path.resolve(input.repo || '.');
 const ts = loadTs(repo);
 const abs = (p) => path.resolve(repo, p);
-const rel = (p) => path.relative(repo, p).split(path.sep).join('/');
+const realRepo = (() => { try { return fs.realpathSync(repo); } catch (e) { return repo; } })();
+function rel(p) {
+  let r = path.relative(repo, p);
+  if (r.startsWith('..')) r = path.relative(realRepo, p);  // TypeScript may report a symlinked directory by its real path
+  return r.split(path.sep).join('/');
+}
 
 function program(files) {
   const roots = files.map(abs);
@@ -101,19 +108,24 @@ function isExported(stmt) {
     || (stmt.modifiers || []).some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
 }
 
+// An identifier that names a member, a key or a label rather than referring to a binding.
+function isNonReference(n) {
+  const p = n.parent;
+  return (ts.isPropertyAccessExpression(p) && p.name === n) || (ts.isQualifiedName(p) && p.right === n)
+    || (ts.isPropertyAssignment(p) && p.name === n) || (ts.isJsxAttribute(p) && p.name === n)
+    || ((ts.isMethodDeclaration(p) || ts.isPropertyDeclaration(p) || ts.isPropertySignature(p)
+         || ts.isMethodSignature(p) || ts.isGetAccessor(p) || ts.isSetAccessor(p)) && p.name === n)
+    || (ts.isBindingElement(p) && p.propertyName === n) || ts.isImportSpecifier(p) || ts.isExportSpecifier(p)
+    || (ts.isLabeledStatement(p) || ts.isBreakOrContinueStatement(p));
+}
+
 // Every identifier in `node` that refers to something, with the symbol it refers to.
 function references(checker, node) {
   const out = [];
   const visit = (n) => {
     if (ts.isIdentifier(n)) {
       const p = n.parent;
-      const skip = (ts.isPropertyAccessExpression(p) && p.name === n) || (ts.isQualifiedName(p) && p.right === n)
-        || (ts.isPropertyAssignment(p) && p.name === n) || (ts.isJsxAttribute(p) && p.name === n)
-        || ((ts.isMethodDeclaration(p) || ts.isPropertyDeclaration(p) || ts.isPropertySignature(p)
-             || ts.isMethodSignature(p) || ts.isGetAccessor(p) || ts.isSetAccessor(p)) && p.name === n)
-        || (ts.isBindingElement(p) && p.propertyName === n) || ts.isImportSpecifier(p) || ts.isExportSpecifier(p)
-        || (ts.isLabeledStatement(p) || ts.isBreakOrContinueStatement(p));
-      if (!skip) {
+      if (!isNonReference(n)) {
         const sym = ts.isShorthandPropertyAssignment(p) && p.name === n
           ? checker.getShorthandAssignmentValueSymbol(p) : checker.getSymbolAtLocation(n);
         if (sym) out.push({ node: n, sym });
@@ -1025,7 +1037,7 @@ function behaviour(checker, sfA, a, sfB, b) {
   if (/\bDate\b|Math\.random|fetch\(|setTimeout|await\b/.test(a.getText(sfA) + b.getText(sfB))) return null;
   const vm = require('vm');
   const compile = (sf, st, fn) => {
-    const js = ts.transpileModule(`(${fn.getText(sf)})`, { compilerOptions: { target: ts.ScriptTarget.ES2019 } }).outputText;
+    const js = ts.transpileModule(`(${fn.getText(sf).replace(/^export\s+(default\s+)?/, '')})`, { compilerOptions: { target: ts.ScriptTarget.ES2019 } }).outputText;
     return vm.runInNewContext(js, { Number, String, Boolean, Math, JSON, parseInt, parseFloat, isNaN, isFinite, Array,
                                     Object, RegExp, Error, TypeError, console: { log() {}, warn() {}, error() {} } }, { timeout: 200 });
   };
@@ -1047,49 +1059,343 @@ function behaviour(checker, sfA, a, sfB, b) {
   return { same: true, tried: inputs.length };
 }
 
+// ---------------------------------------------------------------- find_copies
+
+const isFnExpr = (n) => !!n && (ts.isArrowFunction(n) || ts.isFunctionExpression(n));
+const bare = (sf, st) => normalized(st, sf).replace(/^export/, '');
+
+// The functions a statement declares: `function f() {}` or `const f = () => {}`.
+function functionsIn(st) {
+  if (ts.isFunctionDeclaration(st)) return st.name && st.body ? [{ name: st.name.text, fn: st, stmt: st }] : [];
+  if (!ts.isVariableStatement(st)) return [];
+  return st.declarationList.declarations.filter((d) => ts.isIdentifier(d.name) && isFnExpr(d.initializer))
+    .map((d) => ({ name: d.name.text, fn: d.initializer, stmt: st }));
+}
+
+// The function bodies of a top-level statement that may hold local functions: a component, possibly
+// wrapped (`memo(() => {...})`).
+function bodiesOf(st) {
+  const fns = functionsIn(st).map((f) => f.fn);
+  if (ts.isVariableStatement(st)) {
+    for (const d of st.declarationList.declarations) if (d.initializer && ts.isCallExpression(d.initializer)) fns.push(...d.initializer.arguments.filter(isFnExpr));
+  }
+  return fns.filter((f) => f.body && ts.isBlock(f.body));
+}
+
+const realParams = (fn) => fn.parameters.filter((p) => !(ts.isIdentifier(p.name) && p.name.text === 'this'));
+const intrinsicTag = (n) => /^[a-z]/.test(n.text) && (ts.isJsxOpeningElement(n.parent) || ts.isJsxClosingElement(n.parent) || ts.isJsxSelfClosingElement(n.parent)) && n.parent.tagName === n;
+
+// What a function is made of: its size, the names it declares and the ones it uses from outside.
+function profile(fn, own) {
+  const declared = new Set(), used = new Set();
+  let nodes = 0;
+  const visit = (n) => {
+    if (n.kind === ts.SyntaxKind.ExportKeyword || n.kind === ts.SyntaxKind.DefaultKeyword) return;
+    nodes++;
+    if (ts.isParameter(n) || ts.isVariableDeclaration(n)) bindingNames(n.name).forEach((id) => declared.add(id.text));
+    else if ((ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isClassDeclaration(n) || ts.isClassExpression(n)
+              || ts.isTypeParameterDeclaration(n)) && n.name) declared.add(n.name.text);
+    else if (ts.isIdentifier(n) && !isNonReference(n) && !intrinsicTag(n)) used.add(n.text);
+    ts.forEachChild(n, visit);
+  };
+  visit(fn);
+  const free = new Set([...used].filter((u) => !declared.has(u) && u !== own));
+  const params = realParams(fn).flatMap((p) => bindingNames(p.name).map((id) => id.text));
+  return { nodes, declared, free, params: params.join(','), arity: realParams(fn).length };
+}
+
+// The function's text with its parameters and its own name renamed to fixed placeholders, printed
+// without spacing: copies that differ in those names alone print the same.
+function canon(sf, fn, own) {
+  const map = new Map();
+  for (const p of realParams(fn)) for (const id of bindingNames(p.name)) map.set(id.text, `$${map.size}`);
+  if (own && !map.has(own)) map.set(own, '$self');
+  const edits = [];
+  const visit = (n) => {
+    if (ts.isIdentifier(n) && map.has(n.text) && !intrinsicTag(n)) {
+      const p = n.parent, to = map.get(n.text);
+      const keyed = (ts.isShorthandPropertyAssignment(p) || (ts.isBindingElement(p) && !p.propertyName)) && p.name === n;
+      if (keyed) edits.push([n.getStart(sf), n.end, `${n.text}: ${to}`]);
+      else if (!isNonReference(n)) edits.push([n.getStart(sf), n.end, to]);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(fn);
+  const at = fn.getStart(sf);
+  const text = applyEdits(fn.getText(sf), edits.map(([s, e, r]) => [s - at, e - at, r]));
+  const decl = ts.isFunctionDeclaration(fn);
+  const parsed = ts.createSourceFile(sf.fileName, decl ? text : `(${text})`, ts.ScriptTarget.Latest, true);
+  return (parsed.statements.length ? normalized(parsed.statements[0], parsed) : text.replace(/\s+/g, '')).replace(/^export(default)?(?=function|async)/, '');
+}
+
+function resolvedModule(env, sf, spec) {
+  env.cache = env.cache || new Map();
+  const key = `${path.dirname(sf.fileName)}|${spec}`;
+  if (!env.cache.has(key)) {
+    const r = ts.resolveModuleName(spec, sf.fileName, env.options, ts.sys).resolvedModule;
+    env.cache.set(key, r ? norm(r.resolvedFileName) : spec.startsWith('.') ? norm(path.resolve(path.dirname(sf.fileName), spec)) : spec);
+  }
+  return env.cache.get(key);
+}
+
+// What each top-level name of a file is: an import (from where, under which name) or a declaration (its text).
+const topScopes = new WeakMap();
+function topScope(env, sf) {
+  if (topScopes.has(sf)) return topScopes.get(sf);
+  const out = new Map();
+  for (const st of sf.statements) {
+    if (ts.isImportDeclaration(st) && st.importClause) {
+      const c = st.importClause, from = resolvedModule(env, sf, st.moduleSpecifier.text), nb = c.namedBindings;
+      if (c.name) out.set(c.name.text, `import ${from} default`);
+      if (nb && ts.isNamespaceImport(nb)) out.set(nb.name.text, `import ${from} *`);
+      if (nb && ts.isNamedImports(nb)) for (const e of nb.elements) out.set(e.name.text, `import ${from} ${(e.propertyName || e.name).text}`);
+    } else {
+      for (const id of declaredBy(st)) out.set(id.text, `declaration ${bare(sf, st)}`);
+    }
+  }
+  topScopes.set(sf, out);
+  return out;
+}
+
+// The names two functions of the same text use that are not the same thing in their two files
+// (another import, another declaration, a variable of the component around one of them).
+function differingFree(env, a, b) {
+  const names = new Set([...a.prof.free, ...b.prof.free]);
+  const identity = (side, n) => (side.closure && side.closure.has(n) ? `closure ${side.sf.fileName} ${n}` : topScope(env, side.sf).get(n) || `global ${n}`);
+  return [...names].filter((n) => a.prof.free.has(n) !== b.prof.free.has(n) || identity(a, n) !== identity(b, n));
+}
+const sameFree = (env, a, b) => !differingFree(env, a, b).length;
+
+const typeKind = (p) => (p.type && /^(string|number|boolean)\b/.exec(p.type.getText()) || [''])[0];
+
+// Whether a pair may be run against each other: small, pure-looking, same arity and parameter kinds.
+function behavable(a, b) {
+  const plain = (c) => c.prof.arity >= 1 && c.prof.arity <= 3 && !c.fn.asteriskToken && !(c.fn.modifiers || []).some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)
+    && [...c.prof.free].every((n) => SAFE_GLOBALS.has(n));
+  if (!plain(a) || !plain(b)) return false;
+  const ratio = a.prof.nodes / b.prof.nodes;
+  if (ratio < 0.25 || ratio > 4) return false;
+  const ka = realParams(a.fn).map(typeKind), kb = realParams(b.fn).map(typeKind);
+  return ka.every((k, i) => !k || !kb[i] || k === kb[i]);
+}
+
+function stmtAt(sf, pos) {
+  let found = null;
+  const visit = (n) => {
+    if (found) return;
+    if ((ts.isFunctionDeclaration(n) || ts.isVariableStatement(n)) && n.getStart(sf) === pos) found = n;
+    else ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return found;
+}
+
+const sourceFiles = (list) => list.filter((f) => /\.(tsx?|jsx?)$/.test(f) && !f.endsWith('.d.ts') && !f.split('/').includes('node_modules'));
+
+// The functions in other files that are the exported functions of a shared file under other names: the same
+// text once parameter names and the function's own name are set aside ("identical"), or behaving the same
+// on sample inputs when both are small self-contained functions ("same behaviour"). `near` are the ones
+// with the same name or the same parameters but a body that differs. Nothing is changed.
+function findCopies() {
+  const home = norm(abs(input.file));
+  const { options, files: projectFiles } = projectOf(home);
+  const env = { options };
+  const parse = (f) => ts.createSourceFile(f, fs.readFileSync(f, 'utf8'), ts.ScriptTarget.Latest, true);
+  const H = parse(home);
+  const isDefault = (st) => (st.modifiers || []).some((m) => m.kind === ts.SyntaxKind.DefaultKeyword);
+  const exported = H.statements.filter((st) => isExported(st) && !isDefault(st)).flatMap(functionsIn);
+  const wanted = input.names && input.names.length ? input.names : null;
+  const picked = wanted ? wanted.map((n) => exported.find((f) => f.name === n) || (() => { throw new Error(`\`${n}\` isn't an exported function in ${input.file}`); })()) : exported;
+  const shared = picked.map((f) => {
+    const prof = profile(f.fn, f.name);
+    return { ...f, sf: H, prof, canon: canon(H, f.fn, f.name), closure: null, line: lineOf(H, f.stmt.getStart(H)) };
+  });
+  const byArity = new Map();
+  for (const s of shared) byArity.set(s.prof.arity, [...(byArity.get(s.prof.arity) || []), s]);
+  const scan = sourceFiles((input.files ? input.files.map((f) => norm(abs(f))) : projectFiles).map(norm)).filter((f) => f !== home && fs.existsSync(f));
+  const copies = [], inner = [], near = new Map(), queue = [];
+  const entry = (s, c, extra) => ({ file: rel(c.sf.fileName), name: c.name, shared: s.name, line: c.line, ...(c.parent ? { parent: c.parent } : {}), ...extra });
+  const judge = (s, c) => {
+    const sameName = c.name === s.name, sameParams = s.prof.arity > 0 && c.prof.params === s.prof.params;
+    let how = null, why = 'a different body';
+    if (c.prof.nodes === s.prof.nodes && canon(c.sf, c.fn, c.name) === s.canon) {
+      const diff = differingFree(env, s, c);
+      if (!diff.length) how = 'identical';
+      else why = `the same text, but ${diff.slice(0, 4).join(', ')} ${diff.length > 1 ? 'are' : 'is'} not the same thing there`;
+    }
+    if (how) return (c.parent ? inner : copies).push(entry(s, c, { how, exported: !!isExported(c.stmt) && !c.parent }));
+    if (behavable(s, c)) queue.push({ s, c, near: sameName || sameParams });
+    else if (sameName || sameParams) addNear(s, c, why, sameName);
+  };
+  const addNear = (s, c, why, sameName, extra = {}) => {
+    const sim = similarity(s.canon, canon(c.sf, c.fn, c.name));
+    if (!sameName && sim < 0.5) return;
+    near.set(`${c.sf.fileName}:${c.line}:${s.name}`, entry(s, c, { why, similarity: Math.round(sim * 100) / 100, ...extra }));
+  };
+  const consider = (c) => {
+    const options_ = byArity.get(realParams(c.fn).length);
+    if (!options_) return;
+    c.line = lineOf(c.sf, c.stmt.getStart(c.sf));
+    c.prof = profile(c.fn, c.name);
+    for (const s of options_) judge(s, c);
+  };
+  for (const f of scan) {
+    const text = fs.readFileSync(f, 'utf8');
+    if (!/=>|function/.test(text)) continue;
+    const sf = ts.createSourceFile(f, text, ts.ScriptTarget.Latest, true);
+    for (const st of sf.statements) {
+      for (const c of functionsIn(st)) consider({ ...c, sf, parent: null, closure: null });
+      for (const body of bodiesOf(st)) {
+        const outer = profile(body), parent = (functionsIn(st)[0] || {}).name || (declaredBy(st)[0] || {}).text || '';
+        for (const inside of body.body.statements) for (const c of functionsIn(inside)) consider({ ...c, sf, parent, closure: outer.declared });
+      }
+    }
+  }
+  const cap = 500;
+  queue.sort((a, b) => b.near - a.near);
+  const tried = queue.slice(0, cap);
+  if (tried.length) {
+    const roots = [home, ...new Set(tried.map((q) => q.c.sf.fileName))];
+    const prog = ts.createProgram(roots, { allowJs: true, jsx: ts.JsxEmit.Preserve, noEmit: true, noResolve: true, types: [], skipLibCheck: true });
+    const checker = prog.getTypeChecker(), HP = prog.getSourceFile(home);
+    for (const { s, c, near: wasNear } of tried) {
+      const sfP = prog.getSourceFile(c.sf.fileName);
+      const a = stmtAt(HP, s.stmt.getStart(H)), b = sfP && stmtAt(sfP, c.stmt.getStart(c.sf));
+      const r = a && b ? behaviour(checker, HP, a, sfP, b) : null;
+      if (r && r.same) (c.parent ? inner : copies).push(entry(s, c, { how: 'same behaviour', tried: r.tried, exported: !!isExported(c.stmt) && !c.parent }));
+      else if (wasNear) addNear(s, c, r ? `runs differently: (${r.input}) gives ${r.a} from the shared one, ${r.b} from this one` : 'a different body', c.name === s.name);
+    }
+  }
+  const order = (x, y) => x.file.localeCompare(y.file) || x.line - y.line;
+  const done = new Set([...copies, ...inner].map((e) => `${e.file}:${e.line}:${e.shared}`));
+  const nearList = [...near.values()].filter((e) => !done.has(`${e.file}:${e.line}:${e.shared}`)).sort(order);
+  return { files: {}, report: { copies: copies.sort(order), inner: inner.sort(order), near: nearList, shared: shared.map((s) => s.name),
+                               scanned: scan.length, behaviour_checked: tried.length, behaviour_skipped: queue.length - tried.length } };
+}
+
+// The function a statement declares under `name` (`function f() {}` or `const f = () => {}`), if it is one.
+function functionNamed(st, name) {
+  return functionsIn(st).find((f) => f.name === name) || null;
+}
+
+const norm = (f) => path.resolve(f).split(path.sep).join('/');
+function realNorm(f) {
+  try { return norm(fs.realpathSync(f)); } catch (e) { return norm(f); }
+}
+
+// Whether a copy under another name is the shared function: the same text once parameters and the
+// function's own name are renamed alike, and everything else it uses is the same thing in both files.
+function renamedIdentical(env, H, orig, sf, copy, shared, local) {
+  const a = functionNamed(orig, shared), b = functionNamed(copy, local);
+  if (!a || !b) return false;
+  const pa = profile(a.fn, shared), pb = profile(b.fn, local);
+  return pa.nodes === pb.nodes && canon(H, a.fn, shared) === canon(sf, b.fn, local)
+    && sameFree(env, { sf: H, name: shared, prof: pa }, { sf, name: local, prof: pb });
+}
+
+// A copy's name renamed to the shared one through TypeScript's own rename of that local symbol: the
+// edits for the places outside the removed declaration, or why not (a clash, an export, a use elsewhere).
+function renameCopy(ls, sf, copy, local, shared, H, orig) {
+  const prog = ls.getProgram(), checker = prog.getTypeChecker();
+  const id = declaredBy(copy).find((d) => d.text === local);
+  const locs = ls.findRenameLocations(sf.fileName, id.getStart(sf), false, false, { providePrefixAndSuffixTextForRename: true });
+  if (!locs || !locs.length) return { refused: `TypeScript found nothing to rename for ${local}` };
+  const outside = locs.filter((l) => !(l.fileName === sf.fileName && l.textSpan.start >= copy.getStart(sf) && l.textSpan.start < copy.end));
+  const other = outside.find((l) => l.fileName !== sf.fileName);
+  if (other) return { refused: `${local} is also used in ${rel(other.fileName)}; not renaming` };
+  const sharedImport = (d) => {
+    if (!ts.isImportSpecifier(d) || (d.propertyName || d.name).text !== shared) return false;
+    const sym = checker.getSymbolAtLocation(d.name), target = sym && checker.getAliasedSymbol(sym);
+    return !!target && (target.declarations || []).some((x) => x.getSourceFile() === H);
+  };
+  const { at, inScope } = visibleNames(prog, checker, shared);
+  const clashAt = (d) => (d && !sharedImport(d) ? `\`${shared}\` is already declared or imported at ${rel(d.getSourceFile().fileName)}:${lineOf(d.getSourceFile(), d.getStart())}` : null);
+  const top = inScope(sf);
+  let reason = clashAt(top);
+  const lower = /^[a-z]/.test(shared);
+  const edits = [];
+  for (const l of outside) {
+    const n = nodeAt(sf, l.textSpan.start), p = n.parent;
+    if (!ts.isIdentifier(n)) continue;
+    if (ts.isExportSpecifier(p)) return { refused: `${local} is exported from ${rel(sf.fileName)} by name; others may import it` };
+    reason = reason || clashAt(isExternalName(n) ? null : at(n));
+    if (lower && (ts.isJsxOpeningElement(p) || ts.isJsxClosingElement(p) || ts.isJsxSelfClosingElement(p)) && p.tagName === n)
+      return { refused: `\`${shared}\` starts with a lowercase letter, so JSX would read <${shared}> as a built-in tag` };
+    edits.push([l.textSpan.start, l.textSpan.start + l.textSpan.length, `${l.prefixText || ''}${shared}${l.suffixText || ''}`]);
+  }
+  return reason ? { refused: `${reason}, in scope where ${local} is used` } : { edits, imported: !!top };
+}
+
+// The program of the shared file and its copies, as a language service (renames need one).
+function serviceProgram(files) {
+  const names = files.map(norm);
+  const { options } = projectOf(names[0]);
+  const ls = service(names, options);
+  const prog = ls.getProgram();
+  const sources = names.map((n) => prog.getSourceFile(n));
+  const missing = names.filter((n, i) => !sources[i]);
+  if (missing.length) throw new Error(`TypeScript didn't load ${missing.map(rel).join(', ')} (excluded by its tsconfig?)`);
+  return { ls, checker: prog.getTypeChecker(), sources, options };
+}
+
 // Copies of a function in other files replaced by an import of the one that stays: each copy that is a
 // top-level declaration identical to the original (as TypeScript prints it, `export` aside) goes.
+// "aliases" ({copy file: {local name: shared name}}) lets a copy under another name go too: the local
+// name is renamed to the shared one in that file, or the copy is refused.
 function dedupe() {
-  const home = abs(input.file);
-  const { checker, sources } = program([input.file, ...input.copies]);
+  const aliases = new Map(Object.entries(input.aliases || {}).map(([f, m]) => [realNorm(abs(f)), m]));
+  const all = [input.file, ...input.copies];
+  const env = aliases.size ? serviceProgram(all) : { ...program(all), options: { allowJs: true } };
+  const { checker, sources } = env;
   const [H, ...C] = sources;
   const top = (sf, name) => sf.statements.find((s) => declaredBy(s).some((id) => id.text === name));
-  const bare = (sf, st) => normalized(st, sf).replace(/^export/, '');
-  const files = {}, replaced = [], differ = [], missing = [], equivalent = [];
-  for (const name of input.names) {
+  const files = {}, replaced = [], differ = [], missing = [], equivalent = [], refused = [];
+  const mustExport = (name) => {
     const orig = top(H, name);
     if (!orig) throw new Error(`\`${name}\` isn't a top-level declaration in ${input.file}`);
     if (!isExported(orig)) throw new Error(`\`${name}\` isn't exported from ${input.file}; export it (or relocate it there) first`);
-  }
+  };
+  input.names.forEach(mustExport);
+  for (const m of aliases.values()) Object.values(m).forEach(mustExport);
   for (const sf of C) {
-    const edits = [], names = [];
-    for (const name of input.names) {
-      const copy = top(sf, name);
-      if (!copy) { missing.push(`${rel(sf.fileName)}: ${name}`); continue; }
-      let same = null;
-      if (bare(sf, copy) !== bare(H, top(H, name))) {
-        same = behaviour(checker, H, top(H, name), sf, copy);
+    const mine = aliases.get(realNorm(sf.fileName)) || {};
+    const pairs = [...input.names.map((n) => [n, n]), ...Object.entries(mine).filter(([l, s]) => l !== s)];
+    const edits = [], removed = [], imports = new Set();
+    for (const [local, shared] of pairs) {
+      const copy = top(sf, local), orig = top(H, shared);
+      if (!copy) { if (!Object.values(mine).includes(local)) missing.push(`${rel(sf.fileName)}: ${local}`); continue; }
+      const identical = local === shared ? bare(sf, copy) === bare(H, orig) : renamedIdentical(env, H, orig, sf, copy, shared, local);
+      if (!identical) {
+        const same = behaviour(checker, H, orig, sf, copy);
         if (!same || !same.same) {
           const why = !same ? '' : `\n  runs differently: (${same.input}) gives ${same.a} from the shared one, ${same.b} from the copy`;
-          differ.push({ file: rel(sf.fileName), name, diff: lineDiff(top(H, name).getText(H), copy.getText(sf), 14) + why });
+          differ.push({ file: rel(sf.fileName), name: local, diff: lineDiff(orig.getText(H), copy.getText(sf), 14) + why });
           continue;
         }
-        equivalent.push(`${rel(sf.fileName)}: ${name} (written differently, behaves the same on ${same.tried} sample inputs)`);
+        equivalent.push(`${rel(sf.fileName)}: ${local} (written differently, behaves the same on ${same.tried} sample inputs)`);
       }
-      if (isExported(copy)) { differ.push({ file: rel(sf.fileName), name, diff: '(exported from there too; others may import it)' }); continue; }
+      if (isExported(copy)) { differ.push({ file: rel(sf.fileName), name: local, diff: '(exported from there too; others may import it)' }); continue; }
+      let imported = false;
+      if (local !== shared) {
+        const r = renameCopy(env.ls, sf, copy, local, shared, H, orig);
+        if (r.refused) { refused.push({ file: rel(sf.fileName), name: local, shared, reason: r.refused }); continue; }
+        edits.push(...r.edits);
+        imported = r.imported;
+      }
       edits.push([fullStart(sf, copy), lineEnd(sf.text, copy.end), '']);
-      names.push(name);
+      removed.push(copy);
+      if (!imported) imports.add(shared);
     }
-    if (!names.length) continue;
+    if (!removed.length) continue;
     // imports only the removed copies used go too
-    const removed = sf.statements.filter((st) => edits.some(([a]) => a === fullStart(sf, st)));
     const imp = importBindings(sf, checker);
     const keptRefs = sf.statements.filter((st) => !removed.includes(st) && !ts.isImportDeclaration(st)).flatMap((st) => references(checker, st));
     pruneImports(sf, new Set(keptRefs.filter(({ sym }) => imp.has(sym)).map(({ sym }) => imp.get(sym))), edits);
-    files[rel(sf.fileName)] = mergeImports(applyEdits(sf.text, edits), [`import { ${names.join(', ')} } from "${importPath(sf.fileName, home)}"`], sf.fileName);
-    replaced.push(`${rel(sf.fileName)}: ${names.join(', ')}`);
+    const lines = imports.size ? [`import { ${[...imports].join(', ')} } from "${importPath(sf.fileName, H.fileName)}"`] : [];
+    files[rel(sf.fileName)] = mergeImports(applyEdits(sf.text, edits), lines, sf.fileName);
+    replaced.push(`${rel(sf.fileName)}: ${removed.map((st) => declaredBy(st)[0].text).join(', ')}`);
   }
-  return { files, report: { replaced, differ, missing, equivalent } };
+  return { files, report: { replaced, differ, missing, equivalent, refused } };
 }
 
 // A function or component gets a new parameter (or prop) everywhere: the definition (optional, or with a
@@ -1502,6 +1808,28 @@ function renameCandidates(sf, checker, name) {
   });
 }
 
+// What `to` would clash with: the declaration of that name visible in a scope (default-library globals are
+// shadowable, so they don't count). `at(n)` is the scope where an identifier binds, `inScope(scope)` a scope.
+function visibleNames(prog, checker, to) {
+  const scopes = new Map();
+  const inScope = (scope) => {
+    if (!scopes.has(scope)) {
+      const names = new Map();
+      for (const s of checker.getSymbolsInScope(scope, ts.SymbolFlags.Value | ts.SymbolFlags.Type | ts.SymbolFlags.Namespace | ts.SymbolFlags.Alias)) {
+        const d = s.declarations && s.declarations[0];
+        if (d && !prog.isSourceFileDefaultLibrary(d.getSourceFile())) names.set(s.name, d);
+      }
+      scopes.set(scope, names);
+    }
+    return scopes.get(scope).get(to);
+  };
+  const at = (n) => {
+    const p = n.parent;
+    return inScope(scopeOf((ts.isFunctionLike(p) || ts.isClassLike(p)) && p.name === n ? p : n));  // a declared name binds outside its own body
+  };
+  return { at, inScope };
+}
+
 function diagnosticKeys(ls, names, undo) {
   const keys = new Map();
   for (const f of names) {
@@ -1548,20 +1876,7 @@ function rename() {
     return `${rel(f)}:${lineOf(prog.getSourceFile(l.fileName), l.textSpan.start)}`;
   });
   // a clash: `to` already visible where the new name would bind (default-library globals are shadowable)
-  const scopes = new Map();
-  const visible = (n) => {
-    const p = n.parent;
-    const scope = scopeOf((ts.isFunctionLike(p) || ts.isClassLike(p)) && p.name === n ? p : n);  // a declared name binds outside its own body
-    if (!scopes.has(scope)) {
-      const names = new Map();
-      for (const s of checker.getSymbolsInScope(scope, ts.SymbolFlags.Value | ts.SymbolFlags.Type | ts.SymbolFlags.Namespace | ts.SymbolFlags.Alias)) {
-        const d = s.declarations && s.declarations[0];
-        if (d && !prog.isSourceFileDefaultLibrary(d.getSourceFile())) names.set(s.name, d);
-      }
-      scopes.set(scope, names);
-    }
-    return scopes.get(scope).get(to);
-  };
+  const { at: visible } = visibleNames(prog, checker, to);
   const lowerJsx = /^[a-z]/.test(to);
   for (const l of places) {
     const n = nodeAt(prog.getSourceFile(l.fileName), l.textSpan.start);
@@ -1597,7 +1912,7 @@ function rename() {
 }
 
 try {
-  const ops = { extract, compare, share, share_hook: shareHook, unify, relocate, dedupe, same_behaviour: sameBehaviour, signature, component, syntax, rename };
+  const ops = { extract, compare, share, share_hook: shareHook, unify, relocate, dedupe, find_copies: findCopies, same_behaviour: sameBehaviour, signature, component, syntax, rename };
   if (!ops[input.op]) throw new Error(`unknown op ${input.op}`);
   process.stdout.write(JSON.stringify({ ok: true, ...ops[input.op]() }));
 } catch (e) {
