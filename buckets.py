@@ -4095,8 +4095,8 @@ class Buckets:
             plan = ask_json(self.planner, self.run, "plan", SYSTEM, prompt, PLAN_SCHEMA, validate,
                             max_tokens=16000, timeout=self.timeout, **self.think_budget())
         plan = self.prefer_move(plan)
-        missing = [f for f in paths_in_text(self.request, self.index.files)
-                   if plan["tasks"] and f not in {t["file"] for t in plan["tasks"]}]
+        covered = {f for t in plan["tasks"] for f in [t["file"], t.get("into") or "", *(t.get("from") or [])]}
+        missing = [f for f in paths_in_text(self.request, self.index.files) if plan["tasks"] and f not in covered]
         if missing:
             say(f"  {warn()} the plan has no task for {', '.join(missing)}, which the request names; asking for the rest")
             again = ask_json(self.planner, self.run, "plan-complete", SYSTEM,
@@ -4105,7 +4105,7 @@ class Buckets:
                                "the complete plan: the tasks above and the missing ones.",
                              PLAN_SCHEMA, validate, think=False, max_tokens=16000, timeout=self.timeout)
             if len(again["tasks"]) > len(plan["tasks"]):
-                plan = again
+                plan = self.prefer_move(again)
         self.run.save("plan.json", plan)
         return plan
 
