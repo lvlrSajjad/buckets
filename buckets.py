@@ -4971,6 +4971,7 @@ class Buckets:
         errors_before: set = set()
         for rnd in range(1, self.cfg["max_rounds"] + 1):
             self.rounds_used = rnd
+            round_start, now_before = git(repo, "rev-parse", "HEAD").strip(), now
             if tasks:
                 self.heading(code_step, "Coding" + (f" the follow-ups (round {rnd})" if rnd > 1 else "")
                              + f": {len(tasks)} task{'s' if len(tasks) != 1 else ''} on {machine_label(self.cfg['coder'])}")
@@ -4981,6 +4982,18 @@ class Buckets:
                 self.auto_fix(shortcut_base or base)
             if tasks:  # nothing changed otherwise, so the last check results still hold
                 now = run_checks(repo, checks, self.run, f"round{rnd}", self.cfg["check_timeout_s"])
+            broke = sorted(n for n, r in now.items() if not r["ok"] and now_before.get(n, {}).get("ok"))
+            if rnd >= 2 and broke and verdict is not None:
+                # A follow-up round that breaks what the round before had working: undo it and stop, rather
+                # than let the next round repair its own damage (each local repair tended to add the next problem).
+                git(repo, "reset", "-q", "--hard", round_start)
+                now = now_before
+                say(f"  {warn()} round {rnd} broke {', '.join(broke)}, which passed before it; undid that round "
+                    f"and stopped here")
+                verdict = {**verdict, "done": False,
+                           "summary": verdict["summary"] + f" (Round {rnd} broke {', '.join(broke)} and was undone; "
+                                                           "the branch holds the work as of the round before.)"}
+                break
             failing = {n for n, r in now.items() if not r["ok"]}
             if (rnd >= 2 and tasks and stuck(failing, failing_before)
                     and self.cfg.get("offload", {}).get("escalate_when_stuck")):

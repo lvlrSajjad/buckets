@@ -3,6 +3,7 @@ import ast
 import contextlib
 import io
 import json
+import sys
 import os
 from datetime import datetime, timedelta
 import shutil
@@ -1590,6 +1591,36 @@ class FollowUps(unittest.TestCase):
         self.assertIn("buckets/add-tax, which it built on, is in too and was deleted", msg)
         self.assertIn("tax = 2.0", (self.repo / "src/cart.ts").read_text())
         self.assertFalse(buckets.branch_exists(self.repo, "buckets/add-tax"))
+
+
+class RoundRollback(unittest.TestCase):
+    def test_a_round_that_breaks_a_passing_check_is_undone(self):
+        repo = make_repo({"a.txt": "start\n"})
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False, "max_rounds": 3,
+                                                          "offload": {"double_review": False}})
+        b = buckets.Buckets(cfg, repo, "change a.txt")
+        checks = {"test": f"{sys.executable} -c \"import sys; sys.exit('BROKEN' in open('a.txt').read())\""}
+        writes = iter(["good\n", "BROKEN\n"])
+        def fake_code(task, commit=True):
+            (repo / "a.txt").write_text(next(writes))
+            commit_all(repo, task["id"])
+            return {**task, "status": "done", "note": "DONE"}
+        follow = [{"id": "R2T1", "file": "a.txt", "action": "edit", "instructions": "x", "done_when": "", "edits": [],
+                   "read_first": [], "where": ""}]
+        def fake_review(*a, **k):
+            return {"done": False, "summary": "needs more", "issues": ["more"], "tasks": follow}
+        task = {**follow[0], "id": "T1"}
+        base = buckets.git(repo, "rev-parse", "HEAD").strip()
+        baseline = {"test": {"ok": True, "output": "", "tail": ""}}
+        with mock.patch.object(b, "code_task", fake_code), mock.patch.object(b, "double_review", fake_review), \
+                mock.patch.object(b, "auto_fix", lambda base: None), contextlib.redirect_stderr(io.StringIO()) as err:
+            rounds, verdict, now = b.rounds({"summary": "s"}, [task], base, checks, baseline)
+        self.assertEqual(len(rounds), 2)
+        self.assertEqual((repo / "a.txt").read_text(), "good\n")                  # round 2 undone
+        self.assertTrue(now["test"]["ok"])
+        self.assertFalse(verdict["done"])
+        self.assertIn("Round 2 broke test and was undone", verdict["summary"])
+        self.assertIn("round 2 broke test", err.getvalue())
 
 
 class Undo(unittest.TestCase):
