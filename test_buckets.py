@@ -2115,8 +2115,48 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
         self.assertNotIn("const fmt", a)
         self.assertIn('import { fmt } from "../utils/dates"', a)
         self.assertIn("const fmt = (s: string): string => s.toUpperCase()", (self.repo / "src/time/b.ts").read_text())  # differs: kept
-        self.assertIn("copies that differ", got[1]["note"])
+        self.assertIn("copies that DIFFER", got[1]["note"])
         self.assertIn("export const fmt", (self.repo / "src/utils/dates.ts").read_text())
+
+    def test_differing_copies_unify_into_the_shared_one_then_dedupe(self):
+        shared = "export const fmt = (s: string): string => {\n  return s.trim()\n}\n"
+        safer = "const fmt = (s: string): string => {\n  if (!s) return ''\n  return s.trim()\n}\n"
+        files = {"src/utils/text.ts": shared, "src/a.ts": safer + "export const A = () => fmt(' x ')\n",
+                 "src/b.ts": safer + "export const B = () => fmt('y')\n"}
+        for f, t in files.items():
+            (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / f).write_text(t)
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "copies"], cwd=self.repo, check=True)
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        b = buckets.Buckets(cfg, self.repo, "x")
+        base = buckets.git(self.repo, "rev-parse", "HEAD").strip()
+        dd = buckets.validate_tasks([{"id": "T1", "file": "src/utils/text.ts", "action": "dedupe", "select": ["fmt"],
+                                      "instructions": "", "done_when": "", "edits": []}], self.repo, 8, "T")[0]
+        with contextlib.redirect_stderr(io.StringIO()):
+            first = b.code_task(dd)
+        self.assertEqual(first["status"], "failed")
+        self.assertIn("+ if (!s) return ''", first["note"])                         # the difference is shown
+        # a hand edit that removes a differing copy is flagged for the reviewers
+        (self.repo / "src/a.ts").write_text('import { fmt } from "./utils/text"\nexport const A = () => fmt(\' x \')\n')
+        commit_all(self.repo, "hand edit")
+        self.assertIn("had its own `fmt`, which differs", b.removed_copies_text(base))
+        subprocess.run(["git", "reset", "-q", "--hard", base], cwd=self.repo, check=True)
+        # the right way: unify the safer copy into the shared one (keeping its export), then dedupe
+        with self.assertRaises(ValueError):                                          # no "from" until it's filled
+            buckets.validate_tasks([{"id": "T2", "file": "src/utils/text.ts", "action": "unify", "select": ["fmt"],
+                                     "instructions": "use the safer version from src/a.ts", "done_when": "", "edits": []}], self.repo, 8, "T")
+        filled = buckets.validate_tasks(b.fill_moves({"tasks": [{"id": "T2", "file": "src/utils/text.ts", "action": "unify",
+                     "select": ["fmt"], "instructions": "use the safer version from src/a.ts", "done_when": "", "edits": []}]})["tasks"],
+                                        self.repo, 8, "T")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(b.code_task(filled[0])["status"], "done")
+            second = b.code_task(dd)
+        self.assertIn("export const fmt", (self.repo / "src/utils/text.ts").read_text())
+        self.assertIn("if (!s) return ''", (self.repo / "src/utils/text.ts").read_text())
+        self.assertEqual(second["status"], "done", second)
+        for f in ("src/a.ts", "src/b.ts"):
+            self.assertIn('import { fmt } from "./utils/text"', (self.repo / f).read_text())
 
     def test_shared_hook_names(self):
         self.assertEqual(buckets.shared_hook_names("a/b/billing-shared.tsx", "a/b/x/use-billing-screen.tsx"),

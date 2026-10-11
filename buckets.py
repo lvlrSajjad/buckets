@@ -3666,6 +3666,12 @@ class Buckets:
                 for k in ("file", "into", "select", "from"):
                     if h.get(k) and not t.get(k):
                         t[k] = h[k]
+        for t in data.get("tasks") or []:  # a unify's source named only in its instructions
+            if isinstance(t, dict) and t.get("action") == "unify" and not t.get("from"):
+                f = clean_path(str(t.get("file", ""))).lstrip("/")
+                named = [p for p in paths_in_text(str(t.get("instructions", "")), self.index.files) if p != f]
+                if named:
+                    t["from"] = [named[0]]
         pairs = [(h["compare"]["a"], h["compare"]["b"]) for h in self.share_hints()]
         for t in data.get("tasks") or []:  # a unify's "from" is the other variant of the file it changes
             if not (isinstance(t, dict) and t.get("action") == "unify"):
@@ -4640,9 +4646,17 @@ class Buckets:
                 (self.repo / f).write_text(text)
                 written.append(f)
             r = d["report"]
+            self.differing_copies = getattr(self, "differing_copies", {})
+            for x in r["differ"]:
+                self.differing_copies[(x["file"], x["name"])] = (task["file"], x["diff"])
             note = (f"replaced copies with an import from {task['file']}: {'; '.join(r['replaced']) or 'none'}"
-                    + (f"; copies that differ (unify them first, or keep them): {'; '.join(r['differ'])}" if r["differ"] else ""))
+                    + ("; copies that DIFFER from it, so replacing them would change behaviour (if the copy is the "
+                       f"better version, unify it into {task['file']} first; otherwise keep it): "
+                       + "; ".join(f"{x['file']}: {x['name']} (lines only in {task['file']} (-) or the copy (+):\n{x['diff']})"
+                                   for x in r["differ"]) if r["differ"] else ""))
             if not written:
+                say(f"  {warn()} {task['id']} dedupe: nothing replaced; {len(r['differ'])} cop{'y differs' if len(r['differ']) == 1 else 'ies differ'} "
+                    f"from {task['file']} ({', '.join(x['file'].split('/')[-1] for x in r['differ'])})")
                 return {**task, "status": "failed", "note": f"BLOCKED: {note}"}
             self.involved = list(dict.fromkeys(self.involved + written))
             if commit:
@@ -4975,7 +4989,7 @@ class Buckets:
             checks="\n".join(chk) or "(no checks configured)",
             shortcuts=("\nShortcuts found in the diff (must be replaced with real fixes):\n"
                        + "\n".join(f"- {h}" for h in shortcuts) + "\n") if shortcuts else "",
-            impact=impact_text(api) + self.phrases_now(base) + self.weak_tests_text(base) + self.i18n_text(base)
+            impact=impact_text(api) + self.phrases_now(base) + self.removed_copies_text(base) + self.weak_tests_text(base) + self.i18n_text(base)
                    + self.changed_code(base),
             diff=self.diff_text(base), rules=TASK_RULES.format(max_tasks=self.cfg["max_tasks"]),
             agent_rules=self.agent_rules_text(),
@@ -5018,6 +5032,19 @@ class Buckets:
         rules = agent_rules(self.repo)
         return ("- The repo's own rules (from its agent doc). The change must follow every one that applies; "
                 "list each it breaks as an issue, naming the rule:\n" + rules + "\n") if rules else ""
+
+    def removed_copies_text(self, base: str) -> str:
+        """Copies a dedupe found to differ from the shared version that the change removed anyway: their
+        differences now apply wherever they were used, so behaviour may change."""
+        copies = getattr(self, "differing_copies", {})
+        out = []
+        for (f, name), (home, diff) in copies.items():
+            gone = git(self.repo, "diff", "-U0", f"{base}..HEAD", "--", f, check=False)
+            if re.search(rf"(?m)^-\s*(export\s+)?(const|let|var|function)\s+{re.escape(name)}\b", gone):
+                out.append(f"- `{f}` had its own `{name}`, which differs from `{home}`'s, and the change removed it; it now uses "
+                           f"the shared one, so these differences apply there (- shared, + the removed copy):\n{diff}")
+        return ("\nBehaviour check, mechanical (a removed copy that differed; the request said behaviour must not change):\n"
+                + "\n".join(out) + "\n") if out else ""
 
     def weak_tests_text(self, base: str) -> str:
         found = weak_tests(git(self.repo, "diff", "-U0", f"{base}..HEAD"))

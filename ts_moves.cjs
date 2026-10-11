@@ -882,7 +882,9 @@ function unify() {
     const src = t && ds.find((d) => key(d) === key(t));
     if (!t || !src) { missing.push(name); continue; }
     if (src.flat === t.flat) continue;
-    const text = S.text.slice(src.stmt.getStart(S), src.stmt.end);
+    let text = S.text.slice(src.stmt.getStart(S), src.stmt.end);
+    if (isExported(t.stmt) && !isExported(src.stmt)) text = 'export ' + text;  // keep the target's export
+    if (!isExported(t.stmt) && isExported(src.stmt)) text = text.replace(/^export\s+/, '');
     const ind = (sf, st) => sf.text.slice(lineStart(sf.text, st.getStart(sf)), st.getStart(sf));
     const from = ind(S, src.stmt), to = ind(T, t.stmt);
     const body = from === to ? text : text.split('\n').map((l, i) => (i && l.startsWith(from) ? to + l.slice(from.length) : l)).join('\n');
@@ -1001,8 +1003,11 @@ function dedupe() {
     for (const name of input.names) {
       const copy = top(sf, name);
       if (!copy) { missing.push(`${rel(sf.fileName)}: ${name}`); continue; }
-      if (bare(sf, copy) !== bare(H, top(H, name))) { differ.push(`${rel(sf.fileName)}: ${name}`); continue; }
-      if (isExported(copy)) { differ.push(`${rel(sf.fileName)}: ${name} (exported from there too; others may import it)`); continue; }
+      if (bare(sf, copy) !== bare(H, top(H, name))) {
+        differ.push({ file: rel(sf.fileName), name, diff: lineDiff(top(H, name).getText(H), copy.getText(sf), 14) });
+        continue;
+      }
+      if (isExported(copy)) { differ.push({ file: rel(sf.fileName), name, diff: '(exported from there too; others may import it)' }); continue; }
       edits.push([fullStart(sf, copy), lineEnd(sf.text, copy.end), '']);
       names.push(name);
     }
