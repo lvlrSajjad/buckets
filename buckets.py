@@ -3512,6 +3512,32 @@ class Buckets:
         edits: copying 1,000 lines into an edit is still retyping) gets the mechanical move instead; the planner's other tasks stay. Next to a move or share, edit tasks on its files go,
         even with exact edits: it already rewires them (one such task spent 9 minutes changing nothing,
         another replaced each shared declaration by hand), and what's left is for the review."""
+        # An edit on a variant that names a near copy is a unify the planner wrote by hand: copy the other
+        # variant's version exactly instead, before the share (which then finds it identical).
+        near = {}
+        for h in self.share_hints():
+            for p in h["compare"]["pairs"]:
+                if p["status"] == "near" and p.get("depth", 9) <= 1:
+                    near.setdefault(p["name"], (h["compare"]["a"], h["compare"]["b"]))
+        converted = []
+        for t in plan["tasks"]:
+            if t["action"] != "edit" or not near:
+                converted.append(t)
+                continue
+            names = [n for n, (a, b) in near.items() if t["file"] in (a, b)
+                     and re.search(rf"(?<![\w$]){re.escape(n)}(?![\w$])", t["instructions"])]
+            if names and re.search(r"\b(unif|match|same as|identical|align)\w*", t["instructions"], re.I):
+                a, b = near[names[0]]
+                converted.append({**t, "action": "unify", "from": [b if t["file"] == a else a], "select": names,
+                                  "edits": [], "where": ""})
+            else:
+                converted.append(t)
+        if converted != plan["tasks"]:
+            n = sum(t["action"] == "unify" for t in converted) - sum(t["action"] == "unify" for t in plan["tasks"])
+            say(f"  {paint('as unify', 'dim')}: {n} edit task(s) that make near copies match, copied exactly instead")
+            order = {"unify": 0}
+            converted = sorted(converted, key=lambda t: order.get(t["action"], 1))
+            plan = {**plan, "tasks": converted}
         moves = [t for t in plan["tasks"] if t["action"] in ("move", "share")]
         if moves:
             mine = {f for t in moves for f in ([t["file"], t["into"]] if t["action"] == "move" else [t["file"], *t["from"]])}

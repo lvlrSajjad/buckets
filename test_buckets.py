@@ -1866,6 +1866,29 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
         self.assertIn("export const near = (x: number) => fmt(x ?? 0)", shared)   # unified, then shared too
         self.assertIn("export const same", shared)
 
+    def test_an_edit_that_unifies_a_near_copy_becomes_unify(self):
+        a = 'const same = (x: number) => x * 2\nconst near = (x: number) => String(x ?? 0)\n\nexport const A = () => same(1) + near(2)\n'
+        b2 = a.replace("String(x ?? 0)", "String(x)").replace("export const A", "export const B")
+        for f, t in {"src/a/screen.ts": a, "src/b/screen.ts": b2}.items():
+            (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / f).write_text(t)
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "variants"], cwd=self.repo, check=True)
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        b = buckets.Buckets(cfg, self.repo, "Merge src/a/screen.ts and src/b/screen.ts into src/screen-shared.ts")
+        plan = {"summary": "s", "tasks": [
+            {"id": "T1", "file": "src/screen-shared.ts", "action": "share", "from": ["src/a/screen.ts", "src/b/screen.ts"],
+             "select": ["same"], "instructions": "", "done_when": "", "where": "", "edits": [], "read_first": []},
+            {"id": "T2", "file": "src/b/screen.ts", "action": "edit", "instructions": "Unify `near` to match the a version: x ?? 0",
+             "done_when": "", "where": "", "edits": [{"at": "String(x)", "mode": "replace", "code": "String(x ?? 0)"}], "read_first": []}]}
+        with contextlib.redirect_stderr(io.StringIO()):
+            hints = b.share_hints()
+            if not any(p["status"] == "near" and p["name"] == "near" for p in hints[0]["compare"]["pairs"]):
+                self.skipTest("the two `near` versions don't count as a near copy here")
+            got = b.prefer_move(plan)
+        self.assertEqual([(t["id"], t["action"]) for t in got["tasks"]], [("T1", "unify"), ("T2", "share")])
+        self.assertEqual((got["tasks"][0]["from"], got["tasks"][0]["select"]), (["src/a/screen.ts"], ["near"]))
+
     def test_shared_hook_names(self):
         self.assertEqual(buckets.shared_hook_names("a/b/create-invoice-shared.tsx", "a/b/x/use-create-invoice-screen.tsx"),
                          ("a/b/use-create-invoice-screen-shared.ts", "useCreateInvoiceScreenShared"))
