@@ -3498,7 +3498,7 @@ class Buckets:
                     say(f"  {warn()} the plan would retype the shared code; sharing it mechanically instead")
                     rest = [t for t in plan["tasks"] if t["file"] != ht["file"]]
                     fixed = validate_move(dict(ht), ht["file"], self.repo, "T1")
-                    plan = {**plan, "tasks": [{**t, "id": f"T{n}"} for n, t in enumerate([fixed] + rest, 1)]}
+                    return self.prefer_move({**plan, "tasks": [fixed] + rest})  # and drop edits that redo it
         hint = self.move_hint()
         if not hint:
             return plan
@@ -3702,6 +3702,18 @@ class Buckets:
         if self.facts_cover(long, ctx):
             say(f"  {ok()} {', '.join(long)}: the facts already show the code the request names; reading nothing more")
             return f"(The long files, {sizes}, are shown only through the facts above.)"
+        covered = set()
+        if self.move_hint():
+            covered.add(self.move_hint()["task"]["file"])
+        for h in self.share_hints():
+            if h["task"]:
+                covered |= set(h["task"]["from"])
+        if covered and set(long) <= covered:
+            # The mechanical move or share in the facts does the work; the planner only needs the shape.
+            say(f"  {ok()} {', '.join(long)}: a mechanical move covers these; the planner gets their outlines, not their code")
+            return (f"The long files ({sizes}) are covered by the mechanical task in the facts. Their outlines "
+                    "(read a part with the read tool if the plan needs more):\n\n"
+                    + "\n\n".join(f"=== {f} ===\n" + outline_text(decls_of(self.repo, f, outline)) for f in long))
         maps = "\n\n".join(f"=== {f} ({files[f]} lines; outline: lines, name, signature) ===\n"
                             + outline_text(decls_of(self.repo, f, outline)) for f in long)
         say(f"  {', '.join(long)}: too long to read whole, so the planner picks the parts it needs from the outline")

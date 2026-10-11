@@ -1787,7 +1787,9 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
             self.assertEqual(hints[0]["task"]["file"], "src/screen-shared.ts")
             self.assertIn("A mechanical share fits these two files", b.facts())
             retyped = {"summary": "s", "tasks": [{"id": "T1", "file": "src/screen-shared.ts", "action": "create",
-                                                  "instructions": "write it", "done_when": "", "where": "", "edits": []}]}
+                                                  "instructions": "write it", "done_when": "", "where": "", "edits": []},
+                                                 {"id": "T2", "file": "src/a/screen.ts", "action": "edit",
+                                                  "instructions": "import it", "done_when": "", "where": "", "edits": []}]}
             got = b.prefer_move(retyped)
         self.assertEqual([t["action"] for t in got["tasks"]], ["share"])
         with contextlib.redirect_stderr(io.StringIO()):
