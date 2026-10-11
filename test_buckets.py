@@ -3699,6 +3699,93 @@ class RenameAction(unittest.TestCase):
         self.assertIn("renaming mechanically instead", err.getvalue())
 
 
+JSX_TYPES = "declare namespace JSX { interface Element {} interface IntrinsicElements { [k: string]: any } }\n"
+
+
+class ModuleStateRefs(unittest.TestCase):
+    """Module-level `let`s a component reads and writes become refs (the owner's call), alone or when a move or a
+    share meets them."""
+
+    REACT = ('declare module "react" {\n  export function useRef<T>(v: T): { current: T }\n'
+             '  export function useEffect(f: () => void, d?: any[]): void\n}\n')
+    SCREEN = ('import { useEffect } from "react"\n\nlet loaded = false\nlet hits = 0\n\n'
+              'export const Screen = ({ id }: { id: number }) => {\n  useEffect(() => {\n    if (!loaded) loaded = true\n'
+              '    hits += id\n  }, [id])\n  const %s = 1\n  return <i>{String(loaded)}{hits}</i>\n}\n')
+
+    def setUp(self):
+        if not (TS_PKG.exists() and shutil.which("node")):
+            self.skipTest("needs node and a typescript package")
+        self.repo = make_repo({"src/react.d.ts": self.REACT, "src/jsx.d.ts": JSX_TYPES,
+                               "src/x/a/screen.tsx": self.SCREEN % "onlyA", "src/x/b/screen.tsx": self.SCREEN % "onlyB",
+                               "tsconfig.json": '{"compilerOptions": {"jsx": "preserve", "strict": true, "noEmit": true, "skipLibCheck": true}}'})
+        (self.repo / "node_modules").mkdir()
+        (self.repo / "node_modules/typescript").symlink_to(TS_PKG)
+        (self.repo / ".git/info/exclude").write_text("node_modules\n")
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        self.b = buckets.Buckets(cfg, self.repo, "x")
+
+    def tsc(self) -> str:
+        r = subprocess.run(["node", str(TS_PKG / "bin" / "tsc"), "-p", "."], cwd=self.repo, capture_output=True, text=True)
+        return r.stdout + r.stderr
+
+    def test_a_share_turns_the_state_into_refs_in_the_shared_hook(self):
+        task = buckets.validate_tasks([{"id": "T1", "file": "src/x/screen-shared.ts", "action": "share",
+                                        "from": ["src/x/a/screen.tsx", "src/x/b/screen.tsx"], "select": ["loaded", "hits"],
+                                        "instructions": "", "done_when": "", "edits": []}], self.repo, 8, "T")[0]
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = self.b.code_task(task)
+        self.assertEqual(got["status"], "done", got)
+        self.assertIn("turned module state into refs in Screen (loaded → loadedRef, hits → hitsRef)", got["note"])
+        self.assertIn("starts from its initial value on every mount", got["note"])
+        shared = (self.repo / "src/x/screen-shared.ts").read_text()
+        self.assertIn("const loadedRef = useRef<boolean>(false)", shared)
+        self.assertNotIn("let loaded", shared)
+        for v in ("a", "b"):
+            screen = (self.repo / f"src/x/{v}/screen.tsx").read_text()
+            self.assertNotIn("let loaded", screen)
+            self.assertIn("loadedRef.current = true", screen)
+        self.assertEqual(self.tsc(), "")
+
+    def test_the_old_behaviour_is_a_setting(self):
+        b = buckets.Buckets(buckets.deep_merge(self.b.cfg, {"module_state": "share"}), self.repo, "x")
+        task = buckets.validate_tasks([{"id": "T1", "file": "src/x/screen-shared.ts", "action": "share",
+                                        "from": ["src/x/a/screen.tsx", "src/x/b/screen.tsx"], "select": ["loaded"],
+                                        "instructions": "", "done_when": "", "edits": []}], self.repo, 8, "T")[0]
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = b.code_task(task)
+        self.assertNotIn("refs", got["note"])
+        self.assertIn("let loaded", (self.repo / "src/x/a/screen.tsx").read_text())   # module state stays module state
+
+    def test_a_move_takes_the_refs_into_the_hook(self):
+        task = buckets.validate_tasks([{"id": "T1", "file": "src/x/a/screen.tsx", "action": "move", "where": "Screen",
+                                        "select": ["logic"], "into": "src/x/a/use-screen.ts", "name": "useScreen",
+                                        "instructions": "", "done_when": "", "edits": []}], self.repo, 8, "T")[0]
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = self.b.code_task(task)
+        self.assertEqual(got["status"], "done", got)
+        self.assertIn("first, turned module state into refs", got["note"])
+        hook = (self.repo / "src/x/a/use-screen.ts").read_text()
+        self.assertIn("const loadedRef = useRef<boolean>(false)", hook)
+        self.assertNotIn("let loaded", hook + (self.repo / "src/x/a/screen.tsx").read_text())
+        self.assertEqual(self.tsc(), "")
+        self.assertEqual(subprocess.run(["git", "status", "--porcelain"], cwd=self.repo, capture_output=True,
+                                        text=True).stdout.strip(), "")
+
+    def test_the_action_alone(self):
+        task = buckets.validate_tasks([{"id": "T1", "file": "src/x/b/screen.tsx", "action": "to_ref", "select": ["hits"],
+                                        "instructions": "", "done_when": "", "edits": []}], self.repo, 8, "T")[0]
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = self.b.code_task(task)
+        self.assertEqual(got["status"], "done", got)
+        text = (self.repo / "src/x/b/screen.tsx").read_text()
+        self.assertIn("hitsRef.current += id", text)
+        self.assertIn("let loaded", text)                                     # only the one asked for
+        with contextlib.redirect_stderr(io.StringIO()):
+            none = self.b.code_task({**task, "select": ["nope"]})
+        self.assertEqual(none["status"], "failed")
+        self.assertIn("no module-level let/var by that name", none["note"])
+
+
 class FoldAction(unittest.TestCase):
     """The "fold" plan action: two copies that are the same code become one file, from the hint or a share task."""
 

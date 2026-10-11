@@ -12,6 +12,7 @@
 //   find_copies  functions in other files that are a shared file's exported functions under other names.
 //   dedupe   copies replaced by an import of the shared function ("aliases" lets a copy under another name go too).
 //   fold     two identical variant files become one in their parent folder; every importer is repointed.
+//   to_ref   module-level `let`s one component reads and writes become `useRef`s inside it.
 //
 // Input: one JSON object on stdin with "op" and the op's fields; output: one JSON object on stdout.
 // Files in the output are full new texts (paths relative to the repo); nothing is written here.
@@ -2025,8 +2026,119 @@ function fold() {
   return { files: files_, deleted: [rel(a), rel(b)], into: rel(into), formatting_differed: textA !== textB, importers_updated: [...byFile.keys()].filter((f) => files_[rel(f)]).map(rel).sort() };
 }
 
+// Module-level `let`/`var`s that only one component (or hook) uses become refs inside it: `let id = -1` →
+// `const idRef = useRef<number>(-1)` at the top of the component, every use `idRef.current`. A module variable
+// kept its value between mounts and was shared by every mounted copy; a ref is per mounted component and starts
+// again from its initial value (the owner's call: refs are the React way). Variables that are exported, used at
+// module level or by more than one function stay, with the reason.
+function toRef() {
+  const file = abs(input.file).split(path.sep).join('/');
+  const { options, files } = projectOf(file);
+  const roots = [file, ...files.filter((f) => f.endsWith('.d.ts'))];  // the file and the project's ambient declarations
+  const ls = service(roots, options);
+  const prog = ls.getProgram(), checker = prog.getTypeChecker(), sf = prog.getSourceFile(file);
+  if (!sf) throw new Error(`TypeScript didn't load ${input.file}`);
+  const text = sf.text, wanted = input.names && input.names.length ? new Set(input.names) : null;
+  const isFn = (n) => (ts.isFunctionExpression(n) || ts.isArrowFunction(n) || ts.isFunctionDeclaration(n)) && n.body && ts.isBlock(n.body);
+  const firstFn = (n) => (isFn(n) ? n : ts.forEachChild(n, firstFn));
+  // the function a top-level statement defines, and its name (a component or a hook can hold a ref)
+  const fnOf = (st) => {
+    if (ts.isFunctionDeclaration(st) && st.name && isFn(st)) return { fn: st, name: st.name.text };
+    if (ts.isVariableStatement(st) && st.declarationList.declarations.length === 1) {
+      const d = st.declarationList.declarations[0];
+      const fn = d.initializer && ts.isIdentifier(d.name) ? firstFn(d.initializer) : null;
+      if (fn) return { fn, name: d.name.text };
+    }
+    if (ts.isExportAssignment(st)) { const fn = firstFn(st.expression); if (fn) return { fn, name: fn.name ? fn.name.text : 'default' }; }
+    return null;
+  };
+  const allRefs = references(checker, sf);
+  const converted = [], skipped = [], byStmt = new Map(), byFn = new Map(), edits = [];
+  for (const st of sf.statements) {
+    if (!ts.isVariableStatement(st) || st.declarationList.flags & (ts.NodeFlags.Const | ts.NodeFlags.Using)) continue;
+    if ((st.modifiers || []).some((m) => m.kind === ts.SyntaxKind.DeclareKeyword)) continue;
+    for (const d of st.declarationList.declarations) {
+      if (!ts.isIdentifier(d.name)) continue;
+      const name = d.name.text;
+      if (wanted && !wanted.has(name)) continue;
+      const skip = (why) => skipped.push({ name, why });
+      if (isExported(st)) { skip('exported: other files may read it'); continue; }
+      const sym = checker.getSymbolAtLocation(d.name);
+      const uses = allRefs.filter((r) => r.sym === sym && r.node !== d.name);
+      if (!uses.length) { skip('nothing uses it'); continue; }
+      const tops = new Set(uses.map((u) => topStatement(sf, u.node)));
+      if (tops.size > 1) { skip(`used by ${tops.size} top-level declarations (${[...tops].map((t) => (fnOf(t) || {}).name || `line ${lineOf(sf, t.getStart(sf))}`).join(', ')})`); continue; }
+      const top = [...tops][0], owner = fnOf(top);
+      if (!owner || !uses.every((u) => within(u.node, owner.fn.body))) { skip(`used at module level (line ${lineOf(sf, uses[0].node.getStart(sf))})`); continue; }
+      if (input.component && owner.name !== input.component) continue;  // only the state of the component asked about
+      if (!/^[A-Z]/.test(owner.name) && !/^use[A-Z0-9]/.test(owner.name)) { skip(`used by ${owner.name}, which isn't a component or hook (a ref needs one)`); continue; }
+      const ref = /Ref$/.test(name) ? name : `${name}Ref`;
+      const clash = allRefs.find((r) => r.node.text === ref && r.sym !== sym) || (ref !== name && new RegExp(`(?<![\\w$])${ref}(?![\\w$])`).test(text));
+      if (clash) { skip(`\`${ref}\` is already a name in this file`); continue; }
+      const type = d.type ? d.type.getText(sf) : checker.typeToString(checker.getTypeOfSymbolAtLocation(sym, d.name), undefined, ts.TypeFormatFlags.NoTruncation);
+      const init = d.initializer ? d.initializer.getText(sf) : 'undefined';
+      let computed = false;
+      const look = (n) => { if (ts.isCallExpression(n) || ts.isNewExpression(n)) computed = true; else ts.forEachChild(n, look); };
+      if (d.initializer) look(d.initializer);
+      const item = { name, ref, component: owner.name, type, init, line: lineOf(sf, d.getStart(sf)), uses: uses.length,
+                     assigned: uses.some((u) => isAssigned(u.node)), computed_initial: computed };
+      converted.push(item);
+      byStmt.set(st, [...(byStmt.get(st) || []), d]);
+      byFn.set(owner.fn, [...(byFn.get(owner.fn) || []), { item, comment: '' }]);
+      for (const u of uses) {
+        const p = u.node.parent;
+        if (ts.isShorthandPropertyAssignment(p) && p.name === u.node) edits.push([p.getStart(sf), p.getEnd(), `${name}: ${ref}.current`]);
+        else edits.push([u.node.getStart(sf), u.node.getEnd(), `${ref}.current`]);
+      }
+    }
+  }
+  if (wanted) for (const n of wanted) if (!converted.some((c) => c.name === n) && !skipped.some((s) => s.name === n)) skipped.push({ name: n, why: 'no module-level let/var by that name' });
+  if (!converted.length) return { files: {}, converted, skipped };
+  // the declarations go (a comment above one goes with it, to the ref)
+  for (const [st, ds] of byStmt) {
+    const all = st.declarationList.declarations;
+    if (ds.length === all.length) {
+      const start = fullStart(sf, st), comment = text.slice(start, lineStart(text, st.getStart(sf))).trim();
+      if (comment && ds.length === 1) for (const list of byFn.values()) for (const e of list) if (e.item.name === ds[0].name.text) e.comment = comment;
+      edits.push([start, lineEnd(text, st.getEnd()), '']);
+    } else {
+      const keep = all.filter((d) => !ds.includes(d)).map((d) => d.getText(sf));
+      const kw = st.declarationList.flags & ts.NodeFlags.Let ? 'let' : 'var';
+      edits.push([st.getStart(sf), st.getEnd(), `${kw} ${keep.join(', ')}`]);
+    }
+  }
+  // the refs, at the top of each component
+  for (const [fn, list] of byFn) {
+    const body = fn.body, first = body.statements[0];
+    const indent = first ? text.slice(lineStart(text, first.getStart(sf)), first.getStart(sf)) : '  ';
+    const lines = list.flatMap(({ item, comment }) => [
+      ...(comment ? comment.split('\n').map((l) => indent + l.trim()) : []),
+      `${indent}const ${item.ref} = useRef<${item.type}>(${item.init})`]);
+    edits.push([body.getStart(sf) + 1, body.getStart(sf) + 1, '\n' + lines.join('\n')]);
+  }
+  let out = applyEdits(text, edits);
+  const hasUseRef = sf.statements.some((st) => ts.isImportDeclaration(st) && st.moduleSpecifier.text === 'react' && st.importClause
+    && st.importClause.namedBindings && ts.isNamedImports(st.importClause.namedBindings)
+    && st.importClause.namedBindings.elements.some((e) => e.name.text === 'useRef'));
+  if (!hasUseRef) out = mergeImports(out, ['import { useRef } from "react"'], file);
+  // the safety net: no error the file didn't have
+  const count = (svc) => {
+    const m = new Map();
+    for (const dg of [...svc.getSyntacticDiagnostics(file), ...svc.getSemanticDiagnostics(file)]) {
+      const k = `${dg.code}`;
+      m.set(k, [...(m.get(k) || []), `${rel(file)}:${dg.file ? lineOf(dg.file, dg.start || 0) : 0}: TS${dg.code} ${ts.flattenDiagnosticMessageText(dg.messageText, ' ')}`]);
+    }
+    return m;
+  };
+  const before = count(ls), after = count(service(roots, options, new Map([[file, out]])));
+  const fresh = [];
+  for (const [k, list] of after) fresh.push(...list.slice((before.get(k) || []).length));
+  if (fresh.length) throw new Error(`refs for ${converted.map((c) => c.name).join(', ')} would add ${fresh.length} error(s): ${fresh.slice(0, 3).join('; ')}`);
+  return { files: { [rel(file)]: out }, converted, skipped };
+}
+
 try {
-  const ops = { extract, compare, share, share_hook: shareHook, unify, relocate, dedupe, find_copies: findCopies, same_behaviour: sameBehaviour, signature, component, syntax, rename, fold };
+  const ops = { extract, compare, share, share_hook: shareHook, unify, relocate, dedupe, find_copies: findCopies, same_behaviour: sameBehaviour, signature, component, syntax, rename, fold, to_ref: toRef };
   if (!ops[input.op]) throw new Error(`unknown op ${input.op}`);
   process.stdout.write(JSON.stringify({ ok: true, ...ops[input.op]() }));
 } catch (e) {

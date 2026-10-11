@@ -407,7 +407,8 @@ own scoping) moves code byte for byte, and the planner only decides what goes wh
 | `component` | a render helper inside a component turned into its own component: its parameters and the values it uses become props, every call becomes an element |
 | `rename` | a top-level function, component, type or constant renamed in every file (TypeScript's own rename: imports, re-exports, JSX tags, shorthand properties); refused on a clash or a new type error |
 | `fold` | two variants of a file that are the same code (indentation and blank lines aside) become one file in their parent folder; its imports and every importer are repointed (TypeScript's file-rename edits). Refused when the copies import their own sibling files (the same text, different code), when nothing imports them (config files a tool finds by location), for `.d.ts` files, or on a new type error |
-| `share` | two variants of a file (`screens/x/app-a/…` and `…/app-b/…`): identical top-level declarations go into one shared file, identical statements inside their components into a shared hook (`use<Screen>Shared`); module state a screen assigns to stays |
+| `to_ref` | module-level `let`/`var`s that one component (or hook) reads and writes become `useRef`s inside it, every use `xRef.current` (a comment above one comes along); exported ones, ones used at module level or by more than one function stay, with the reason. `move` and `share` do this first for the state they meet (`"module_state": "share"` in the config keeps the old way: the module variable moves and both variants share it). A ref is per mounted component and starts from its initial value on each mount, where a module variable kept its value between visits: the report says so, and the reviewers are told it's intended |
+| `share` | two variants of a file (`screens/x/app-a/…` and `…/app-b/…`): identical top-level declarations go into one shared file, identical statements inside their components into a shared hook (`use<Screen>Shared`); module state a screen assigns to becomes refs first (see `to_ref`) |
 
 For a request that asks to move, split, extract, merge or share code, buckets gives the planner a dry run
 of the move (or the two variants compared declaration by declaration, as TypeScript prints them, so
@@ -704,5 +705,5 @@ e.g. `{"~/code/oss/*": {"mode": "local"}}`.
 ## Tests
 
 ```bash
-python3 -m unittest test_buckets test_regress test_rename test_find_copies test_api_contract test_fold
+python3 -m unittest test_buckets test_regress test_rename test_find_copies test_api_contract test_fold test_to_ref
 ```

@@ -2544,7 +2544,7 @@ TASK_SCHEMA = {
     "properties": {
         "id": {"type": "string"},
         "file": {"type": "string"},
-        "action": {"type": "string", "enum": ["edit", "create", "delete", "move", "share", "unify", "relocate", "dedupe", "signature", "component", "rename", "fold"]},
+        "action": {"type": "string", "enum": ["edit", "create", "delete", "move", "share", "unify", "relocate", "dedupe", "signature", "component", "rename", "fold", "to_ref"]},
         "instructions": {"type": "string"},
         "done_when": {"type": "string"},
         "read_first": {"type": "array", "items": {"type": "string"}},
@@ -2743,6 +2743,11 @@ text and the files it opens itself, and it cannot run commands):
 - Two variants of a file that are the same code (the facts say "identical"): plan action "fold": "from" the
   two copies, "file" the one file they become (by default their parent folder, same name). Both copies go
   and every importer is repointed mechanically; don't plan edits for the importers.
+- Module-level `let`/`var` state a component reads and writes (the owner's call: React refs, not module
+  variables): plan action "to_ref": "file", "where" the component (optional), "select" the variables (optional:
+  every one only that component uses). Each becomes `const xRef = useRef<T>(init)` in the component and every
+  use `xRef.current`, mechanically; exported or shared ones stay, with the reason. Moves and shares do this
+  themselves for the state they meet.
 - Instructions must be self-contained and concrete: name the functions, types and exports to add
   or change, their signatures, and where in the file they go. Include exact code when it's short.
 - "read_first" lists other files the coder should open for context (types it must use, patterns to
@@ -3307,6 +3312,13 @@ def validate_move(t: dict, f: str, repo: Path, task_id: str) -> dict:
             raise ValueError("component: \"file\" is the screen, \"where\" the component the render helper is in, \"select\" "
                              "[the helper's name], \"into\" a new .tsx file, \"name\" the new component (capitalized)")
         return {**base, "file": f, "where": where, "select": [helper], "into": into, "name": name}
+    if t["action"] == "to_ref":
+        where = str(t.get("where") or "").strip().split(".")[-1]
+        if not f.endswith(MOVABLE) or not (repo / f).is_file() or (where and not re.fullmatch(r"[A-Za-z_$][\w$]*", where)) \
+                or not all(re.fullmatch(r"[A-Za-z_$][\w$]*", n) for n in select):
+            raise ValueError("to_ref: \"file\" the component's file, \"where\" the component (optional), \"select\" the "
+                             "module-level variables (optional)")
+        return {**base, "file": f, "where": where, "select": select}
     if t["action"] == "rename":
         where = str(t.get("where") or (t.get("select") or [""])[0] or "").strip().split(".")[-1]
         name = str(t.get("name") or "").strip()
@@ -3379,7 +3391,7 @@ def validate_tasks(tasks: list, repo: Path, max_tasks: int, prefix: str) -> list
         if not f or f.startswith("/") or ".." in f.split("/"):
             raise ValueError(f"task file path {t['file']!r} must be relative to the repo root")
         action = t["action"]
-        if action in ("move", "share", "unify", "relocate", "dedupe", "signature", "component", "rename", "fold"):
+        if action in ("move", "share", "unify", "relocate", "dedupe", "signature", "component", "rename", "fold", "to_ref"):
             try:
                 out.append(validate_move(t, f, repo, f"{prefix}{len(out) + 1}"))
             except ValueError as e:
@@ -5336,7 +5348,7 @@ class Buckets:
         """One file's task: the planner's exact edits applied directly when they fit, else a coder
         session. Anything else the coder touches is put back as it was."""
         self.involved = list(dict.fromkeys(getattr(self, "involved", []) + [task["file"]]))
-        if task["action"] in ("move", "share", "unify", "relocate", "dedupe", "signature", "component", "rename", "fold"):
+        if task["action"] in ("move", "share", "unify", "relocate", "dedupe", "signature", "component", "rename", "fold", "to_ref"):
             return self.apply_move(task, commit)
         if task["action"] == "delete":  # the coder can't delete files; nothing to decide here anyway
             git(self.repo, "rm", "-q", "--", task["file"])
@@ -5611,6 +5623,16 @@ class Buckets:
                 git(self.repo, "commit", "--no-verify", "-q", "-m", f"buckets {task['id']}: component ({note[:200]})\n\n{note}")
             say(f"  {ok()} {task['id']} component ({int(time.time() - start)}s): {paint(note[:220], 'dim')}")
             return {**task, "status": "done", "note": f"DONE: {note}"}
+        elif task["action"] == "to_ref":
+            refs, written, note = self.module_refs([task["file"]], task["select"], task["where"])
+            if not refs:
+                return {**task, "status": "failed", "note": f"BLOCKED: {note}"}
+            self.involved = list(dict.fromkeys(self.involved + written))
+            if commit:
+                git(self.repo, "add", "-A", "--", *written)
+                git(self.repo, "commit", "--no-verify", "-q", "-m", f"buckets {task['id']}: {note[:200]}\n\n{note}")
+            say(f"  {ok()} {task['id']} to_ref ({int(time.time() - start)}s): {paint(note[:220], 'dim')}")
+            return {**task, "status": "done", "note": f"DONE: {note}"}
         elif task["action"] == "fold":
             d = ts_moves(self.repo, {"op": "fold", "files": task["from"], "into": task["file"]}, timeout=600)
             if not d.get("ok"):
@@ -5722,7 +5744,14 @@ class Buckets:
             return {**task, "status": "done", "note": f"DONE: {note}"}
         else:
             return self.apply_share(task, commit, start)
+        pre_written, pre_note = [], ""
+        if task["action"] == "move" and self.cfg.get("module_state", "ref") == "ref":
+            refs, pre_written, pre_note = self.module_refs([task["file"]], [], task["where"])  # they move with the logic
+            if not refs:
+                pre_note = ""
         d = ts_moves(self.repo, payload)
+        if not d.get("ok") and pre_written:
+            git(self.repo, "checkout", "-q", "--", *pre_written)  # the move didn't happen: nor do the refs
         if not d.get("ok"):
             why = d.get("error", "it didn't run")
             say(f"  {warn()} {task['id']}: the {task['action']} couldn't be done ({why[:160]})")
@@ -5745,7 +5774,8 @@ class Buckets:
                     f"{task['name']} in {', '.join(f for f in written if f != task['file'])}; parameters: "
                     f"{', '.join(p['name'] for p in r['params']) or 'none'}; returns {len(r['returns'])} values; "
                     f"helpers moved along: {', '.join(r['helpers_moved']) or 'none'}"
-                    + (f"; notes: {'; '.join(r['notes'])}" if r["notes"] else ""))
+                    + (f"; notes: {'; '.join(r['notes'])}" if r["notes"] else "") + (f"; first, {pre_note}" if pre_note else ""))
+            written = list(dict.fromkeys(pre_written + written))
         else:
             note = (f"moved {', '.join(r['shared']) or 'nothing'} into {task['file']}"
                     + (f"; not moved: {'; '.join(x['name'] + ' (' + x['why'] + ')' for x in r['skipped'])}" if r["skipped"] else ""))
@@ -5758,6 +5788,38 @@ class Buckets:
         say(f"  {ok()} {task['id']} {task['action']} ({int(time.time() - start)}s): {paint(note[:220], 'dim')}")
         return {**task, "status": "done", "note": f"DONE: {note}"}
 
+    def module_refs(self, files: list[str], names: list[str], component: str = "") -> tuple[dict, list[str], str]:
+        """Module-level `let`s turned into refs in each file (to_ref), only those that convert in every file (two
+        variants must stay alike). Returns {name: ref}, the files written and a note for the report."""
+        def run(want):
+            return [ts_moves(self.repo, {"op": "to_ref", "file": f, "names": want, **({"component": component} if component else {})},
+                             timeout=300) for f in files]
+        ds = run(names)
+        bad = next((d for d in ds if not d.get("ok")), None)
+        if bad:
+            return {}, [], f"module state not turned into refs: {bad.get('error', '')[:200]}"
+        done = [{c["name"] for c in d["converted"]} for d in ds]
+        common = [c["name"] for c in ds[0]["converted"] if all(c["name"] in x for x in done)] if done else []
+        if common and any(x != set(common) for x in done):
+            ds = run(common)
+            if not all(d.get("ok") for d in ds):
+                return {}, [], "module state not turned into refs (the variants differ)"
+        if not common:
+            why = "; ".join(f"{x['name']}: {x['why']}" for x in ds[0]["skipped"][:6]) if ds else ""
+            return {}, [], f"no module state to turn into refs{f' ({why})' if why else ''}"
+        written = []
+        for d in ds:
+            for f, text in d["files"].items():
+                (self.repo / f).write_text(text)
+                written.append(f)
+        conv = {c["name"]: c for c in ds[0]["converted"]}
+        kept = [f"{x['name']} ({x['why']})" for x in ds[0]["skipped"]]
+        pairs = ", ".join(f"{n} → {conv[n]['ref']}" for n in common)
+        note = (f"turned module state into refs in {conv[common[0]]['component']} ({pairs}): "
+                "each is now per mounted screen and starts from its initial value on every mount, where the module "
+                "variable kept its value between visits" + (f"; kept as they were: {', '.join(kept[:6])}" if kept else ""))
+        return {n: conv[n]["ref"] for n in common}, written, note
+
     def apply_share(self, task: dict, commit: bool, start: float) -> dict:
         """Identical top-level declarations of two variants go into the shared file; identical statements
         inside their components go into a shared hook next to it. Each part is mechanical."""
@@ -5767,10 +5829,20 @@ class Buckets:
             return {**task, "status": "failed", "note": f"BLOCKED: {cmp.get('error', 'compare failed')}"}
         same = {p["name"]: p for p in cmp["pairs"] if p["status"] == "identical"}
         wanted = list(dict.fromkeys(task["select"] + sorted(getattr(self, "unified", set()))))  # made identical this run
+        notes, written, kept_why = [], [], []
+        state = [n for n in wanted if same.get(n, {}).get("module_level") and same[n].get("mutable")]
+        if state and self.cfg.get("module_state", "ref") == "ref":  # refs in the shared hook, not one module variable
+            refs, written, note = self.module_refs([a, b], state)
+            notes.append(note)
+            if refs:
+                cmp = ts_moves(self.repo, {"op": "compare", "a": a, "b": b}, timeout=120)
+                if not cmp.get("ok"):
+                    return {**task, "status": "failed", "note": f"BLOCKED: {cmp.get('error', 'compare failed')}"}
+                same = {p["name"]: p for p in cmp["pairs"] if p["status"] == "identical"}
+                wanted = [n for n in wanted if n not in refs] + [r for r in refs.values() if r in same]
         top = [n for n in wanted if same.get(n, {}).get("module_level")]
         inner = [n for n in wanted if same.get(n, {}).get("depth") == 1]
         skipped = [n for n in wanted if n not in top and n not in inner]
-        notes, written, kept_why = [], [], []
 
         def write(d: dict) -> None:
             for f, text in d["files"].items():
@@ -6049,7 +6121,7 @@ class Buckets:
                                                                        if clean_path(str(t.get("file") or ""))]})["tasks"],
                                             self.repo, self.cfg["max_tasks"], f"R{rnd + 1}T")}
 
-        moved = [r for r in results if r.get("action") in ("move", "share", "relocate", "dedupe", "unify", "component", "signature", "rename", "fold")
+        moved = [r for r in results if r.get("action") in ("move", "share", "relocate", "dedupe", "unify", "component", "signature", "rename", "fold", "to_ref")
                  and r.get("status") == "done"]
         if moved:
             prompt += ("\n\nCode moved mechanically, byte for byte (" + "; ".join(r["note"].removeprefix("DONE: ")[:300] for r in moved)
@@ -6060,6 +6132,10 @@ class Buckets:
                        "original declarations, so an `any` there is the original code's own type. Helpers and types that moved "
                        "along are exported from their new file for the code that still uses them; where they should live "
                        "long-term is a separate refactor.")
+            if any("into refs" in r["note"] for r in moved):
+                prompt += (" Module-level variables turned into `useRef`s is the owner's chosen pattern, not a defect: a ref "
+                           "is per mounted screen and starts from its initial value on each mount. Flag it only if code "
+                           "visibly relies on the value surviving a remount or being shared between screens.")
         prompt = note + prompt
         if prompt_out is not None:
             prompt_out.append(prompt)
