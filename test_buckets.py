@@ -3628,5 +3628,59 @@ class RepeatedLookups(unittest.TestCase):
         self.assertEqual(turns, [("plan-1", True), ("plan-2", True), ("plan-3", False)])  # no more tools offered
 
 
+class RenameAction(unittest.TestCase):
+    """The "rename" plan action: the hint from the request, the mechanical rename, and hand edits swapped for it."""
+
+    def setUp(self):
+        if not (TS_PKG.exists() and shutil.which("node")):
+            self.skipTest("needs node and a typescript package")
+        self.repo = make_repo({
+            "src/format.ts": "export const fmt = (s: string) => s.trim()\n",
+            "src/a.ts": "import { fmt } from './format'\nexport const a = fmt(' a ')\n",
+            "src/b.ts": "import { fmt } from './format'\nexport const b = { fmt }\n",
+            "tsconfig.json": '{"compilerOptions": {"strict": true, "noEmit": true, "skipLibCheck": true}}'})
+        (self.repo / "node_modules").mkdir()
+        (self.repo / "node_modules/typescript").symlink_to(TS_PKG)
+        (self.repo / ".git/info/exclude").write_text("node_modules\n")
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        self.b = buckets.Buckets(cfg, self.repo, "rename fmt to formatText everywhere")
+
+    def test_the_request_gets_a_checked_dry_run_and_the_task_renames_everywhere(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            hint = self.b.rename_hint()
+        self.assertTrue(hint["report"]["ok"], hint["report"])
+        self.assertEqual({k: hint["task"][k] for k in ("file", "action", "where", "name")},
+                         {"file": "src/format.ts", "action": "rename", "where": "fmt", "name": "formatText"})
+        self.assertIn("a mechanical rename fits: fmt → formatText", err.getvalue())
+        self.assertIn('"action": "rename"', self.b.facts())
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = self.b.code_task(dict(hint["task"]))
+        self.assertEqual(got["status"], "done", got)
+        self.assertIn("in 3 file(s)", got["note"])
+        self.assertIn("formatText(' a ')", (self.repo / "src/a.ts").read_text())
+        self.assertIn("{ fmt: formatText }", (self.repo / "src/b.ts").read_text())  # the property keeps its name
+        self.assertEqual(subprocess.run(["git", "status", "--porcelain"], cwd=self.repo, capture_output=True,
+                                        text=True).stdout.strip(), "")
+
+    def test_a_clash_is_refused_with_the_reason(self):
+        b = buckets.Buckets(self.b.cfg, self.repo, "rename fmt to a")
+        with contextlib.redirect_stderr(io.StringIO()):
+            hint = b.rename_hint()
+            got = b.code_task(dict(hint["task"]))
+        self.assertFalse(hint["report"]["ok"])
+        self.assertEqual(got["status"], "failed")
+        self.assertIn("already declared", got["note"])
+        self.assertIn("refused", b.facts())
+
+    def test_hand_edits_of_the_uses_become_the_rename(self):
+        edit = lambda tid, f: {"id": tid, "file": f, "action": "edit", "instructions": "rename fmt to formatText here",
+                               "done_when": "", "edits": [], "read_first": [], "where": ""}
+        plan = {"summary": "s", "tasks": [edit("T1", "src/format.ts"), edit("T2", "src/a.ts"), edit("T3", "src/b.ts")]}
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            got = self.b.prefer_move(plan)
+        self.assertEqual([(t["id"], t["action"], t["file"]) for t in got["tasks"]], [("T1", "rename", "src/format.ts")])
+        self.assertIn("renaming mechanically instead", err.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

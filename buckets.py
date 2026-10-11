@@ -2544,7 +2544,7 @@ TASK_SCHEMA = {
     "properties": {
         "id": {"type": "string"},
         "file": {"type": "string"},
-        "action": {"type": "string", "enum": ["edit", "create", "delete", "move", "share", "unify", "relocate", "dedupe", "signature", "component"]},
+        "action": {"type": "string", "enum": ["edit", "create", "delete", "move", "share", "unify", "relocate", "dedupe", "signature", "component", "rename"]},
         "instructions": {"type": "string"},
         "done_when": {"type": "string"},
         "read_first": {"type": "array", "items": {"type": "string"}},
@@ -2737,6 +2737,9 @@ text and the files it opens itself, and it cannot run commands):
   "file" defines it, "where" its name, "param" {{"name", "type", "default" (keeps existing callers
   working), "value" (what every call or use should pass, if anything)}}. The definition and every use are
   updated mechanically; plan separate tasks only for uses that need a different value or new logic.
+- Renaming a function, component, type or constant everywhere it's used: plan action "rename": "file"
+  defines it, "where" its current name, "name" the new one. Every use, import and JSX tag is renamed
+  mechanically (and refused if the new name clashes); don't plan edits for the uses.
 - Instructions must be self-contained and concrete: name the functions, types and exports to add
   or change, their signatures, and where in the file they go. Include exact code when it's short.
 - "read_first" lists other files the coder should open for context (types it must use, patterns to
@@ -3271,6 +3274,13 @@ def validate_move(t: dict, f: str, repo: Path, task_id: str) -> dict:
             raise ValueError("component: \"file\" is the screen, \"where\" the component the render helper is in, \"select\" "
                              "[the helper's name], \"into\" a new .tsx file, \"name\" the new component (capitalized)")
         return {**base, "file": f, "where": where, "select": [helper], "into": into, "name": name}
+    if t["action"] == "rename":
+        where = str(t.get("where") or (t.get("select") or [""])[0] or "").strip().split(".")[-1]
+        name = str(t.get("name") or "").strip()
+        if not f.endswith(MOVABLE) or not (repo / f).is_file() or not re.fullmatch(r"[A-Za-z_$][\w$]*", where) \
+                or not re.fullmatch(r"[A-Za-z_$][\w$]*", name) or name == where:
+            raise ValueError("rename: \"file\" defines it, \"where\" its current name, \"name\" the new name")
+        return {**base, "file": f, "where": where, "name": name, "select": [where]}
     if t["action"] == "signature":
         param = t.get("param") if isinstance(t.get("param"), dict) else {}
         where = str(t.get("where") or "").strip().split(".")[-1]
@@ -3322,7 +3332,7 @@ def validate_tasks(tasks: list, repo: Path, max_tasks: int, prefix: str) -> list
         if not f or f.startswith("/") or ".." in f.split("/"):
             raise ValueError(f"task file path {t['file']!r} must be relative to the repo root")
         action = t["action"]
-        if action in ("move", "share", "unify", "relocate", "dedupe", "signature", "component"):
+        if action in ("move", "share", "unify", "relocate", "dedupe", "signature", "component", "rename"):
             try:
                 out.append(validate_move(t, f, repo, f"{prefix}{len(out) + 1}"))
             except ValueError as e:
@@ -3820,6 +3830,14 @@ class Buckets:
                          + ". A \"signature\" task adds the parameter or prop to it and to every use, mechanically: "
                          + json.dumps({"file": sig["file"], "action": "signature", "where": sig["name"],
                                        "param": {"name": "…", "type": "…", "default": "…", "value": "…"}}))
+        rn = self.rename_hint()
+        if rn:
+            t, r = rn["task"], rn["report"]
+            parts.append((f"A mechanical rename fits: {json.dumps({k: t[k] for k in ('file', 'action', 'where', 'name')})}. "
+                          f"Dry run: {r['count']} place(s) in {len(r['files'])} file(s) ({', '.join(sorted(r['files'])[:8])}), "
+                          "type-checked. Plan it (copy it); don't plan edits for the uses.") if r.get("ok") else
+                         (f"Renaming {t['where']} to {t['name']} mechanically is refused: {r.get('error')}. Plan around "
+                          "that (another name, or the clash first)."))
         rh = self.relocate_hint()
         if rh:
             r, t = rh["report"], rh["task"]
@@ -3960,6 +3978,30 @@ class Buckets:
                         say(f"  {ok()} {d['name']} ({r['report']['kind']}) is used at {len(r['report']['sites'])} place(s); "
                             f"a signature change can update them all")
                         return self._signature_hint
+        return None
+
+    def rename_hint(self) -> dict | None:
+        """For "rename X to Y": where X is defined and the rename done as a dry run (every use, checked by the
+        type checker). None when the request isn't that or the dry run is refused."""
+        if hasattr(self, "_rename_hint"):
+            return self._rename_hint
+        self._rename_hint = None
+        m = re.search(r"\brenam\w*\s+(?:the\s+\w+\s+)?`?([A-Za-z_$][\w$]*)`?\s+(?:to|as|into)\s+`?([A-Za-z_$][\w$]*)`?",
+                      self.request, re.I)
+        if not m:
+            return None
+        old, new = m.group(1), m.group(2)
+        for f, decls in self.index.outline().items():
+            if f.endswith(MOVABLE) and any(d["name"] == old for d in decls):
+                r = ts_moves(self.repo, {"op": "rename", "file": f, "name": old, "to": new}, timeout=300)
+                task = {"id": "T1", "file": f, "action": "rename", "where": old, "name": new, "instructions": "",
+                        "done_when": "", "edits": [], "read_first": []}
+                self._rename_hint = {"task": validate_move(task, f, self.repo, "T1"), "report": r}
+                if r.get("ok"):
+                    say(f"  {ok()} a mechanical rename fits: {old} → {new}, {r['count']} place(s) in {len(r['files'])} file(s) (dry run)")
+                else:
+                    say(f"  {warn()} renaming {old} to {new} mechanically is refused: {str(r.get('error'))[:160]}")
+                return self._rename_hint
         return None
 
     def prefer_dedupe(self, tasks: list[dict]) -> list[dict]:
@@ -4259,6 +4301,19 @@ class Buckets:
             if redo:
                 say(f"  {paint('dropped', 'dim')} {', '.join(t['id'] for t in redo)}: the component task already does that")
                 plan = {**plan, "tasks": [{**t, "id": f"T{n}"} for n, t in enumerate([t for t in plan["tasks"] if t not in redo], 1)]}
+        rn = self.rename_hint()
+        if rn and rn["report"].get("ok"):
+            hand = [t for t in plan["tasks"] if t["action"] in ("edit", "create") and t["file"] in rn["report"]["files"]
+                    and re.search(rf"(?<![\w$]){re.escape(rn['task']['where'])}(?![\w$])", t["instructions"])]
+            if not any(t["action"] == "rename" for t in plan["tasks"]) and hand:
+                say(f"  {warn()} the plan would rename by hand in {len(hand)} file(s); renaming mechanically instead")
+                plan = {**plan, "tasks": [dict(rn["task"])] + [t for t in plan["tasks"] if t not in hand]}
+            elif any(t["action"] == "rename" for t in plan["tasks"]) and hand:
+                say(f"  {paint('dropped', 'dim')} {', '.join(t['id'] for t in hand)}: the rename already does that")
+                self.dropped_tasks = getattr(self, "dropped_tasks", []) + [
+                    f"{t['action']} {t['file']}: {t['instructions'][:120]} (dropped: the rename does it)" for t in hand]
+                plan = {**plan, "tasks": [t for t in plan["tasks"] if t not in hand]}
+            plan = {**plan, "tasks": [{**t, "id": f"T{n}"} for n, t in enumerate(plan["tasks"], 1)]}
         rh = self.relocate_hint()
         if rh and not any(t["action"] == "relocate" for t in plan["tasks"]):
             touched = {rh["task"]["file"], rh["task"]["into"], *rh["report"]["importers_updated"], *(rh.get("copies") or [])}
@@ -5071,7 +5126,7 @@ class Buckets:
         """One file's task: the planner's exact edits applied directly when they fit, else a coder
         session. Anything else the coder touches is put back as it was."""
         self.involved = list(dict.fromkeys(getattr(self, "involved", []) + [task["file"]]))
-        if task["action"] in ("move", "share", "unify", "relocate", "dedupe", "signature", "component"):
+        if task["action"] in ("move", "share", "unify", "relocate", "dedupe", "signature", "component", "rename"):
             return self.apply_move(task, commit)
         if task["action"] == "delete":  # the coder can't delete files; nothing to decide here anyway
             git(self.repo, "rm", "-q", "--", task["file"])
@@ -5344,6 +5399,21 @@ class Buckets:
                 git(self.repo, "add", "-A", "--", *written)
                 git(self.repo, "commit", "--no-verify", "-q", "-m", f"buckets {task['id']}: component ({note[:200]})\n\n{note}")
             say(f"  {ok()} {task['id']} component ({int(time.time() - start)}s): {paint(note[:220], 'dim')}")
+            return {**task, "status": "done", "note": f"DONE: {note}"}
+        elif task["action"] == "rename":
+            d = ts_moves(self.repo, {"op": "rename", "file": task["file"], "name": task["where"], "to": task["name"]})
+            if not d.get("ok"):
+                return {**task, "status": "failed", "note": f"BLOCKED: {d.get('error', 'rename failed')}"}
+            written = []
+            for f, text in d["files"].items():
+                (self.repo / f).write_text(text)
+                written.append(f)
+            note = f"renamed {task['where']} to {task['name']}: {d['count']} place(s) in {len(written)} file(s)"
+            self.involved = list(dict.fromkeys(self.involved + written))
+            if commit:
+                git(self.repo, "add", "-A", "--", *written)
+                git(self.repo, "commit", "--no-verify", "-q", "-m", f"buckets {task['id']}: {note}")
+            say(f"  {ok()} {task['id']} rename ({int(time.time() - start)}s): {paint(note, 'dim')}")
             return {**task, "status": "done", "note": f"DONE: {note}"}
         elif task["action"] == "signature":
             d = ts_moves(self.repo, {"op": "signature", "file": task["file"], "name": task["where"], "param": task["param"],
@@ -5743,7 +5813,7 @@ class Buckets:
                                                                        if clean_path(str(t.get("file") or ""))]})["tasks"],
                                             self.repo, self.cfg["max_tasks"], f"R{rnd + 1}T")}
 
-        moved = [r for r in results if r.get("action") in ("move", "share", "relocate", "dedupe", "unify", "component", "signature")
+        moved = [r for r in results if r.get("action") in ("move", "share", "relocate", "dedupe", "unify", "component", "signature", "rename")
                  and r.get("status") == "done"]
         if moved:
             prompt += ("\n\nCode moved mechanically, byte for byte (" + "; ".join(r["note"].removeprefix("DONE: ")[:300] for r in moved)

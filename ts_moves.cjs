@@ -8,6 +8,7 @@
 //   compare  pair the declarations of two variants of a file (identical / near / different / one side).
 //   share    move declarations that are identical in two variants into one shared file.
 //   syntax   whether a file's text parses (a reflex after an edit; no types).
+//   rename   a top-level declaration gets a new name in every file of the project (TypeScript's own rename).
 //
 // Input: one JSON object on stdin with "op" and the op's fields; output: one JSON object on stdout.
 // Files in the output are full new texts (paths relative to the repo); nothing is written here.
@@ -1414,8 +1415,189 @@ function syntax() {
   return { errors, count: (sf.parseDiagnostics || []).length };
 }
 
+// What a language service reads: the project's files from disk, with some texts replaced in memory.
+function service(files, options, overrides = new Map()) {
+  const text = (f) => (overrides.has(f) ? overrides.get(f) : ts.sys.fileExists(f) ? ts.sys.readFile(f) : undefined);
+  const host = {
+    getScriptFileNames: () => files,
+    getScriptVersion: (f) => (overrides.has(f) ? '2' : '1'),
+    getScriptSnapshot: (f) => { const t = text(f); return t === undefined ? undefined : ts.ScriptSnapshot.fromString(t); },
+    getCurrentDirectory: () => repo,
+    getCompilationSettings: () => options,
+    getDefaultLibFileName: (o) => ts.getDefaultLibFilePath(o),
+    useCaseSensitiveFileNames: () => ts.sys.useCaseSensitiveFileNames,
+    fileExists: (f) => overrides.has(f) || ts.sys.fileExists(f),
+    readFile: text,
+    readDirectory: ts.sys.readDirectory,
+    directoryExists: ts.sys.directoryExists,
+    getDirectories: ts.sys.getDirectories,
+  };
+  return ts.createLanguageService(host, ts.createDocumentRegistry());
+}
+
+// The files of the project the declaring file belongs to (its tsconfig's, else every source file in the repo).
+function projectOf(file) {
+  const cfgPath = ts.findConfigFile(path.dirname(file), ts.sys.fileExists);
+  let options = { allowJs: true, jsx: ts.JsxEmit.Preserve }, names = [];
+  if (cfgPath) {
+    const cfg = ts.parseJsonConfigFileContent(ts.readConfigFile(cfgPath, ts.sys.readFile).config, ts.sys, path.dirname(cfgPath));
+    options = cfg.options;
+    names = cfg.fileNames;
+  }
+  if (!names.length) {
+    const walk = (dir) => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) walk(full);
+        else if (/\.(tsx?|jsx?)$/.test(e.name) && !e.name.endsWith('.d.ts')) names.push(full.split(path.sep).join('/'));
+      }
+    };
+    walk(repo);
+  }
+  const all = new Set([...names.map((n) => path.resolve(n).split(path.sep).join('/')), file.split(path.sep).join('/')]);
+  return { options: { ...options, allowJs: true, noEmit: true }, files: [...all] };
+}
+
+function nodeAt(sf, pos) {
+  let found = sf;
+  const visit = (n) => {
+    if (pos < n.getStart(sf) || pos >= n.end) return;
+    found = n;
+    ts.forEachChild(n, visit);
+  };
+  ts.forEachChild(sf, visit);
+  return found;
+}
+
+// A name used as a member or as an external name: it doesn't bind in the scope around it.
+function isExternalName(n) {
+  const p = n.parent;
+  return (ts.isPropertyAccessExpression(p) && p.name === n) || (ts.isQualifiedName(p) && p.right === n)
+    || (ts.isImportSpecifier(p) && p.propertyName === n) || ts.isImportTypeNode(p)
+    || (ts.isExportSpecifier(p) && (!!p.parent.parent.moduleSpecifier || (!!p.propertyName && p.name === n)));
+}
+
+function scopeOf(n) {
+  for (let p = n.parent; p; p = p.parent) {
+    if (ts.isBlock(p) || ts.isSourceFile(p) || ts.isModuleBlock(p) || ts.isCaseBlock(p) || ts.isFunctionLike(p)
+        || ts.isClassLike(p) || ts.isCatchClause(p) || ts.isForStatement(p) || ts.isForInStatement(p) || ts.isForOfStatement(p)) return p;
+  }
+  return n.getSourceFile();
+}
+
+// The renamable top-level declarations called `name`: [{id, stmt}], one per symbol.
+function renameCandidates(sf, checker, name) {
+  const found = [];
+  for (const stmt of sf.statements) {
+    for (const id of declaredBy(stmt)) if (id.text === name) found.push({ id, stmt });
+    if (ts.isExportDeclaration(stmt) && !stmt.moduleSpecifier && stmt.exportClause && ts.isNamedExports(stmt.exportClause)) {
+      for (const el of stmt.exportClause.elements) if (el.propertyName && el.name.text === name) found.push({ id: el.name, stmt });
+    }
+  }
+  const seen = new Set();
+  return found.filter(({ id }) => {
+    const key = checker.getSymbolAtLocation(id) || id;
+    return seen.has(key) ? false : (seen.add(key), true);
+  });
+}
+
+function diagnosticKeys(ls, names, undo) {
+  const keys = new Map();
+  for (const f of names) {
+    for (const d of [...ls.getSyntacticDiagnostics(f), ...ls.getSemanticDiagnostics(f)]) {
+      const msg = undo(ts.flattenDiagnosticMessageText(d.messageText, ' '));
+      const key = `${rel(f)}|${d.code}|${msg}`;
+      const at = d.file ? `${rel(f)}:${lineOf(d.file, d.start || 0)}` : rel(f);
+      keys.set(key, [...(keys.get(key) || []), `${at}: TS${d.code} ${msg}`]);
+    }
+  }
+  return keys;
+}
+
+// A top-level declaration gets a new name in every file of the project, through TypeScript's own rename
+// (imports, re-exports, JSX tags, type references, shorthand properties). Refused, with nothing changed,
+// on a name clash, a location outside the repo, or when the result has an error the project didn't have.
+function rename() {
+  const file = abs(input.file).split(path.sep).join('/'), name = input.name, to = input.to;
+  if (!name || !to) throw new Error('rename needs name and to');
+  const probe = ts.createSourceFile('probe.ts', `let ${to} = 0`, ts.ScriptTarget.Latest, true);
+  if (!ts.isIdentifierText(to, ts.ScriptTarget.Latest) || (probe.parseDiagnostics || []).length) throw new Error(`\`${to}\` isn't a valid identifier`);
+  if (to === name) throw new Error('the new name is the old one');
+  const { options, files } = projectOf(file);
+  const ls = service(files, options);
+  const prog = ls.getProgram(), checker = prog.getTypeChecker();
+  const sf = prog.getSourceFile(file);
+  if (!sf) throw new Error(`TypeScript didn't load ${input.file} (excluded by its tsconfig?)`);
+  let found = renameCandidates(sf, checker, name);
+  if (!found.length) throw new Error(`no top-level declaration named ${name} in ${input.file}`);
+  const lines = (c) => [lineOf(sf, c.id.getStart(sf)), lineOf(sf, c.stmt.getStart(sf))];
+  if (input.line) found = found.filter((c) => lines(c).includes(input.line));
+  if (!found.length) throw new Error(`${name} isn't declared at line ${input.line} of ${input.file}`);
+  if (found.length > 1) throw new Error(`${name} is declared more than once in ${input.file} (lines ${found.map((c) => lines(c)[1]).join(', ')}); pass "line"`);
+  const target = found[0].id;
+  const info = ls.getRenameInfo(file, target.getStart(sf), { allowRenameOfImportPath: false });
+  if (!info.canRename) throw new Error(`TypeScript can't rename ${name}: ${info.localizedErrorMessage}`);
+  const locs = ls.findRenameLocations(file, target.getStart(sf), false, false, { providePrefixAndSuffixTextForRename: true });
+  if (!locs || !locs.length) throw new Error(`TypeScript found nothing to rename for ${name}`);
+  const unique = new Map(locs.map((l) => [`${l.fileName}:${l.textSpan.start}`, l]));
+  const places = [...unique.values()];
+  const where = places.map((l) => {
+    const f = path.resolve(l.fileName), r = path.relative(repo, f);
+    if (r.startsWith('..') || path.isAbsolute(r) || r.split(path.sep).includes('node_modules')) throw new Error(`${name} is also used in ${r.startsWith('..') ? f : r} (node_modules or outside the repo); not renaming`);
+    return `${rel(f)}:${lineOf(prog.getSourceFile(l.fileName), l.textSpan.start)}`;
+  });
+  // a clash: `to` already visible where the new name would bind (default-library globals are shadowable)
+  const scopes = new Map();
+  const visible = (n) => {
+    const p = n.parent;
+    const scope = scopeOf((ts.isFunctionLike(p) || ts.isClassLike(p)) && p.name === n ? p : n);  // a declared name binds outside its own body
+    if (!scopes.has(scope)) {
+      const names = new Map();
+      for (const s of checker.getSymbolsInScope(scope, ts.SymbolFlags.Value | ts.SymbolFlags.Type | ts.SymbolFlags.Namespace | ts.SymbolFlags.Alias)) {
+        const d = s.declarations && s.declarations[0];
+        if (d && !prog.isSourceFileDefaultLibrary(d.getSourceFile())) names.set(s.name, d);
+      }
+      scopes.set(scope, names);
+    }
+    return scopes.get(scope).get(to);
+  };
+  const lowerJsx = /^[a-z]/.test(to);
+  for (const l of places) {
+    const n = nodeAt(prog.getSourceFile(l.fileName), l.textSpan.start);
+    if (!ts.isIdentifier(n)) continue;
+    const clash = isExternalName(n) ? null : visible(n);
+    if (clash) throw new Error(`\`${to}\` is already declared or imported at ${rel(clash.getSourceFile().fileName)}:${lineOf(clash.getSourceFile(), clash.getStart())}, in scope where ${name} is used (${rel(l.fileName)}:${lineOf(n.getSourceFile(), n.getStart())})`);
+    const p = n.parent;
+    if (lowerJsx && (ts.isJsxOpeningElement(p) || ts.isJsxClosingElement(p) || ts.isJsxSelfClosingElement(p)) && p.tagName === n)
+      throw new Error(`\`${to}\` starts with a lowercase letter, so JSX would read <${to}> as a built-in tag`);
+  }
+  // the new texts
+  const byFile = new Map();
+  for (const l of places) byFile.set(l.fileName, [...(byFile.get(l.fileName) || []), l]);
+  const files_ = {}, overrides = new Map();
+  for (const [f, ls_] of byFile) {
+    const o = prog.getSourceFile(f);
+    const text = applyEdits(o.text, ls_.map((l) => [l.textSpan.start, l.textSpan.start + l.textSpan.length, `${l.prefixText || ''}${to}${l.suffixText || ''}`]));
+    if (text === o.text) continue;
+    files_[rel(f)] = text;
+    overrides.set(f, text);
+  }
+  // the safety net: no error the project didn't have before
+  const spelled = new RegExp(`(?<![\\w$])${name.replace(/[$]/g, '\\$&')}(?![\\w$])`);  // files still spelling the old name can break too
+  const changed = [...overrides.keys(), ...files.filter((f) => !overrides.has(f) && spelled.test(ts.sys.readFile(f) || ''))];
+  const esc = to.replace(/[$]/g, '\\$&');
+  const undo = (m) => m.replace(new RegExp(`(?<![\\w$])${esc}(?![\\w$])`, 'g'), name);
+  const before = diagnosticKeys(ls, changed, (m) => m);
+  const after = diagnosticKeys(service(files, options, overrides), changed, undo);
+  const fresh = [];
+  for (const [key, list] of after) fresh.push(...list.slice((before.get(key) || []).length));
+  if (fresh.length) throw new Error(`renaming ${name} to ${to} would add ${fresh.length} error(s): ${fresh.slice(0, 3).join('; ')}`);
+  return { files: files_, count: places.length, renamed: { from: name, to }, where: where.sort() };
+}
+
 try {
-  const ops = { extract, compare, share, share_hook: shareHook, unify, relocate, dedupe, same_behaviour: sameBehaviour, signature, component, syntax };
+  const ops = { extract, compare, share, share_hook: shareHook, unify, relocate, dedupe, same_behaviour: sameBehaviour, signature, component, syntax, rename };
   if (!ops[input.op]) throw new Error(`unknown op ${input.op}`);
   process.stdout.write(JSON.stringify({ ok: true, ...ops[input.op]() }));
 } catch (e) {
