@@ -82,15 +82,29 @@ references through TypeScript)
 29b. **Review thinking budget, next.** 44% of planner reviews and 67% of second reviews think until the budget
     cuts them off (~60–80 s), then need another call to answer. A/B on the suite: a lower budget, or the verdict
     first and the reasoning after; keep only what still catches what reviews caught. S–M
+29c. **Thinking-mode sampling, as 29b's first arm** (added 2026-10-12). The planner and both reviewers think at
+    temperature 0.2–0.3 and send no `top_k`/`top_p`/`min_p`/`presence_penalty` (the llama.cpp path passes only
+    temperature). Qwen's model cards for this family recommend ~0.6 / top_p 0.95 / top_k 20 / min_p 0 for thinking,
+    warn that near-greedy decoding causes endless repetition, and suggest a `presence_penalty` (up to 1.5) for
+    quantized models; check the exact values on the 3.6 card. That would explain thinking that runs until cut off
+    and the need for our repeating-thought detector. Run it before choosing a lower budget, since it may change
+    what the budget needs to be. Measure: share of calls cut off, review time, and what reviews still catch. S
 30. ~~Reflexes before a model round~~ **done** as a syntax reflex (field notes 31): planned edits, the native
     coder and any coder session can't leave a TS/JS file unparseable; 7.2 → 3.8 min on the case it targets. The
     history showed fixers for type errors had almost nothing to fix. Still open: the mechanical moves (the
     `signature` case's move wrote a syntax error the reflex doesn't cover). S
 33. **Best candidate wins** (lateral inhibition): two or more coders write the same task, the checks pick the
     winner, the rest are dropped (item 27's "two candidates plus tests", generalized). Helps where checks can tell
-    candidates apart; UI changes often pass either way. M
+    candidates apart; UI changes often pass either way. Evidence for this model size: one retry with test
+    feedback took Qwen3.6-35B-A3B from 34.7% to 62.2% on Aider Polyglot, and choosing among candidate attempts
+    took a Qwen3-30B-A3B agent from 63.5% to 71.2% on SWE-bench Verified (research doc, "Retries"). M
 34. **The suite every night** (was "learn while asleep"): replay the suite on `main` nightly and report what got
     slower or started failing; updating memory or routing from it waits for 32. S–M
+37. **Past merged plans as examples** (added 2026-10-12; in-prompt learning instead of fine-tuning). Every run
+    keeps its plans and reviews; put one or two plans from similar earlier runs that ended in a merge into the
+    planner's prompt, so it learns buckets' own tools (`share`, `signature`, `fold`…) from what worked. Needs
+    merges recorded per run (`merges.jsonl` has very few so far) and a similarity pick (request words, files,
+    tool used). Easy to undo; A/B on the suite. S–M
 29. ~~Report surprises, not summaries~~ **parked** on branch `park/predictive-review` (field notes 31): it worked
     and saved ~2 s per review, because reviews spend their time thinking, not reading. Worth it in a tree of many
     machines, where each level compresses what it passes up.
@@ -105,6 +119,15 @@ logs); answer questions from the facts alone when they suffice; README catch-up
 (`unify`, shared hooks, AGENTS.md digest, locale check, red CI, variant inventory); a pre-commit test hook
 in this repo; a "confirm" list for the owner of judgment calls made unattended (e.g. module state shared
 between variants).
+
+**Not now: fine-tuning the model** (looked at 2026-10-12). Neither machine can train a 35B MoE (LoRA needs
+~20–40 GB of GPU memory; the 3070 has 8 GB and MLX already runs out on the Mac's 32 GB), so it means a rented
+GPU and work code leaving the machines. Changed weights also lower MTP's draft acceptance (writing speed) unless
+the draft head is retrained, and need a re-quantized GGUF and the Windows expert split re-tested. There are too
+few graded runs (~150 runs, almost no recorded merges; published fine-tunes at this size used thousands), and
+each base-model upgrade (3.5 → 3.6 took weeks) means doing it again. 29c, 33 and 37 aim at the same gaps for
+free. Revisit for one target only: a review-only adapter, once the suite and hand checks have graded a few hundred
+branches good or bad.
 
 **When the owner OKs the spend:** Claude baselines for the big screen split and the pair-3
 merge (about $2–4), to measure what local saves.

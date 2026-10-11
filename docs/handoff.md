@@ -87,6 +87,8 @@ Next (in order):
 3. Item 12 (shared hooks past early returns) needs the owner's view: the clean ways change call sites.
 4. Dependabot batches need `gh auth login` for the work repo on the Mac (not logged in).
 5. Then JSX chunk dedupe (repeated blocks), simframe UI checks (15b); the other session owns 29b and tier 6.
+   Whoever runs 29b: start with 29c (thinking-mode sampling) as its first arm. New: 37 (past merged plans as
+   examples); fine-tuning looked at and set aside (roadmap, "Not now").
 
 Known weak spots: the local planner varies run to run (guards cover it); reviewers are the weakest link
 (verify every branch yourself); each new tool needed 3–7 live attempts before a clean run.
