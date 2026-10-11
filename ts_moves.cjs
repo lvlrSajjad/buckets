@@ -893,8 +893,97 @@ function unify() {
   return { files: { [input.into]: applyEdits(T.text, edits) }, report: { unified: done, missing } };
 }
 
+// Top-level declarations moved into another file (a util), exported there; the source file and every
+// importer import them from it. Private helpers they need come along.
+function relocate() {
+  const file = abs(input.file), into = abs(input.into);
+  const importers = (input.importers || []).filter((f) => abs(f) !== file && abs(f) !== into);
+  const { checker, prog, sources } = program([input.file, ...importers]);
+  const sf = sources[0];
+  const others = sources.slice(1);
+  const top = (name) => sf.statements.find((s) => declaredBy(s).some((id) => id.text === name));
+  const moving = new Set();
+  const missing = input.names.filter((n) => !top(n));
+  if (missing.length) throw new Error(`not top-level declarations in ${input.file}: ${missing.join(', ')}`);
+  const queue = input.names.map(top);
+  while (queue.length) {  // what they need from this file comes along
+    const st = queue.pop();
+    if (moving.has(st)) continue;
+    moving.add(st);
+    for (const { sym } of references(checker, st)) {
+      const d = sym.declarations && sym.declarations[0];
+      if (!d || d.getSourceFile() !== sf) continue;
+      const t = topStatement(sf, d);
+      if (t && t !== st && !ts.isImportDeclaration(t) && !moving.has(t)) queue.push(t);
+    }
+  }
+  const movedList = sf.statements.filter((s) => moving.has(s));
+  const names = movedList.flatMap((s) => declaredBy(s).map((id) => id.text));
+  const imports = importBindings(sf, checker);
+  const used = new Set();
+  for (const st of movedList) for (const { sym } of references(checker, st)) if (imports.has(sym)) used.add(imports.get(sym));
+  const kept = sf.statements.filter((s) => !moving.has(s) && !ts.isImportDeclaration(s));
+  const keptRefs = kept.flatMap((s) => references(checker, s));
+  for (const { node, sym } of keptRefs) {
+    const d = sym.declarations && sym.declarations[0];
+    if (d && movedList.some((m) => within(d, m)) && isAssigned(node)) throw new Error(`\`${node.text}\` is assigned in ${input.file}; it can't move`);
+  }
+  const stillHere = [...new Set(keptRefs.filter(({ sym }) => { const d = sym.declarations && sym.declarations[0];
+    return d && movedList.some((m) => declaredBy(m).some((id) => checker.getSymbolAtLocation(id) === sym)); }).map(({ sym }) => sym.name))];
+  const stillUsed = new Set(keptRefs.filter(({ sym }) => imports.has(sym)).map(({ sym }) => imports.get(sym)));
+  // the util: imports merged, the declarations exported
+  const chunk = (s) => {
+    const t = sf.text.slice(fullStart(sf, s), lineEnd(sf.text, s.end)).replace(/\n*$/, '\n');
+    if (isExported(s)) return t;
+    const at = s.getStart(sf) - fullStart(sf, s);
+    return t.slice(0, at) + 'export ' + t.slice(at);
+  };
+  const existing = fs.existsSync(into) ? fs.readFileSync(into, 'utf8') : '';
+  const body = (existing ? existing.replace(/\n*$/, '\n\n') : '') + movedList.map(chunk).join('\n');
+  const files = { [rel(into)]: mergeImports(body, importsFor(sf, used, file, into), into) };
+  // the source file
+  const edits = movedList.map((s) => [fullStart(sf, s), lineEnd(sf.text, s.end), '']);
+  pruneImports(sf, stillUsed, edits);
+  let srcText = applyEdits(sf.text, edits);
+  if (stillHere.length) srcText = mergeImports(srcText, [`import { ${stillHere.join(', ')} } from "${importPath(file, into)}"`], file);
+  files[input.file] = srcText;
+  // every importer: the moved names now come from the util
+  const left = [], touched = [];
+  const resolvesTo = (spec, from) => {
+    const r = ts.resolveModuleName(spec, from, prog.getCompilerOptions(), ts.sys);
+    return r.resolvedModule && path.resolve(r.resolvedModule.resolvedFileName) === file;
+  };
+  for (const o of others) {
+    const oEdits = [], add = [];
+    for (const st of o.statements) {
+      if (!(ts.isImportDeclaration(st) || ts.isExportDeclaration(st)) || !st.moduleSpecifier) continue;
+      if (!resolvesTo(st.moduleSpecifier.text, o.fileName)) continue;
+      const clause = ts.isImportDeclaration(st) ? st.importClause : null;
+      const nb = clause ? clause.namedBindings : st.exportClause;
+      if (nb && ts.isNamespaceImport(nb)) { left.push(`${rel(o.fileName)} imports the whole module as ${nb.name.text}`); continue; }
+      if (!nb || !(ts.isNamedImports(nb) || ts.isNamedExports(nb))) continue;
+      const els = nb.elements;
+      const mine = els.filter((e) => names.includes((e.propertyName || e.name).text));
+      if (!mine.length) continue;
+      const rest = els.filter((e) => !mine.includes(e));
+      const kw = ts.isImportDeclaration(st) ? 'import' : 'export';
+      const typeOnly = (clause && clause.isTypeOnly) || st.isTypeOnly ? ' type' : '';
+      const def = clause && clause.name ? clause.name.text : '';
+      if (!rest.length && !def) oEdits.push([fullStart(o, st), lineEnd(o.text, st.end), '']);
+      else oEdits.push([st.getStart(o), st.end, `${kw}${typeOnly} ${[def, rest.length ? `{ ${rest.map((e) => e.getText(o)).join(', ')} }` : ''].filter(Boolean).join(', ')} from ${st.moduleSpecifier.getText(o)}`]);
+      const line = `${kw}${typeOnly} { ${mine.map((e) => e.getText(o)).join(', ')} } from "${importPath(o.fileName, into)}"`;
+      if (kw === 'export') oEdits.push([lineEnd(o.text, st.end), lineEnd(o.text, st.end), line + '\n']);
+      else add.push(line);
+    }
+    if (!oEdits.length && !add.length) continue;
+    files[rel(o.fileName)] = add.length ? mergeImports(applyEdits(o.text, oEdits), add, o.fileName) : applyEdits(o.text, oEdits);
+    touched.push(rel(o.fileName));
+  }
+  return { files, report: { moved: names, importers_updated: touched, still_used_here: stillHere, left } };
+}
+
 try {
-  const ops = { extract, compare, share, share_hook: shareHook, unify };
+  const ops = { extract, compare, share, share_hook: shareHook, unify, relocate };
   if (!ops[input.op]) throw new Error(`unknown op ${input.op}`);
   process.stdout.write(JSON.stringify({ ok: true, ...ops[input.op]() }));
 } catch (e) {

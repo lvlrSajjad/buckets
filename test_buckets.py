@@ -2057,6 +2057,40 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
         fixed = buckets.validate_plan(b.fill_moves(bad), self.repo, 8)["tasks"][0]
         self.assertEqual(fixed["from"], ["src/app/screen.ts"])
 
+    def test_relocate_moves_to_a_util_and_repoints_importers(self):
+        files = {
+            "src/cart.ts": 'import { round } from "./math"\n\nconst pad = (s: string) => s.padStart(6)\n'
+                           'export const formatPrice = (n: number) => pad(`$${round(n)}`)\n'
+                           'export const total = (xs: number[]) => formatPrice(xs.reduce((a, b) => a + b, 0))\n',
+            "src/math.ts": "export const round = (n: number) => Math.round(n * 100) / 100\n",
+            "src/page.ts": 'import { formatPrice, total } from "./cart"\nexport const show = () => formatPrice(1) + total([2])\n',
+            "src/index.ts": 'export { formatPrice } from "./cart"\n',
+        }
+        for f, t in files.items():
+            (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / f).write_text(t)
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "cart"], cwd=self.repo, check=True)
+        d = buckets.ts_moves(self.repo, {"op": "relocate", "file": "src/cart.ts", "into": "src/utils/price.ts",
+                                         "names": ["formatPrice"], "importers": ["src/page.ts", "src/index.ts"]})
+        self.assertTrue(d["ok"], d)
+        r, f = d["report"], d["files"]
+        self.assertEqual(sorted(r["moved"]), ["formatPrice", "pad"])               # its private helper came along
+        self.assertIn('import { round } from "../math"', f["src/utils/price.ts"])
+        self.assertIn("export const formatPrice", f["src/utils/price.ts"])
+        self.assertNotIn("const pad", f["src/cart.ts"])
+        self.assertIn('import { formatPrice } from "./utils/price"', f["src/cart.ts"])  # total still uses it
+        self.assertNotIn("round", f["src/cart.ts"])                                 # its import went with it
+        self.assertIn('import { total } from "./cart"', f["src/page.ts"])
+        self.assertIn('import { formatPrice } from "./utils/price"', f["src/page.ts"])
+        self.assertIn('export { formatPrice } from "./utils/price"', f["src/index.ts"])
+        for path, text in f.items():
+            (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / path).write_text(text)
+        tsc = subprocess.run(["node", str(TS_PKG / "bin" / "tsc"), "--noEmit", "--strict", "--ignoreConfig", "src/cart.ts", "src/page.ts",
+                              "src/index.ts", "src/math.ts", "src/utils/price.ts"], cwd=self.repo, capture_output=True, text=True)
+        self.assertEqual(tsc.returncode, 0, tsc.stdout + tsc.stderr)
+
     def test_shared_hook_names(self):
         self.assertEqual(buckets.shared_hook_names("a/b/billing-shared.tsx", "a/b/x/use-billing-screen.tsx"),
                          ("a/b/use-billing-screen-shared.ts", "useBillingScreenShared"))
