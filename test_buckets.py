@@ -1458,6 +1458,18 @@ class Lookups(unittest.TestCase):
         self.assertEqual(got["tasks"], [])
         self.assertEqual(seen, [("plan-1", True, False), ("plan-2", False, False), ("plan-final", False, True)])
 
+    def test_a_plan_rejected_twice_stops_with_the_reason(self):
+        bad = json.dumps({"summary": "s", "tasks": [{"file": "/abs.py", "action": "edit", "instructions": "x",
+                                                     "done_when": "", "edits": []}]})
+        seen = []
+        def fake_turn(cfg, run, label, messages, **kw):
+            seen.append(label)
+            return bad, "", [], False
+        with mock.patch.object(buckets, "chat_turn", fake_turn), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaisesRegex(buckets.ModelError, "rejected too .*must be relative"):
+                self.b.plan_with_lookups("P", lambda d: buckets.validate_plan(d, self.repo, 8))
+        self.assertEqual(seen[-2:], ["plan-final", "plan-final-retry"])
+
     def test_tool_calls_on_the_wire(self):
         history = [{"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "name": "read", "arguments": {"what": "x"}}]},
                    {"role": "tool", "tool_call_id": "c1", "name": "read", "content": "code"}]
@@ -2287,6 +2299,20 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
         self.assertIn("<Text>{label(title)}</Text>", comp)
         with self.assertRaisesRegex(ValueError, "component"):
             buckets.validate_tasks([{**ch["task"], "name": "lowercase"}], self.repo, 8, "T")
+
+    def test_a_component_task_without_its_new_file_gets_the_dry_runs(self):
+        # The planner sometimes names the helper and leaves "into" empty; the dry run knows the file.
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        b = buckets.Buckets(cfg, self.repo, "Turn the title part of src/thing-screen.tsx into a Title component")
+        sparse = lambda helper: {"summary": "s", "tasks": [{"id": "T1", "file": "src/thing-screen.tsx", "action": "component",
+                                                            "into": "", "name": "", "where": "", "select": [helper],
+                                                            "instructions": "extract it", "done_when": "", "edits": []}]}
+        with contextlib.redirect_stderr(io.StringIO()):
+            task = buckets.validate_plan(b.fill_moves(sparse("renderTitle")), self.repo, 8)["tasks"][0]
+        self.assertEqual((task["into"], task["name"], task["where"], task["select"]),
+                         ("src/title.tsx", "Title", "ThingScreen", ["renderTitle"]))
+        with contextlib.redirect_stderr(io.StringIO()):                # another helper: its file isn't known, so no guess
+            self.assertEqual(b.fill_moves(sparse("renderOther"))["tasks"][0]["into"], "")
 
     def test_the_component_hint_reads_the_prose_and_tolerates_misspelled_helpers(self):
         screen = ("export const S = () => {\n  const renderOrderSummaryCard = () => <i />\n  const renderProfilPicture = () => <b />\n"

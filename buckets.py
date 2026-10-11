@@ -4152,6 +4152,17 @@ class Buckets:
                 for k in ("into", "name", "where"):
                     t[k] = t.get(k) or hint["task"][k]
                 t["select"] = t.get("select") or ["logic"]
+        ch = self.component_hint()
+        ct = ch.get("task") if ch else None
+        for t in data.get("tasks") or [] if ct else []:  # a component task of the dry run's helper, its new file left out
+            if not (isinstance(t, dict) and t.get("action") == "component"):
+                continue
+            f = clean_path(str(t.get("file") or "")) or ct["file"]
+            sel = [str(x).strip() for x in t.get("select") or [] if str(x).strip()] if isinstance(t.get("select"), list) else []
+            if f == ct["file"] and sel in ([], ct["select"]):
+                t["file"] = f
+                for k in ("into", "name", "where", "select"):
+                    t[k] = t.get(k) or ct[k]
         rh = self.relocate_hint()
         for t in data.get("tasks") or [] if rh else []:  # a dedupe aimed at a copy instead of the shared one
             if isinstance(t, dict) and t.get("action") == "dedupe" and clean_path(str(t.get("file", ""))) in (rh.get("copies") or []):
@@ -4982,7 +4993,10 @@ class Buckets:
                 {"role": "assistant", "content": content},
                 {"role": "user", "content": f"That plan was rejected: {e}\nReply with only the corrected plan as the JSON object."}],
                 schema=PLAN_SCHEMA, think=False, max_tokens=16000, timeout=self.timeout)
-            return validate(extract_json(content))
+            try:
+                return validate(extract_json(content))
+            except (ValueError, KeyError, TypeError) as e:  # rejected twice: stop with the reason, not a traceback
+                raise ModelError(f"plan: the planner's corrected plan was rejected too ({e})") from None
 
     def lookup(self, call: dict, asked: int) -> str:
         """Run one of the planner's look-ups: read and search here, exactly; ask on the reader."""
