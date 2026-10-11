@@ -3862,5 +3862,28 @@ open(os.path.join(out, "coverage-final.json"), "w").write(json.dumps(data))
         self.assertEqual(buckets.Buckets(cfg, repo, "rename a to c in pkg/src/m.ts").coverage_hint(), "")
 
 
+class Bisect(unittest.TestCase):
+    def test_the_first_failing_commit_is_found_without_moving_the_checkout(self):
+        repo = make_repo({"value.txt": "ok\n"})
+        for n in range(1, 9):
+            (repo / "value.txt").write_text("ok\n" if n < 6 else "broken\n")
+            (repo / f"f{n}.txt").write_text(str(n))
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-qm", f"commit {n}"], cwd=repo, check=True)
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout
+        out, old = io.StringIO(), os.getcwd()
+        os.chdir(repo)
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                code = buckets.cmd_bisect({}, ["grep -qx ok value.txt"])
+        finally:
+            os.chdir(old)
+        self.assertEqual(code, 0)
+        self.assertIn("First bad commit", out.getvalue())
+        self.assertIn("commit 6", out.getvalue())
+        self.assertEqual(subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout, head)
+        self.assertEqual(subprocess.run(["git", "worktree", "list"], cwd=repo, capture_output=True, text=True).stdout.count("\n"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

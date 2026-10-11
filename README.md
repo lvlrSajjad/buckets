@@ -257,6 +257,17 @@ One run per target, one after another, each on its own branch from where you are
 each other); `{}` is the target, `{1}`, `{2}` its fields. At the end, a table of how each went, with its
 branch to look at before merging. Good for overnight batches.
 
+## When did it break (`buckets bisect`)
+
+```bash
+buckets bisect test                              # one of the repo's checks, by name
+buckets bisect "yarn jest src/cart" --good v5.16
+```
+
+`git bisect run` with the check, in a worktree of its own (your checkout doesn't move). Without `--good`
+it steps back 1, 2, 4… commits (up to 64) to find one where the check passes. It prints the first bad
+commit with its message and files.
+
 ## Measuring a change (`buckets measure`)
 
 ```bash

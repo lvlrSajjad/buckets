@@ -7589,6 +7589,77 @@ def cmd_each(argv: list[str]) -> int:
     return 0 if done == len(targets) else 2
 
 
+# ---------------------------------------------------------------- buckets bisect
+
+
+def cmd_bisect(cfg: dict, argv: list[str]) -> int:
+    """`buckets bisect <check name or "command"> [--good REF] [--bad REF]`: the first commit where it fails, found
+    with `git bisect run` in a worktree of its own (your checkout doesn't move). Without --good, the newest of
+    the last 64 commits (stepping back 1, 2, 4…) where it passes."""
+    good, bad = None, "HEAD"
+    rest = []
+    while argv:
+        a = argv.pop(0)
+        if a in ("--good", "--bad") and argv:
+            good, bad = (argv.pop(0), bad) if a == "--good" else (good, argv.pop(0))
+        else:
+            rest.append(a)
+    if not rest:
+        die('buckets bisect: a check name (test, typecheck…) or a command, e.g. buckets bisect test --good v5.16')
+    repo = git_toplevel(".")
+    if repo is None:
+        die("run this inside the repo")
+    checks = detect_checks(repo, {**path_rules(cfg, repo), **repo_config(repo)})
+    command = checks.get(rest[0], " ".join(rest)) if len(rest) == 1 else " ".join(rest)
+    bad_sha = git(repo, "rev-parse", "--verify", f"{bad}^{{commit}}").strip()
+    with one_run(repo, f"bisect: {command}"):
+        tree = Path(tempfile.mkdtemp(prefix="buckets-bisect-")) / "tree"
+        measure_side(repo, bad_sha, tree)
+        passes = lambda ref: (git(tree, "checkout", "-q", "--detach", ref), run_proc(command, tree, 1800, shell=True)[0] == 0)[1]
+        try:
+            say(f"{paint('buckets bisect', 'bold')} · {repo.name} · {command}")
+            if passes(bad_sha):
+                say(f"{ok()} it passes at {bad} ({bad_sha[:10]}); nothing to look for")
+                return 0
+            if good is None:
+                step, ref = 1, None
+                while step <= 64:
+                    candidate = git(repo, "rev-parse", "--verify", "--quiet", f"{bad_sha}~{step}", check=False).strip()
+                    if not candidate:
+                        break
+                    with Ticker(f"  looking for a commit where it passes: {step} back"):
+                        ok_there = passes(candidate)
+                    if ok_there:
+                        ref = candidate
+                        break
+                    step *= 2
+                if ref is None:
+                    die("it fails in the last 64 commits too; give a commit where it passed with --good")
+                good = ref
+            good_sha = git(repo, "rev-parse", "--verify", f"{good}^{{commit}}").strip()
+            if not passes(good_sha):
+                die(f"it fails at --good {good} too")
+            steps = int(git(repo, "rev-list", "--count", f"{good_sha}..{bad_sha}").strip())
+            say(f"  good {good_sha[:10]}, bad {bad_sha[:10]}: {steps} commit(s) between, about "
+                f"{max(1, steps.bit_length())} run(s)")
+            git(tree, "bisect", "start", bad_sha, good_sha)
+            with Ticker("  bisecting"):
+                code, out, _ = run_proc(["git", "bisect", "run", "sh", "-c", command], tree, 6 * 3600)
+            m = re.search(r"^([0-9a-f]{40}) is the first bad commit", out, re.M)
+            git(tree, "bisect", "reset", check=False)
+        finally:
+            git(repo, "worktree", "remove", "--force", str(tree), check=False)
+            git(repo, "worktree", "prune", check=False)
+            shutil.rmtree(tree.parent, ignore_errors=True)
+    if not m:
+        say(f"{warn()} git bisect didn't name a commit:\n{out[-1500:]}")
+        return 1
+    sha = m.group(1)
+    info = git(repo, "show", "--stat", "--format=%h %an, %ad%n%n    %s%n%n%b", "--date=short", sha)
+    print(f"## First bad commit for `{command}`\n\n```\n{info.strip()[:3000]}\n```")
+    return 0
+
+
 # ---------------------------------------------------------------- buckets measure
 
 
@@ -8745,6 +8816,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_win(load_config(), (sys.argv[1:] if argv is None else argv)[1:])
     if (sys.argv[1:] if argv is None else argv)[:1] == ["each"]:
         return cmd_each((sys.argv[1:] if argv is None else argv)[1:])
+    if (sys.argv[1:] if argv is None else argv)[:1] == ["bisect"]:
+        return cmd_bisect(load_config(), (sys.argv[1:] if argv is None else argv)[1:])
     if (sys.argv[1:] if argv is None else argv)[:1] == ["measure"]:
         return cmd_measure(load_config(), (sys.argv[1:] if argv is None else argv)[1:])
     ap = argparse.ArgumentParser(prog="buckets", description=__doc__.split("\n\n")[0])
