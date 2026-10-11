@@ -269,6 +269,24 @@ very function the change edits. `offload.double_review: false` turns it off.
 Claude mode doesn't need the reading strategies: Claude explores the repo itself with read-only
 tools (the gathered facts are still passed to it).
 
+## Mechanical moves (refactors without retyping)
+
+Moving code is a job for a tool, not a model: a model asked to move 1,450 lines into a hook retypes
+them, slowly and with mistakes. `ts_moves.cjs` (TypeScript/JavaScript, through the TypeScript compiler's
+own scoping) moves code byte for byte, and the planner only decides what goes where:
+
+| Task action | What it does |
+|---|---|
+| `move` | a component's logic (`select: ["logic"]`: every statement that renders nothing) or named statements into a new hook file: works out the hook's parameters (props typed from the component's props type; values from `useStores()`-style hooks or store destructures are re-derived inside instead of passed), what it returns, the private helpers that must come along, and the imports on both sides; statements that can't move (they need something set later, or kept code assigns to them) stay, with the reason |
+| `share` | two variants of a file (`screens/x/ecotrak/…` and `…/ecotrak-techs/…`): identical top-level declarations go into one shared file, identical statements inside their components into a shared hook (`use<Screen>Shared`); module state a screen assigns to stays |
+
+For a request that asks to move, split, extract, merge or share code, buckets gives the planner a dry run
+of the move (or the two variants compared declaration by declaration, as TypeScript prints them, so
+formatting doesn't count) as a ready-made task, swaps in the move if the plan would retype the code,
+and drops edit tasks that would redo it by hand. The checks then decide; reviews judge the move, not
+problems the moved code already had. On ecotrak-mobile, a 3,687-line screen split in 5m 14s (it never
+finished by retyping), and inventory-details' two variants shared 110 lines with every check passing.
+
 ## The code index
 
 For TypeScript/JavaScript (using the repo's own `typescript` package, no build needed) and Python
