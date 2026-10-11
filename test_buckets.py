@@ -3809,5 +3809,25 @@ class UpdateBranch(unittest.TestCase):
         self.assertIn("already has everything", err.getvalue())
 
 
+class RedCIOnAPullRequest(unittest.TestCase):
+    def test_the_run_starts_from_the_pull_requests_branch(self):
+        repo = make_repo({"a.txt": "a\n"})
+        subprocess.run(["git", "branch", "-M", "main"], cwd=repo, check=True)
+        subprocess.run(["git", "branch", "fix-thing"], cwd=repo, check=True)
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        b = buckets.Buckets(cfg, repo, "the CI is red on PR 42, fix the failing checks")
+        seen = []
+        with mock.patch.object(buckets, "update_target", return_value=("fix-thing", "HEAD")) as target, \
+                mock.patch.object(b, "_code", lambda plan_only: seen.append(
+                    (subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo, capture_output=True,
+                                    text=True).stdout.strip(), b.start_branch)) or 0), \
+                contextlib.redirect_stderr(io.StringIO()):
+            b.code()
+        self.assertEqual(target.call_args[0][1], "42")
+        self.assertEqual(seen, [("fix-thing", "fix-thing")])  # read and planned from it, merging into it
+        b2 = buckets.Buckets(cfg, repo, "add a test for PR 42's helper")  # a PR without CI words
+        self.assertIsNone(b2.ci_pr_branch())
+
+
 if __name__ == "__main__":
     unittest.main()

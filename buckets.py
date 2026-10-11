@@ -3908,6 +3908,15 @@ class Buckets:
             say(f"  {ok()} gathered {len(shown)} code excerpt(s) and related tests mechanically, before planning")
         return self._facts
 
+    def ci_pr_branch(self) -> str | None:
+        """For "fix the red CI on PR 123": that pull request's branch (fetched, made local if needed), so the run
+        reads its failed checks and builds on it. None when the request doesn't name a PR and CI."""
+        m = re.search(r"\b(?:pr|pull request)\s*#?(\d+)\b|(?<![\w/])#(\d+)\b", self.request, re.I)
+        if not m or not CI_WORDS.search(self.request):
+            return None
+        branch, _ = update_target(self.repo, m.group(1) or m.group(2), "HEAD", self.rc)
+        return branch
+
     def ci_failures(self) -> str:
         """The newest failed CI run on this branch (GitHub Actions, through gh with the folder's account):
         the end of each failed step's log, as check output for the planner. "" when there's none."""
@@ -6379,6 +6388,10 @@ class Buckets:
             die(dirty_tree(repo))
         if not plan_only:
             require_identity(repo)
+            pr = self.ci_pr_branch()
+            if pr and git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() != pr:
+                git(repo, "checkout", "-q", pr)  # the fix starts from, and merges into, the PR's branch
+                say(f"  {ok()} working from the pull request's branch {paint(pr, 'cyan')}")
             # A follow-up starts from the last run's unmerged branch, before anything reads the code, so the
             # plan sees that work. The new branch still merges into where you started.
             self.start_branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
