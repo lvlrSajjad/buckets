@@ -3068,6 +3068,16 @@ def file_imports(repo: Path, path: str, files) -> list[str]:
     return out
 
 
+def memory_place(repo: Path, setting) -> Path | None:
+    """Where a repo's map and journal live: `.buckets/` in the repo (true, the default), under buckets' own
+    state folder (`"outside"`: for repos that shouldn't get new files), or nowhere (false)."""
+    if setting is False or setting in ("off", "no", "false"):
+        return None
+    if setting == "outside":
+        return STATE_DIR / "memory" / re.sub(r"[^\w.-]+", "_", str(repo.resolve()).strip("/"))
+    return repo / MEMORY_DIR
+
+
 class ProjectMemory:
     """`.buckets/` in the repo, so runs stop rediscovering the project:
     - map.json / map.md: one line per file (what it is, what it declares, what it imports and what
@@ -3078,8 +3088,8 @@ class ProjectMemory:
       so "add a test for that" has a "that". Personal; git-ignored.
     Both are cut to a token budget before a model sees them."""
 
-    def __init__(self, repo: Path):
-        self.repo, self.dir = repo, repo / MEMORY_DIR
+    def __init__(self, repo: Path, where: Path | None = None):
+        self.repo, self.dir = repo, where or repo / MEMORY_DIR
         try:
             self.data = json.loads((self.dir / "map.json").read_text())
         except (OSError, json.JSONDecodeError):
@@ -3116,7 +3126,7 @@ class ProjectMemory:
         return changed
 
     def save(self) -> None:
-        self.dir.mkdir(exist_ok=True)
+        self.dir.mkdir(parents=True, exist_ok=True)
         ignore = self.dir / ".gitignore"
         if not ignore.exists():
             ignore.write_text("journal.md\n")
@@ -3204,7 +3214,7 @@ class ProjectMemory:
                  + (f"Changed: {', '.join(changed[:12])}{' …' if len(changed) > 12 else ''}\n" if changed else "")
                  + (f"Result: {' '.join(summary.split())[:500]}\n" if summary.strip() else ""))
         entries = (self.journal_entries() + [entry.strip()])[-20:]
-        self.dir.mkdir(exist_ok=True)
+        self.dir.mkdir(parents=True, exist_ok=True)
         if not (self.dir / ".gitignore").exists():
             (self.dir / ".gitignore").write_text("journal.md\n")
         (self.dir / "journal.md").write_text("# buckets journal\n\nThe latest runs here, newest last.\n\n"
@@ -3265,13 +3275,16 @@ class Buckets:
         """The repo's `.buckets/` notes, brought up to date with the files (off with "memory": false)."""
         if not hasattr(self, "_memory"):
             self._memory = None
-            if self.rc.get("memory", self.cfg.get("memory", True)):
-                fresh = not (self.repo / MEMORY_DIR / "map.json").exists()
-                self._memory = ProjectMemory(self.repo)
+            where = memory_place(self.repo, self.rc.get("memory", self.cfg.get("memory", True)))
+            if where:
+                fresh = not (where / "map.json").exists()
+                self._memory = ProjectMemory(self.repo, where)
                 self._memory.refresh(self.index.files, self.index.outline())
                 if fresh and self._memory.files:
                     say(f"  {ok()} started {MEMORY_DIR}/ here: a map of the project and a journal of runs "
-                        f"(commit map.md and map.json to share the map; the journal stays yours)")
+                        f"(commit map.md and map.json to share the map; the journal stays yours)"
+                        if where == self.repo / MEMORY_DIR else
+                        f"  {ok()} started a map of the project and a journal of runs in {where} (outside the repo)")
         return self._memory
 
     @property
@@ -6453,7 +6466,8 @@ class GitAssistant:
                                                      for p in listed) or "(none)"))
         except json.JSONDecodeError:
             parts.append("Open PRs: (gh isn't available or not logged in for this folder)")
-        recent = ProjectMemory(self.repo).recent(budget=400) if (self.repo / MEMORY_DIR).is_dir() else ""
+        where = memory_place(self.repo, self.b.rc.get("memory", self.cfg.get("memory", True)))
+        recent = ProjectMemory(self.repo, where).recent(budget=400) if where and where.is_dir() else ""
         if recent:
             parts.append("Recent buckets work here (\"it\" or \"that\" may refer to it):\n" + recent)
         run = next(runs_newest_first(self.repo, ("code", "pick")), None)
@@ -6561,8 +6575,9 @@ class GitAssistant:
                 return 2
             say(f"  {ok()} {i}. {describe_op(step)}" + (f"\n{indent(result)}" if result else ""))
         self.record(request, data, ran=True, done=True)
-        if changing and (self.repo / MEMORY_DIR).is_dir():
-            ProjectMemory(self.repo).note("git", "done", request.splitlines()[0], [],
+        where = memory_place(self.repo, self.b.rc.get("memory", self.cfg.get("memory", True)))
+        if changing and where and where.is_dir():
+            ProjectMemory(self.repo, where).note("git", "done", request.splitlines()[0], [],
                                           "; ".join(describe_op(s) for s in ops)[:400])
         return 0
 

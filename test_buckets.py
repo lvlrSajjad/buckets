@@ -1623,6 +1623,21 @@ class RoundRollback(unittest.TestCase):
         self.assertIn("round 2 broke test", err.getvalue())
 
 
+class MemoryOutside(unittest.TestCase):
+    def test_outside_keeps_the_repo_untouched(self):
+        repo = make_repo({"src/a.py": "def run():\n    return 1\n"})
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": "outside"})
+        b = buckets.Buckets(cfg, repo, "x")
+        with contextlib.redirect_stderr(io.StringIO()):
+            mem = b.memory
+        self.assertIsNotNone(mem)
+        self.assertFalse((repo / ".buckets").exists())
+        self.assertTrue(str(mem.dir).startswith(str(buckets.STATE_DIR)))
+        self.assertEqual(buckets.git(repo, "status", "--porcelain").strip(), "")
+        self.assertIsNone(buckets.memory_place(repo, False))
+        self.assertEqual(buckets.memory_place(repo, True), repo / ".buckets")
+
+
 class CleanStops(unittest.TestCase):
     def test_an_unattended_stop_stashes_half_done_edits_and_goes_back(self):
         repo = make_repo({"a.txt": "1\n"})
