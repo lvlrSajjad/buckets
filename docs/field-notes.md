@@ -630,6 +630,23 @@ Two smaller cases (a prop added to a component used in 4 places; a prop passed o
 uses) were planned as plain edits, which was right: the tool is for changes that repeat across many call
 sites, and plain edits did those in 3m 47s and 7m 03s.
 
+### 28. Part of a screen into a component (`component`, 2026-10-11)
+
+On the work repo's 3,687-line screen, every render helper tried mechanically: **12 of 13 become components
+with `tsc`, eslint and all tests passing** (props: the helper's parameters plus the screen values it uses,
+2 to 18 of them; context values re-derived inside; module state the screen assigns passed as a prop; types
+the props mention imported). The 13th is refused: a private helper that would move along reads module state
+the screen keeps.
+
+Live, "turn the reference image part of the screen into a component in its own file": run 1 picked the wrong
+helper (words in the file path matched; the real helper's name is misspelled in the code); run 2's reviewers
+flagged the generated `navigation: any` (Prettier had split the signature, so the generated-line exemption
+missed it); run 3's reviewers objected to the inherited `any` and to a moved interface's new home. **Run 4:
+4m 38s, both reviews done; verified: 8 uses render the new component, `tsc`, eslint, all tests pass.**
+
+Also found: an unattended stop had put a half-done task in the work repo's stash list. Stops now commit it on
+buckets' own branch instead; the stash was dropped, so the repo is as found.
+
 ## Lessons so far
 
 - Run it, don't argue about it: comparing two versions of a small function on sample inputs settles

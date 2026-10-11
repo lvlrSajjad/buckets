@@ -27,7 +27,8 @@ references through TypeScript)
 9. Code copied 3–4 times that drifted apart: **partly done** (`dedupe`: same-named top-level copies replaced
    by an import when they behave the same, run on sample inputs; differences shown). Still to do: finding
    copies with different names (clone detection), copies inside components. M–L
-10. Turn part of a screen into a component (a render helper, or a JSX chunk by lines). M
+10. ~~Turn part of a screen into a component~~ **done for render helpers** (`component`, field notes 28); a JSX
+    chunk picked by lines is still to do. M
 11. Renames across files through the TypeScript language service. S once 8 exists
 12. Shared hooks for code after an early return, or code that differs slightly. M
 

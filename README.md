@@ -281,6 +281,11 @@ own scoping) moves code byte for byte, and the planner only decides what goes wh
 | Task action | What it does |
 |---|---|
 | `move` | a component's logic (`select: ["logic"]`: every statement that renders nothing) or named statements into a new hook file: works out the hook's parameters (props typed from the component's props type; values from `useStores()`-style hooks or store destructures are re-derived inside instead of passed), what it returns, the private helpers that must come along, and the imports on both sides; statements that can't move (they need something set later, or kept code assigns to them) stay, with the reason |
+| `relocate` | top-level functions, constants or types moved into another file (a util), exported there; private helpers they need come along; the source file and every importer (re-exports too) point at the new place; an emptied source with no importers is deleted |
+| `dedupe` | other files' own copies of a function replaced by an import of the one that stays: identical ones, and copies written differently that behave the same when both are run on sample inputs; others are reported with the first input where they differ |
+| `unify` | a near copy made identical to another version, copied exactly (the model picks which, where the difference is incidental) |
+| `signature` | a parameter (or prop) added to a function (or component) and to every call (or JSX use), with a default so old callers keep working, and a value for each use if asked |
+| `component` | a render helper inside a component turned into its own component: its parameters and the values it uses become props, every call becomes an element |
 | `share` | two variants of a file (`screens/x/app-a/…` and `…/app-b/…`): identical top-level declarations go into one shared file, identical statements inside their components into a shared hook (`use<Screen>Shared`); module state a screen assigns to stays |
 
 For a request that asks to move, split, extract, merge or share code, buckets gives the planner a dry run
