@@ -4162,6 +4162,30 @@ class Contract(unittest.TestCase):
         self.assertEqual(got, {"include": ["src"], "spec": str(backend / "openapi.json")})
         self.assertIsNone(buckets.contract_settings(Path("."), {}))
 
+    def test_a_nestjs_backend_gives_its_routes_from_the_code(self):
+        if not (TS_PKG.exists() and shutil.which("node")):
+            self.skipTest("needs node and a typescript package")
+        backend = make_repo({
+            "package.json": '{"dependencies": {"@nestjs/core": "11"}}',
+            "tsconfig.json": '{"compilerOptions": {"experimentalDecorators": true, "strict": false}, "include": ["src"]}',
+            "src/decorators.d.ts": "declare module '@nestjs/common' {\n  export function Controller(p?: any): ClassDecorator\n"
+                                   "  export function Get(p?: any): MethodDecorator\n}\n",
+            "src/orders.controller.ts": "import { Controller, Get } from '@nestjs/common'\n\n@Controller('orders')\n"
+                                        "export class OrdersController {\n  @Get(':id')\n  one() { return 1 }\n}\n",
+            "swagger-spec.json": "{}"})
+        (backend / "node_modules").mkdir(exist_ok=True)
+        (backend / "node_modules/typescript").symlink_to(TS_PKG)
+        state = Path(tempfile.mkdtemp())
+        with mock.patch.object(buckets, "STATE_DIR", state):
+            got = buckets.contract_settings(Path("."), {"related": {"api": str(backend)}})
+            self.assertTrue(got["from_code"])
+            spec = json.loads(Path(got["spec"]).read_text())
+            self.assertIn("/orders/{id}", spec["paths"])
+            again = buckets.contract_settings(Path("."), {"related": {"api": str(backend)}})
+            self.assertEqual(again["spec"], got["spec"])                       # cached per commit
+            old = buckets.contract_settings(Path("."), {"related": {"api": str(backend)}, "contract": {"source": "spec"}})
+            self.assertEqual(old, {"spec": str(backend / "swagger-spec.json")})  # the exported file, when asked
+
 
 if __name__ == "__main__":
     unittest.main()

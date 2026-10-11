@@ -319,6 +319,21 @@ class ApiContractTests(unittest.TestCase):
         finally:
             shutil.rmtree(repo, ignore_errors=True)
 
+    def test_words_match_without_case_and_an_unresolved_part_may_be_a_word(self):
+        repo = make_repo({"src/http.ts": HTTP_TS, "src/use.ts": (
+            'import { api } from "./http"\n'
+            'export const count = (kind: string) => api.get(`/orders/count/${kind}`)\n'
+            'api.get("/lookups/calculationMethods")\n')})
+        spec = {"openapi": "3.0.0", "paths": {"/orders/count/past": {"get": {}}, "/lookups/CalculationMethods": {"get": {}}}}
+        try:
+            d = run_tool(repo, spec)
+            by = {c["raw"]: c for c in d["calls"]}
+            word = by["`/orders/count/${kind}`"]
+            self.assertEqual((word["status"], word["endpoint"], word.get("loose")), ("ok", "GET /orders/count/past", True))
+            self.assertEqual(by['"/lookups/calculationMethods"']["status"], "ok")   # routes ignore case by default
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)
+
     def test_a_bad_payload_is_an_error(self):
         r = subprocess.run(["node", str(SCRIPT)], input=json.dumps({"repo": str(self.repo), "spec": "/no/such.json"}),
                            capture_output=True, text=True)

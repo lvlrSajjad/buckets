@@ -267,8 +267,12 @@ Every HTTP call the app makes (found with the TypeScript checker: direct `api.ge
 with a method and URL, URL constants and template strings resolved) checked against the backend's OpenAPI or
 Swagger spec: calls with no endpoint, the wrong method, keys the endpoint doesn't declare, required ones not
 sent. No model; seconds on a 2,000-file app. The spec comes from the repo rule (`"contract": {"spec": …,
-"include": ["src"]}`) or a `swagger-spec.json`/`openapi.json` in a related repo. A request about API calls
-that names files gets their findings in the planner's facts.
+"include": ["src"]}`); else, when a related repo is a NestJS backend, from its code (`nest_routes.cjs`: the
+`@Controller`/`@Get…` routes, the global prefix and URI versioning, `@Param`/`@Query`/`@Body` with their DTOs'
+properties and optionality, cached per backend commit), because an exported swagger file goes stale; else a
+`swagger-spec.json`/`openapi.json` in a related repo (`"contract": {"source": "spec"}` prefers that file). Path
+words compare without case, as Express routes them. A request about API calls that names files gets their
+findings in the planner's facts.
 
 ## When did it break (`buckets bisect`)
 
@@ -705,5 +709,5 @@ e.g. `{"~/code/oss/*": {"mode": "local"}}`.
 ## Tests
 
 ```bash
-python3 -m unittest test_buckets test_regress test_rename test_find_copies test_api_contract test_fold test_to_ref test_component_lines
+python3 -m unittest test_buckets test_regress test_rename test_find_copies test_api_contract test_fold test_to_ref test_component_lines test_nest_routes
 ```

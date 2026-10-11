@@ -122,10 +122,13 @@ function stripVersionPrefix(p) {
   return segs.join('/');
 }
 
+// 2: the same word; 1: a parameter or a pattern fits; 0.5: an unresolved part taken for a word; 0: no. Words compare without case (Express and NestJS
+// route that way by default); a part of the client's path we couldn't resolve may be any word of the spec's.
 function matchSegment(c, s) {
   if (c === s) return c === '{}' ? 1 : 2;
   if (s === '{}') return 1;
-  if (c === '{}') return 0;
+  if (c === '{}') return 0.5;
+  if (c.toLowerCase() === s.toLowerCase()) return 2;
   const part = c.includes('{}') ? [c, s] : s.includes('{}') ? [s, c] : null;
   if (!part) return 0;
   const re = new RegExp('^' + part[0].split('{}').map((x) => x.replace(/[.+*?^$()|[\]\\]/g, '\\$&')).join('[^/]+') + '$');
@@ -253,8 +256,9 @@ function findEndpoint(endpoints, method, clientPath, base) {
       let loose = false;  // a word of the client's path was taken for a path parameter
       for (let i = 0; i < segs.length && ok; i++) {
         const s = matchSegment(segs[i], ep.segs[i]);
-        if (!s) ok = false; else score += s === 2 ? 1000 : 1;
+        if (!s) ok = false; else score += s === 2 ? 1000 : s;
         if (s === 1 && ep.segs[i] === '{}' && /^[A-Za-z][\w-]{2,}$/.test(segs[i])) loose = true;
+        if (s === 0.5) loose = true;  // an unresolved part taken for a word
       }
       if (ok) hits.push({ ep, score, loose });
     }

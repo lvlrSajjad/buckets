@@ -7886,10 +7886,51 @@ def cmd_each(argv: list[str]) -> int:
 CONTRACT_SCRIPT = Path(__file__).resolve().parent / "api_contract.cjs"
 
 
+NEST_SCRIPT = Path(__file__).resolve().parent / "nest_routes.cjs"
+
+
+def nest_spec(backend: Path) -> str | None:
+    """A NestJS backend's routes read from its controllers (nest_routes.cjs) as an OpenAPI file, cached per commit
+    and working-tree state; None when it isn't NestJS or the routes can't be read."""
+    try:
+        pkg = json.loads((backend / "package.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if "@nestjs/core" not in {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}:
+        return None
+    head = git(backend, "rev-parse", "HEAD", check=False).strip()
+    dirty = git(backend, "status", "--porcelain", "--", "src", check=False)
+    key = hashlib.sha1(f"{head}\n{dirty}".encode()).hexdigest()[:12]
+    out = STATE_DIR / "contract" / f"{backend.name}-{key}.json"
+    if out.is_file():
+        return str(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        r = subprocess.run(["node", str(NEST_SCRIPT)], input=json.dumps({"repo": str(backend), "out": str(out)}),
+                           cwd=backend, capture_output=True, text=True, timeout=300)
+        d = json.loads(r.stdout or "{}")
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        return None
+    if not d.get("ok") or not out.is_file():
+        return None
+    for old in out.parent.glob(f"{backend.name}-*.json"):  # older commits' specs
+        if old != out:
+            old.unlink(missing_ok=True)
+    return str(out)
+
+
 def contract_settings(repo: Path, rc: dict) -> dict | None:
-    """Where the API spec is and what to scan: the repo rule's "contract", else a swagger-spec.json or openapi.json
-    at the top of a related repo (the backend)."""
+    """Where the API spec is and what to scan: the repo rule's "contract" spec, else a NestJS related repo's routes
+    read from its code (an exported swagger file goes stale), else a swagger-spec.json or openapi.json at the top
+    of a related repo (the backend)."""
     c = dict(rc.get("contract") or {})
+    if not c.get("spec") and c.get("source", "code") == "code":
+        for path in (rc.get("related") or {}).values():
+            spec = nest_spec(Path(os.path.expanduser(str(path))))
+            if spec:
+                c["spec"], c["from_code"] = spec, True
+                break
+    c.pop("source", None)
     if not c.get("spec"):
         for path in (rc.get("related") or {}).values():
             for name in ("swagger-spec.json", "openapi.json", "swagger.json", "openapi/openapi.json"):
@@ -7906,7 +7947,7 @@ def contract_settings(repo: Path, rc: dict) -> dict | None:
 
 
 def run_contract(repo: Path, settings: dict) -> dict:
-    payload = {"repo": str(repo), **settings}
+    payload = {"repo": str(repo), **{k: v for k, v in settings.items() if k != "from_code"}}
     try:
         r = subprocess.run(["node", str(CONTRACT_SCRIPT)], input=json.dumps(payload), cwd=repo, capture_output=True,
                            text=True, timeout=600)
@@ -7944,13 +7985,14 @@ def cmd_contract(cfg: dict, argv: list[str]) -> int:
         die('no API spec found: set "contract": {"spec": "<openapi.json>", "include": ["src"]} in the repo rule, '
             'or list the backend under "related"')
     start = time.time()
-    with Ticker("  Checking the app's API calls against the spec"):
+    with Ticker("  Checking the app's API calls against the " + ("backend's routes (read from its code)" if settings.get("from_code") else "spec")):
         d = run_contract(repo, settings)
     if not d.get("ok"):
         die(f"the contract check failed: {d.get('error')}")
     s = d["summary"]
     findings = contract_findings(d["calls"])
-    lines = [f"## API calls against {Path(settings['spec']).name} ({int(time.time() - start)}s)", "",
+    source = "the backend's routes, read from its controllers" if settings.get("from_code") else Path(settings["spec"]).name
+    lines = [f"## API calls against {source} ({int(time.time() - start)}s)", "",
              f"{s.get('calls', len(d['calls']))} call(s) in {s.get('files', '?')} file(s): " + ", ".join(
                  f"{s[k]} {k}" for k in ("ok", "no-endpoint", "method-mismatch", "unresolved", "external") if s.get(k)), ""]
     if findings:
