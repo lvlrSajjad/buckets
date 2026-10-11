@@ -1,0 +1,10 @@
+{
+  "repo": "{buckets}",
+  "commit": "7e2db46a523e701068f64f226d719b8eb77376e2",
+  "time_limit": 15,
+  "expect": {
+    "done": true,
+    "changed_within": ["buckets.py", "test_buckets.py"],
+    "commands": ["python3 -m unittest -q test_buckets"]
+  }
+}

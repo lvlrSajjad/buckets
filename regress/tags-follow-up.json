@@ -1,0 +1,12 @@
+{
+  "request": "In buckets.py, add a read-only git operation \"tags\" to GIT_OPS that lists the newest tags with their dates ({count?}, default 10), with an op_tags method that returns git tag --sort=-creatordate --format=\"%(refname:short) %(creatordate:short)\" limited to count. Add a test for op_tags to GitAssistantTests in test_buckets.py.",
+  "follow_ups": ["now make op_tags default to 5 tags instead of 10, and update its test"],
+  "expect": {
+    "max_minutes": 14,
+    "matches": [
+      {"file": "buckets.py", "regex": "def op_tags\\("},
+      {"file": "buckets.py", "regex": "def op_tags\\([\\s\\S]{0,500}?\\b5\\b"},
+      {"file": "buckets.py", "regex": "def op_tags\\([\\s\\S]{0,300}?\\b10\\b", "min": 0, "max": 0}
+    ]
+  }
+}
