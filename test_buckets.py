@@ -2240,6 +2240,16 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
                               "sig/jsx.d.ts", "sig/price.ts", "sig/badge.tsx", "sig/page.tsx"], cwd=self.repo, capture_output=True, text=True)
         self.assertEqual(tsc.returncode, 0, tsc.stdout + tsc.stderr)
 
+    def test_signature_values_written_jsx_style_are_unwrapped(self):
+        (self.repo / "s.ts").write_text("export const f = (n: number) => n\n")
+        t = buckets.validate_tasks([{"id": "T1", "file": "s.ts", "action": "signature", "where": "f", "instructions": "",
+                                     "done_when": "", "edits": [], "param": {"name": "d", "type": "number", "default": "{2000}",
+                                                                             "value": "{ 3000 }"}}], self.repo, 8, "T")[0]
+        self.assertEqual((t["param"]["default"], t["param"]["value"]), ("2000", "3000"))
+        t = buckets.validate_tasks([{"id": "T1", "file": "s.ts", "action": "signature", "where": "f", "instructions": "",
+                                     "done_when": "", "edits": [], "param": {"name": "o", "value": "{ a: 1 }"}}], self.repo, 8, "T")[0]
+        self.assertEqual(t["param"]["value"], "{ a: 1 }")                         # an object literal stays
+
     def test_shared_hook_names(self):
         self.assertEqual(buckets.shared_hook_names("a/b/billing-shared.tsx", "a/b/x/use-billing-screen.tsx"),
                          ("a/b/use-billing-screen-shared.ts", "useBillingScreenShared"))
