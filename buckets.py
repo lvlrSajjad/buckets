@@ -5594,10 +5594,23 @@ def coder_prompt(request: str, task: dict, focus: str = "") -> str:
                                done_when=task["done_when"])
 
 
+UNATTENDED = {"on": False}  # -y or a time limit: nobody is there to look at half-done edits
+
+
 def leave_branch(repo: Path, branch: str, start_branch: str, base: str) -> str:
-    """After a run stops early: drop the branch if it holds nothing, else say where the work is."""
+    """After a run stops early: drop the branch if it holds nothing, else say where the work is. An
+    unattended stop stashes a half-done task's edits (they're buckets' own) and goes back."""
+    stashed = ""
     if changed_paths(repo):
-        return f"uncommitted changes are left on {branch}; you're still on that branch"
+        if not UNATTENDED["on"]:
+            return f"uncommitted changes are left on {branch}; you're still on that branch"
+        git(repo, "stash", "push", "-u", "-q", "-m", f"buckets: unfinished task on {branch}")
+        stashed = "; a half-done task's edits are stashed (git stash list)"
+    git(repo, "checkout", "-q", start_branch)
+    if git(repo, "rev-parse", branch).strip() == base:
+        git(repo, "branch", "-q", "-D", branch)
+        return f"nothing was committed, so {branch} was deleted; back on {start_branch}{stashed}"
+    return f"work so far is committed on {branch}; back on {start_branch}{stashed}"
     git(repo, "checkout", "-q", start_branch)
     if git(repo, "rev-parse", branch).strip() == base:
         git(repo, "branch", "-q", "-D", branch)
@@ -6959,6 +6972,29 @@ def find_repo(path: str) -> Path:
     return top
 
 
+def install_stop_handlers() -> None:
+    """Ctrl-C works even when started from a background shell (which makes Python ignore it), and a
+    SIGTERM stops a run the same tidy way."""
+    try:
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    except ValueError:  # not the main thread (tests)
+        pass
+
+
+def start_time_limit(minutes: float | None) -> None:
+    """Stop the run like a Ctrl-C after `minutes`; the stop leaves the repo tidy (unattended)."""
+    if not minutes:
+        return
+    UNATTENDED["on"] = True
+
+    def fire() -> None:
+        time.sleep(minutes * 60)
+        say(f"\n{warn()} time limit ({minutes:g} min) reached; stopping")
+        os.kill(os.getpid(), signal.SIGINT)
+    threading.Thread(target=fire, daemon=True).start()
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="buckets", description=__doc__.split("\n\n")[0])
     ap.add_argument("request", nargs="*", help="what you want, in plain words")
@@ -6971,6 +7007,7 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--pick", nargs="+", metavar="COMMIT", help="cherry-pick commits or ranges (a..b)")
     ap.add_argument("--onto", help="with --pick: the branch to pick onto (default: the current branch)")
     ap.add_argument("-y", "--yes", action="store_true", help="start without the 5-second pause")
+    ap.add_argument("--time-limit", type=float, metavar="MIN", help="stop cleanly after MIN minutes (like Ctrl-C)")
     ap.add_argument("-v", "--verbose", action="store_true", help="also show token counts and timings")
     ap.add_argument("--reading", choices=["auto", "direct", "research"],
                     help="local mode: read picked files directly, or have the planner ask the helper model "
@@ -6992,6 +7029,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="an earlier change to copy: a commit, a range (a..b) or a file; repeatable")
     ap.add_argument("--version", action="version", version=f"buckets {VERSION}")
     args = ap.parse_args(argv)
+    install_stop_handlers()
 
     cfg = load_config()
     if args.rounds:
@@ -7196,6 +7234,8 @@ def run_request(b, cfg: dict, args, repo: Path) -> int:
         if b.mode != "claude" and intent != "pick":
             parts.append(f"reading: {b.reading()}")
         b.assume_yes = args.yes
+        UNATTENDED["on"] = UNATTENDED["on"] or bool(args.yes)
+        start_time_limit(args.time_limit or cfg.get("time_limit_min"))
         countdown("  " + " · ".join(parts), 0 if args.yes else 5)
         if (b.mode != "claude" and intent == "code" and route and route["difficulty"] != "light"
                 and claude_ready(cfg)):

@@ -1623,6 +1623,28 @@ class RoundRollback(unittest.TestCase):
         self.assertIn("round 2 broke test", err.getvalue())
 
 
+class CleanStops(unittest.TestCase):
+    def test_an_unattended_stop_stashes_half_done_edits_and_goes_back(self):
+        repo = make_repo({"a.txt": "1\n"})
+        main = buckets.git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        base = buckets.git(repo, "rev-parse", "HEAD").strip()
+        buckets.git(repo, "switch", "-q", "-c", "buckets/x")
+        (repo / "a.txt").write_text("half\n")
+        old = buckets.UNATTENDED["on"]
+        try:
+            buckets.UNATTENDED["on"] = False
+            self.assertIn("you're still on that branch", buckets.leave_branch(repo, "buckets/x", main, base))
+            buckets.UNATTENDED["on"] = True
+            msg = buckets.leave_branch(repo, "buckets/x", main, base)
+        finally:
+            buckets.UNATTENDED["on"] = old
+        self.assertIn("stashed", msg)
+        self.assertEqual(buckets.git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip(), main)
+        self.assertEqual((repo / "a.txt").read_text(), "1\n")
+        self.assertIn("buckets: unfinished task on buckets/x", buckets.git(repo, "stash", "list"))
+        self.assertFalse(buckets.branch_exists(repo, "buckets/x"))              # nothing committed on it
+
+
 class Undo(unittest.TestCase):
     def setUp(self):
         self.repo = make_repo({"a.ts": "1\n"})
