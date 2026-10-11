@@ -2281,6 +2281,34 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
                                      "done_when": "", "edits": [], "param": {"name": "o", "value": "{ a: 1 }"}}], self.repo, 8, "T")[0]
         self.assertEqual(t["param"]["value"], "{ a: 1 }")                         # an object literal stays
 
+    def test_a_signature_task_gets_what_the_request_says_about_the_parameter(self):
+        (self.repo / "s.ts").write_text("export const f = (n: number) => n\n")
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        b = buckets.Buckets(cfg, self.repo, "Add a duration parameter (number, default 2000) to f in s.ts, use it instead of "
+                                            "the fixed 2000, and pass 3000 from every call of f across the app.")
+        sparse = {"summary": "s", "tasks": [{"id": "T1", "file": "s.ts", "action": "signature", "where": "f", "instructions": "",
+                                             "done_when": "", "edits": [], "param": {"name": "duration", "type": "number"}}]}
+        with contextlib.redirect_stderr(io.StringIO()):
+            t = buckets.validate_plan(b.fill_moves(sparse), self.repo, 8)["tasks"][0]
+        self.assertEqual(t["param"], {"name": "duration", "type": "number", "default": "2000", "value": "3000"})
+        other = {"summary": "s", "tasks": [{"id": "T1", "file": "s.ts", "action": "signature", "where": "f", "instructions": "",
+                                            "done_when": "", "edits": [], "param": {"name": "size", "default": "1"}}]}
+        with contextlib.redirect_stderr(io.StringIO()):
+            t = buckets.validate_plan(b.fill_moves(other), self.repo, 8)["tasks"][0]
+        self.assertEqual(t["param"], {"name": "size", "default": "1"})     # another parameter: left as planned
+        (self.repo / "s.ts").write_text("export const f = (n: number) => ({ n, duration: 2000, other: () => 2000 })\n"
+                                        "export const g = () => ({ duration: 2000 })\nexport const h = f(1)\n")
+        task = buckets.validate_plan(b.fill_moves({"summary": "s", "tasks": [dict(sparse["tasks"][0], param={"name": "duration"})]}),
+                                     self.repo, 8)["tasks"][0]
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = b.code_task(task)
+        self.assertEqual(got["status"], "done", got)
+        self.assertIn("the fixed 2000 in its body is now duration (1 place(s))", got["note"])
+        text = (self.repo / "s.ts").read_text()
+        self.assertIn("({ n, duration, other: () => 2000 })", text)            # a nested function's own literal stays
+        self.assertIn("g = () => ({ duration: 2000 })", text)                  # and so does another function's
+        self.assertIn("f(1, 3000)", text)
+
     def test_edits_leave_the_files_own_blank_lines_alone(self):
         (self.repo / "keep.ts").write_text("export const f = (n: number) => n\n\n\n\nexport const g = 1\n\n\n\nexport const h = f(1)\n")
         d = buckets.ts_moves(self.repo, {"op": "signature", "file": "keep.ts", "name": "f",

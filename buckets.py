@@ -4444,11 +4444,37 @@ class Buckets:
             self._share_hints.append({"compare": cmp, "task": task})
         return self._share_hints
 
+    def request_param(self) -> dict:
+        """The new parameter as the request spells it: "add a duration parameter (number, default 2000) … pass
+        3000 from every call" gives name, type, default and value (the planner drops some of these)."""
+        r, out = self.request, {}
+        m = re.search(r"\b(?:add|adding)\s+(?:(?:a|an|the|new|optional)\s+)*`?([A-Za-z_$][\w$]*)`?\s+(?:param\w*|prop\b|argument|arg\b|option)",
+                      r, re.I)
+        if m:
+            out["name"] = m.group(1)
+        tail = r[m.end():m.end() + 160] if m else r
+        t = re.match(r"\s*\(\s*([A-Za-z_$][\w$<>\[\]| ]*?)\s*(?:,|\))", tail)
+        if t and not t.group(1).lower().startswith("default"):
+            out["type"] = t.group(1).strip()
+        d = re.search(r"\bdefault(?:s| value)?(?:\s+(?:of|to|is|=))?\s+(`[^`]+`|\"[^\"]*\"|'[^']*'|[\w.$-]+)", tail if m else r, re.I)
+        if d:
+            out["default"] = d.group(1).strip("`")
+        v = re.search(r"\bpass(?:ing|es)?\s+(`[^`]+`|\"[^\"]*\"|'[^']*'|[\w.$-]+)\s+(?:from|to|in|at|for)\s+(?:every|all|each)\b", r, re.I)
+        if v:
+            out["value"] = v.group(1).strip("`")
+        return out
+
     def fill_moves(self, data: dict) -> dict:
         """Move and share tasks often come back with their details in the instructions instead of the
         fields; fill what's missing from the dry-run suggestions when the task is about the same files."""
         if not isinstance(data, dict):
             return data
+        asked = self.request_param()
+        for t in data.get("tasks") or [] if asked.get("name") else []:  # a signature task missing what the request says
+            if isinstance(t, dict) and t.get("action") == "signature":
+                param = t.get("param") if isinstance(t.get("param"), dict) else {}
+                if param.get("name") in (None, "", asked["name"]):
+                    t["param"] = {**asked, **{k: v for k, v in param.items() if v not in (None, "")}}
         hint = self.move_hint()
         for t in data.get("tasks") or [] if hint else []:
             if isinstance(t, dict) and t.get("action") == "move" and clean_path(str(t.get("file", ""))) == hint["task"]["file"]:
@@ -5720,8 +5746,12 @@ class Buckets:
             say(f"  {ok()} {task['id']} rename ({int(time.time() - start)}s): {paint(note, 'dim')}")
             return {**task, "status": "done", "note": f"DONE: {note}"}
         elif task["action"] == "signature":
+            m = re.search(r"\binstead of (?:the |its )?(?:fixed |hard-?coded |literal |constant |current )?(`[^`]+`|[\w.$-]+)",
+                          self.request, re.I)
+            fixed = m.group(1).strip("`") if m and m.group(1).strip("`") == str(task["param"].get("default") or "") else None
             d = ts_moves(self.repo, {"op": "signature", "file": task["file"], "name": task["where"], "param": task["param"],
-                                     "importers": self.index.importers([task["file"]]).get(task["file"], [])})
+                                     "importers": self.index.importers([task["file"]]).get(task["file"], []),
+                                     **({"replaces": fixed} if fixed else {})})
             if not d.get("ok"):
                 return {**task, "status": "failed", "note": f"BLOCKED: {d.get('error', 'signature failed')}"}
             written = []
@@ -5733,6 +5763,7 @@ class Buckets:
                     + (f" (default {prm['default']})" if prm.get("default") else " (optional)")
                     + f" to the {r['kind']} {task['where']}; {len(r['sites'])} use(s)"
                     + (f", each now passing {prm['value']}" if prm.get("value") else ", unchanged (they get the default)")
+                    + (f"; the fixed {fixed} in its body is now {prm['name']} ({r['replaced']} place(s))" if r.get("replaced") else "")
                     + (f"; left for you: {'; '.join(r['skipped'])}" if r["skipped"] else ""))
             self.involved = list(dict.fromkeys(self.involved + written))
             if commit:

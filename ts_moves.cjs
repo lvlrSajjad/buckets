@@ -1508,8 +1508,27 @@ function signature() {
     };
     visit(o);
   }
+  // "use it instead of the fixed 2000": that literal in the function's own body becomes the parameter
+  let replaced = 0;
+  if (input.replaces !== undefined && input.replaces !== null && input.replaces !== '') {
+    const lit = String(input.replaces);
+    const visit = (n) => {
+      if ((ts.isNumericLiteral(n) || ts.isStringLiteral(n) || n.kind === ts.SyntaxKind.TrueKeyword || n.kind === ts.SyntaxKind.FalseKeyword)
+          && n.getText(sf) === lit) {
+        const pa = n.parent;
+        if (ts.isPropertyAssignment(pa) && pa.initializer === n && pa.name.getText(sf) === p.name)
+          edits.get(sf).push([pa.getStart(sf), pa.getEnd(), p.name]);  // { duration: 2000 } → { duration }
+        else edits.get(sf).push([n.getStart(sf), n.getEnd(), p.name]);
+        replaced++;
+        return;
+      }
+      if (ts.isFunctionLike(n) && n !== fn) return;  // not a nested function's own literals
+      ts.forEachChild(n, visit);
+    };
+    if (fn.body) visit(fn.body);
+  }
   for (const [o, e] of edits) if (e.length) files[rel(o.fileName)] = applyEdits(o.text, e);
-  return { files, report: { kind: component ? 'component' : 'function', sites, skipped } };
+  return { files, report: { kind: component ? 'component' : 'function', sites, skipped, replaced } };
 }
 
 // A JSX chunk of a component, by lines, becomes a render helper declared just before the statement it's in
