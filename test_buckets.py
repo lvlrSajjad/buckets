@@ -2247,6 +2247,12 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
                                                                              "value": "{ 3000 }"}}], self.repo, 8, "T")[0]
         self.assertEqual((t["param"]["default"], t["param"]["value"]), ("2000", "3000"))
         t = buckets.validate_tasks([{"id": "T1", "file": "s.ts", "action": "signature", "where": "f", "instructions": "",
+                                     "done_when": "", "edits": [], "param": {"name": "d", "default": "default: 2000"}}], self.repo, 8, "T")[0]
+        self.assertEqual(t["param"]["default"], "2000")
+        bad = buckets.ts_moves(self.repo, {"op": "signature", "file": "s.ts", "name": "f", "param": {"name": "d", "default": "2000 2000"}})
+        self.assertFalse(bad["ok"])
+        self.assertIn("isn't valid TypeScript", bad["error"])
+        t = buckets.validate_tasks([{"id": "T1", "file": "s.ts", "action": "signature", "where": "f", "instructions": "",
                                      "done_when": "", "edits": [], "param": {"name": "o", "value": "{ a: 1 }"}}], self.repo, 8, "T")[0]
         self.assertEqual(t["param"]["value"], "{ a: 1 }")                         # an object literal stays
 

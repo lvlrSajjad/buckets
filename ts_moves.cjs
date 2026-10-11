@@ -1089,6 +1089,12 @@ function signature() {
   const sf = sources[0];
   const p = input.param;  // {name, type, default?, value?}
   if (!p || !/^[A-Za-z_$][\w$]*$/.test(p.name || '')) throw new Error('param needs a name');
+  for (const [k, v] of [['default', p.default], ['value', p.value], ['type', p.type]]) {  // never write code that doesn't parse
+    if (v === undefined || v === null || v === '') continue;
+    const probe = k === 'type' ? `let x: ${v}` : `let x = (${v})`;
+    const t = ts.createSourceFile('probe.tsx', probe, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    if (t.parseDiagnostics && t.parseDiagnostics.length) throw new Error(`the ${k} \`${v}\` isn't valid TypeScript`);
+  }
   let decl = null, fn = null;
   for (const st of sf.statements) {
     if (ts.isFunctionDeclaration(st) && st.name && st.name.text === input.name) { decl = st.name; fn = st; }

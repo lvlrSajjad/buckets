@@ -2940,7 +2940,7 @@ def validate_move(t: dict, f: str, repo: Path, task_id: str) -> dict:
             raise ValueError("signature: \"file\" defines the function or component, \"where\" its name, \"param\" "
                              "{name, type, default, value}: the new parameter or prop")
         def unbrace(v: str) -> str:  # "{3000}" written JSX-style: the expression is 3000 (an object literal stays)
-            v = v.strip()
+            v = re.sub(r"^\s*(?:default|value|defaults? to|=)\s*[:=]?\s*", "", v.strip(), flags=re.I).strip()
             m = re.fullmatch(r"\{(.*)\}", v, re.S)
             return m.group(1).strip() if m and not re.search(r"[:,]|\.\.\.", m.group(1)) else v
         return {**base, "file": f, "where": where,
