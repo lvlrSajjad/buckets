@@ -5233,6 +5233,24 @@ class Buckets:
             die(dirty_tree(repo))
         if not plan_only:
             require_identity(repo)
+            # A follow-up starts from the last run's unmerged branch, before anything reads the code, so the
+            # plan sees that work. The new branch still merges into where you started.
+            self.start_branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+            prev = self.build_on()
+            if prev:
+                git(repo, "checkout", "-q", prev["branch"])
+                self.built_on, self.builds_on = prev, prev["branch"]
+                self.__dict__.pop("_index", None)
+                self.__dict__.pop("_facts", None)
+        try:
+            return self._code(plan_only)
+        finally:
+            if getattr(self, "built_on", None) and git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() == self.builds_on \
+                    and not changed_paths(repo):
+                git(repo, "checkout", "-q", self.start_branch)  # stopped before branching off: back where you were
+
+    def _code(self, plan_only: bool = False) -> int:
+        repo = self.repo
         checks = self.checks_with_index(detect_checks(repo, self.rc))
         self.heading(2, "Checking the starting point")
         baseline = run_checks(repo, checks, self.run, "baseline", self.cfg["check_timeout_s"])
@@ -5259,11 +5277,8 @@ class Buckets:
             finish(self, "plan", bool(plan["tasks"]), None, None, path)
             return 0 if plan["tasks"] or plan_only else 1
 
-        start_branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
-        prev = self.build_on()
-        if prev:  # start from the last run's unmerged work; merging later brings in both
-            git(repo, "checkout", "-q", prev["branch"])
-            self.builds_on = prev["branch"]
+        start_branch = getattr(self, "start_branch", None) or git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        prev = getattr(self, "built_on", None)
         base = git(repo, "rev-parse", "HEAD").strip()
         if start_branch == "HEAD":  # detached
             start_branch = base
@@ -5967,8 +5982,8 @@ FOLLOW_UP = re.compile(r"\b(also|now|then|too|again|it|that|those|these|them|sam
 def earlier_unmerged(repo: Path, request: str, minutes: int = 60) -> dict | None:
     """The previous run, when the new request builds on it and its work isn't merged yet: it names a file
     or name that run changed, or it's a follow-up ("also", "now", "it") within `minutes` of it. None otherwise."""
-    d = next((d for d in runs_newest_first(repo, ("code", "pick")) if d.get("branch")), None)
-    if not d or not branch_exists(repo, d["branch"]):
+    d = next((d for d in runs_newest_first(repo, ("code", "pick")) if d.get("branch") and branch_exists(repo, d["branch"])), None)
+    if not d:
         return None
     here = git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
     if here != d.get("merge_into") or git(repo, "rev-list", "--count", f"{here}..{d['branch']}").strip() in ("", "0"):
