@@ -4102,7 +4102,7 @@ class Buckets:
     def build_on(self) -> dict | None:
         """Whether this run starts from the previous run's unmerged branch: asked in an interactive chat,
         automatic with -y (or `follow_ups: "always"`), never with `follow_ups: "never"`."""
-        policy = self.cfg.get("follow_ups", "ask")
+        policy = os.environ.get("BUCKETS_FOLLOW_UPS") or self.cfg.get("follow_ups", "ask")  # `each` runs stand alone
         if policy == "never":
             return None
         prev = earlier_unmerged(self.repo, self.request)
@@ -7336,6 +7336,66 @@ def win_setup(cfg: dict, to: Path | None = None) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- buckets each
+
+
+def fill_target(request: str, target: str) -> str:
+    """`{}` is the whole target, `{1}`, `{2}`… its fields (split on whitespace)."""
+    fields = target.split()
+    return re.sub(r"\{(\d*)\}", lambda m: target if not m.group(1) else
+                  (fields[int(m.group(1)) - 1] if 0 < int(m.group(1)) <= len(fields) else m.group(0)), request)
+
+
+def cmd_each(argv: list[str]) -> int:
+    """`buckets each "<request with {}>" <target>… [--from FILE]`: the same request for each target, one run after
+    another, each on its own branch from where you are (not building on each other), then a table of how each
+    went. Other flags (--local, --claude, --time-limit …) go to every run."""
+    targets, flags, request = [], [], None
+    while argv:
+        a = argv.pop(0)
+        if a == "--from" and argv:
+            targets += [l.strip() for l in Path(argv.pop(0)).read_text().splitlines() if l.strip() and not l.startswith("#")]
+        elif a in ("--time-limit", "--model", "-C", "--repo") and argv:
+            flags += [a, argv.pop(0)]
+        elif a.startswith("-"):
+            flags.append(a)
+        elif request is None:
+            request = a
+        else:
+            targets.append(a)
+    if not request or not targets or not re.search(r"\{\d*\}", request):
+        die('buckets each: a request with {} and the targets, e.g. buckets each "remove the debug logs in {}" a.ts b.ts')
+    repo = git_toplevel(".")
+    if repo is None:
+        die("run this inside the repo")
+    os.environ["BUCKETS_FOLLOW_UPS"] = "never"
+    say(f"{paint('buckets each', 'bold')} · {len(targets)} target(s) · {request}")
+    rows = []
+    for n, target in enumerate(targets, 1):
+        text = fill_target(request, target)
+        say(f"\n{paint(f'[{n}/{len(targets)}]', 'bold', 'cyan')} {text}")
+        started = time.time()
+        try:
+            code = main([*flags, "-y", "--wait", text])
+        except SystemExit as e:
+            code = e.code if isinstance(e.code, int) else 1
+        except KeyboardInterrupt:
+            say("stopped; the targets after this one didn't run")
+            break
+        meta = next((d for d in runs_newest_first(repo) if d.get("request") == text), {})
+        rows.append({"target": target, "exit": code, "done": meta.get("done"), "branch": meta.get("branch"),
+                     "minutes": round((time.time() - started) / 60, 1)})
+    word = {True: "done", False: "not done", None: "answered"}
+    lines = ["", f"## buckets each: {request}", "", "| Target | Result | Time | Branch |", "|---|---|---|---|"]
+    for r in rows:
+        result = word.get(r["done"], "?") if r["exit"] in (0, 2) else f"stopped (exit {r['exit']})"
+        lines.append(f"| {r['target']} | {result} | {r['minutes']} min | {r['branch'] or '–'} |")
+    done = sum(r["done"] is True for r in rows)
+    lines += ["", f"{done} of {len(targets)} done. Look at each branch before merging (`git diff main...<branch>`)."]
+    print("\n".join(lines))
+    return 0 if done == len(targets) else 2
+
+
 # ---------------------------------------------------------------- buckets measure
 
 
@@ -8490,6 +8550,8 @@ def start_time_limit(minutes: float | None) -> None:
 def main(argv: list[str] | None = None) -> int:
     if (sys.argv[1:] if argv is None else argv)[:1] == ["win"]:  # before argparse: the command keeps its own flags
         return cmd_win(load_config(), (sys.argv[1:] if argv is None else argv)[1:])
+    if (sys.argv[1:] if argv is None else argv)[:1] == ["each"]:
+        return cmd_each((sys.argv[1:] if argv is None else argv)[1:])
     if (sys.argv[1:] if argv is None else argv)[:1] == ["measure"]:
         return cmd_measure(load_config(), (sys.argv[1:] if argv is None else argv)[1:])
     ap = argparse.ArgumentParser(prog="buckets", description=__doc__.split("\n\n")[0])

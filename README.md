@@ -234,6 +234,17 @@ the rest here side by side, `"overflow"` does that only while this machine is bu
 Measured on the machines this was built on (field notes 30), checks there were 2.5–15 times slower and
 pushed the model out of memory, so overflow is the setting worth using there.
 
+## The same request for many targets (`buckets each`)
+
+```bash
+buckets each "remove the leftover debug logs in {}" src/a.ts src/b.ts src/c.ts
+buckets each --local --time-limit 20 "Merge the duplicated code of {1} and {2} …" --from pairs.txt
+```
+
+One run per target, one after another, each on its own branch from where you are (they don't build on
+each other); `{}` is the target, `{1}`, `{2}` its fields. At the end, a table of how each went, with its
+branch to look at before merging. Good for overnight batches.
+
 ## Measuring a change (`buckets measure`)
 
 ```bash

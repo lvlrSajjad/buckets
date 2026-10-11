@@ -3713,5 +3713,40 @@ class Measure(unittest.TestCase):
         self.assertEqual(got, {"Tests: # failed, # passed": [2.0, 1543.0], "Time: # s": [7.9]})
 
 
+class Each(unittest.TestCase):
+    def test_targets_fill_the_request_and_fields(self):
+        self.assertEqual(buckets.fill_target("merge {1} and {2} in {}", "a.tsx b.tsx"), "merge a.tsx and b.tsx in a.tsx b.tsx")
+        self.assertEqual(buckets.fill_target("fix {3}", "a b"), "fix {3}")
+
+    def test_each_target_is_its_own_run_and_the_table_says_how_each_went(self):
+        repo = make_repo({"a.ts": "1\n"})
+        (repo / "list.txt").write_text("b.ts\n# a comment\nc.ts\n")
+        calls = []
+        def fake_main(argv):
+            calls.append((argv, os.environ.get("BUCKETS_FOLLOW_UPS")))
+            text = argv[-1]
+            run = buckets.STATE_DIR / "runs" / f"each-{time.time_ns()}"
+            run.mkdir(parents=True)
+            (run / "meta.json").write_text(json.dumps({"repo": str(repo.resolve()), "kind": "code", "request": text,
+                                                       "done": "b.ts" not in text, "branch": f"buckets/{len(calls)}"}))
+            return 0 if "b.ts" not in text else 2
+        out, old = io.StringIO(), os.getcwd()
+        os.chdir(repo)
+        try:
+            with mock.patch.object(buckets, "main", fake_main), contextlib.redirect_stdout(out), \
+                    contextlib.redirect_stderr(io.StringIO()), mock.patch.dict(os.environ, {}):
+                code = buckets.cmd_each(["remove the debug logs in {}", "a.ts", "--from", "list.txt", "--local"])
+        finally:
+            os.chdir(old)
+        self.assertEqual(code, 2)
+        self.assertEqual([c[0] for c in calls], [["--local", "-y", "--wait", f"remove the debug logs in {f}"]
+                                                 for f in ("a.ts", "b.ts", "c.ts")])
+        self.assertTrue(all(c[1] == "never" for c in calls))  # runs don't build on each other
+        text = out.getvalue()
+        self.assertIn("| a.ts | done |", text)
+        self.assertIn("| b.ts | not done |", text)
+        self.assertIn("2 of 3 done", text)
+
+
 if __name__ == "__main__":
     unittest.main()
