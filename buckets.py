@@ -2356,7 +2356,9 @@ housekeeping, with no code to write). Questions about pull requests, CI runs and
 branches or commits are "git", not "info" ("info" is for questions about the code itself). Adding
 entries to .gitignore, committing or pushing files that already exist, and questions about uncommitted
 or untracked files are "git" too: no code gets written. If the user asks to fix, change or make
-something work, it's "code", even when they also ask why.
+something work, it's "code", even when they also ask why. Questions about the code's own structure
+(which screens or files exist, which are duplicated, which still have separate variants or aren't
+merged into one) are "info": "merged" there means the code, not git branches.
 difficulty:
 - "light": mechanical or well-specified work: tests for existing code, renames, docs, small
   features with clear instructions, fixes whose cause is known, simple questions.
@@ -2791,6 +2793,52 @@ def shared_hook_names(shared_file: str, variant: str) -> tuple[str, str]:
     return str(folder / f"use-{stem}-shared.ts"), f"use{pascal}Shared"
 
 
+def same_family(a: str, b: str) -> bool:
+    """Two sibling folders that are variants of one thing (`ecotrak` / `ecotrak-techs`), not two
+    unrelated packages that both have an index.ts."""
+    x, y = a.split("/")[-2], b.split("/")[-2]
+    return x != y and (x.startswith(y) or y.startswith(x))
+
+
+VARIANT_QUESTION = re.compile(r"\b(screens?|files?|components?|hooks?|sections?|variants?|ecotrak-techs|"
+                              r"duplicat\w*|two versions)\b.*\b(merged|duplicat\w*|variants?|versions?|ecotrak-techs)\b|"
+                              r"\b(not|still|un)[- ]?merged\b", re.I)
+
+
+def variant_inventory(repo: Path, files) -> list[dict]:
+    """Every file that exists as two variants (the same name in sibling folders), with each side's
+    length and how alike they are line by line (whitespace ignored): an exact list, not a model's recall."""
+    by_place: dict[tuple[str, str], list[str]] = {}
+    for f in files:
+        parts = f.split("/")
+        if len(parts) >= 3 and f.endswith(MOVABLE):
+            by_place.setdefault(("/".join(parts[:-2]), parts[-1]), []).append(f)
+    out = []
+    for (place, name), group in sorted(by_place.items()):
+        if len(group) != 2 or not same_family(*group):
+            continue
+        a, b = sorted(group, key=len)
+        try:
+            la = [l.strip() for l in (repo / a).read_text(errors="replace").splitlines() if l.strip()]
+            lb = [l.strip() for l in (repo / b).read_text(errors="replace").splitlines() if l.strip()]
+        except OSError:
+            continue
+        ratio = difflib.SequenceMatcher(None, la, lb, autojunk=False).ratio() if la and lb else 0.0
+        out.append({"place": place, "name": name, "a": a, "b": b, "lines": (len(la), len(lb)), "alike": ratio})
+    return out
+
+
+def variant_inventory_text(items: list[dict]) -> str:
+    if not items:
+        return ""
+    rows = [f"- `{i['place']}/{{{i['a'].split('/')[-2]},{i['b'].split('/')[-2]}}}/{i['name']}`: "
+            f"{i['lines'][0]} and {i['lines'][1]} lines, {i['alike']:.0%} alike" + (" (identical)" if i["alike"] == 1 else "")
+            for i in items]
+    places = sorted({i["place"] for i in items})
+    return (f"Files that exist as two variants (found mechanically: {len(items)} pairs in {len(places)} folders; "
+            "\"alike\" is the share of matching non-blank lines):\n" + "\n".join(rows))
+
+
 def variant_pairs(request: str, files: list[str]) -> list[tuple[str, str]]:
     """Files that are two variants of one file: the same name in sibling folders (`screens/x/ecotrak/a.tsx`
     and `screens/x/ecotrak-techs/a.tsx`), among the files and folders the request names."""
@@ -2799,7 +2847,7 @@ def variant_pairs(request: str, files: list[str]) -> list[tuple[str, str]]:
         parts = f.split("/")
         if len(parts) >= 3 and f.endswith(MOVABLE):
             by_place.setdefault(("/".join(parts[:-2]), parts[-1]), []).append(f)
-    groups = [sorted(g, key=len) for g in by_place.values() if len(g) == 2]
+    groups = [sorted(g, key=len) for g in by_place.values() if len(g) == 2 and same_family(*g)]
     sides = {g.split("/")[-2] for group in groups for g in group}  # "ecotrak", "ecotrak-techs": not a place
     words = {w.strip("`'\".,:;()").rstrip("/") for w in re.split(r"\s+", request)} - sides
     def named(f: str) -> bool:
@@ -3294,6 +3342,8 @@ class Buckets:
         else:
             data = ask_json(self.chores, self.run, "route", SYSTEM, prompt, ROUTE_SCHEMA, validate_route,
                             think=False, max_tokens=600, timeout=self.timeout)
+        if data["intent"] == "git" and VARIANT_QUESTION.search(self.request):
+            data = {**data, "intent": "info"}  # "not merged" about screens is about the code, not branches
         self.run.save("route.json", data)
         return data
 
@@ -3360,6 +3410,10 @@ class Buckets:
                 returns=", ".join(r["returns"][:12]) + (" …" if len(r["returns"]) > 12 else ""),
                 helpers=", ".join(r["helpers_moved"]) or "none",
                 notes=("\nKept in place: " + "; ".join(r["notes"][:6])) if r["notes"] else ""))
+        if VARIANT_QUESTION.search(self.request) and not self.share_hints():
+            inv = variant_inventory_text(variant_inventory(self.repo, list(files)))
+            if inv:
+                parts.append(inv)
         for h in self.share_hints():
             parts.append(variants_text(h["compare"]))
             if h["task"]:
