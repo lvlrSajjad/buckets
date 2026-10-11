@@ -1375,7 +1375,7 @@ function component() {
   if (keyed && keyed.attributes.properties.some((a) => ts.isJsxAttribute(a) && a.name.getText(sf) === 'key'))
     notes.push('the helper set `key` on its root element; in a list, React needs the key on the new element where it is used');
   return { files: { [input.file]: screen, [rel(target)]: compText },
-           report: { props: props.map((p) => p.name), calls: calls.length, rederived: [...prelude.keys()].map((st) => declaredBy(st)[0] ? declaredBy(st)[0].text : '?'),
+           report: { props: props.map((p) => p.name), prop_types: props.map((p) => `${p.name}${p.optional ? '?' : ''}: ${p.type}`), calls: calls.length, rederived: [...prelude.keys()].map((st) => declaredBy(st)[0] ? declaredBy(st)[0].text : '?'),
                      helpers_moved: moduleMoved.map((st) => declaredBy(st)[0].text), notes } };
 }
 

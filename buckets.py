@@ -4837,6 +4837,9 @@ class Buckets:
                     path.write_text(text)
                     written.append(f)
             r = d["report"]
+            # its prop types are written from the screen's own types: not shortcuts the model added
+            self.generated_lines = getattr(self, "generated_lines", set()) | {same_line(t) for t in r.get("prop_types", [])} | {
+                same_line(l) for f in written for l in d["files"][f].splitlines() if f"const {task['name']} = (" in l}
             note = (f"turned {task['select'][0]} into <{task['name']}> in {task['into']}: {r['calls']} use(s) now render it; props: "
                     f"{', '.join(r['props'])}" + (f"; re-derived inside: {', '.join(r['rederived'])}" if r["rederived"] else "")
                     + (f"; notes: {'; '.join(r['notes'])}" if r["notes"] else ""))
@@ -4934,7 +4937,8 @@ class Buckets:
         r = d["report"]
         if task["action"] == "move":  # its signature is written from the component's own types
             self.generated_lines = getattr(self, "generated_lines", set()) | {
-                same_line(l) for f in written for l in d["files"][f].splitlines() if f"function {task['name']}(" in l}
+                same_line(l) for f in written for l in d["files"][f].splitlines() if f"function {task['name']}(" in l} | {
+                same_line(f"{p['name']}: {p['type']}") for p in r.get("params", [])}
             note = (f"moved {r['moved']} statements ({r['moved_lines']} lines) of {task['where']} into "
                     f"{task['name']} in {', '.join(f for f in written if f != task['file'])}; parameters: "
                     f"{', '.join(p['name'] for p in r['params']) or 'none'}; returns {len(r['returns'])} values; "
