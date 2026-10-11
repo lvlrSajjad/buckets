@@ -513,6 +513,32 @@ and it needs only to choose it. A long prompt's rule isn't enough for the local 
 its facts plus a guard is. Checks that compare lines must expect code to move between files and be
 reformatted on the way.
 
+### 23. Merging the drifted ecotrak / ecotrak-techs variants (2026-10-11 night)
+
+Ladder step 1, rfp-details (1,563 + 718 lines): "merge the duplicated code of the two variants into
+`rfp-details-shared.tsx`, behaviour unchanged". Ten live runs; each failure was fixed before the next:
+
+| Runs | What went wrong | Fix |
+|---|---|---|
+| 1–4 | the planner added edits to both screens next to the share (they'd redo it, or spend minutes changing nothing); the "every named file has a task" check put dropped tasks back; one bogus `move` with no destination crashed the plan | edits next to a move/share go even with exact code; files a move/share covers count as planned; a task that can't run is dropped, not fatal |
+| 5–6 | both reviewers wanted locale entries for strings that only moved (once because the formatter joined `<Text>` onto one line) | moved strings aren't new gaps; reviews are told moved code is judged as a move, its old problems out of scope |
+| 7 | only `FULL` moved: the new module-state rule refused `statelessOutput` even though everything assigning it moves too | module state moves when all its assigners move |
+| 8 | the reviews disagreed (first time): Windows wanted the hook in the named file and worried about the shared `let` | the hook goes into the named shared file, imports merged into one line; shared module state is stated in the note |
+| 9 | the guard swapped in the share but kept the redundant edits | the swap re-runs the drop |
+| **10** | | **5m 38s, both reviews done; verified: 342 duplicate lines out of the screens, a 170-line shared file, `tsc`, eslint, 1,545 tests pass** |
+
+What the share does now: identical top-level declarations (`FULL`, `statelessOutput`, `CommentInput`,
+`AddCommentModal`) into the shared file; identical statements inside both components into
+`useRfpDetailsScreenShared` in the same file (only those both variants can move with the same
+statement: 4 of 16; values from `useStores()` and store destructures are re-derived inside the hook, not
+passed); destructured names the move left unused, and their imports, removed. Planning fell from 3–6 min
+to 2m 54s once long files a move covers were shown as outlines instead of read.
+
+inventory-details by hand: 4 top-level + 12 inner statements shared, 110 lines out, all checks pass; the
+three module-level `let`s the screens assign stay. Questions for the owner: `statelessOutput` is now one
+variable for both variants (each app ships one, so nothing changes per app); and the 12 rfp statements that
+differ slightly are where the model's help is needed next (make them identical, then share).
+
 ## Lessons so far
 
 - Moving code is a job for a tool, not a model: a 1,450-line split failed after 20 min of retyping and took 3 s
