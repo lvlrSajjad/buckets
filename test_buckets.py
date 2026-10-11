@@ -1688,6 +1688,17 @@ class DoubleReview(unittest.TestCase):
             got = self.b.double_review(self.plan, [], self.base, now, now, 1, [], None)
         return got, turns
 
+    def test_the_review_hears_what_was_dropped(self):
+        self.b.dropped_tasks = ["edit src/m.py: unify the quotes (dropped: the move/share does it)"]
+        seen = []
+        def fake_ask(cfg, run, label, system, user, schema, validate, **kw):
+            seen.append(user)
+            return validate(self.verdict(True))
+        with mock.patch.object(buckets, "ask_json", fake_ask), contextlib.redirect_stderr(io.StringIO()):
+            self.b.review(self.plan, [], self.base, {}, {}, 1, [], None)
+        self.assertIn("Planned but not run (these changes were NOT made):\n- edit src/m.py: unify the quotes", seen[0])
+        self.assertIn("a task\n  that failed, was blocked or was dropped did not happen", seen[0])
+
     def test_both_done(self):
         got, turns = self.run_review(self.verdict(True), self.verdict(True), {"test": {"ok": True}})
         self.assertTrue(got["done"])

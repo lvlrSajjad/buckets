@@ -2522,7 +2522,7 @@ Plan summary: {summary}
 
 Task results:
 {results}
-
+{dropped}
 Checks (baseline -> now):
 {checks}
 {shortcuts}{impact}
@@ -2542,6 +2542,8 @@ Rules:
 - Look for: parts of the request that are missing, wrong logic, broken imports or exports,
   leftover or duplicated code, files that should have changed but didn't, tasks that failed.
 - If not done, write follow-up tasks that fix only what's wrong. Don't redo correct work.
+- The plan summary says what was intended. Describe only what the diff and the task results show: a task
+  that failed, was blocked or was dropped did not happen, so don't report its change as made.
 {agent_rules}{rules}
 Reply with done, a short summary, the issues you found, and the follow-up tasks (empty when done)."""
 
@@ -3627,6 +3629,8 @@ class Buckets:
             if extra:
                 say(f"  {paint('dropped', 'dim')} {', '.join(t['id'] for t in extra)}: the move already does "
                     f"that; anything left over is for the review, after the checks")
+                self.dropped_tasks = getattr(self, "dropped_tasks", []) + [
+                    f"{t['action']} {t['file']}: {t['instructions'][:120]} (dropped: the move/share does it)" for t in extra]
             keep = [t for t in plan["tasks"] if t not in extra]
             return {**plan, "tasks": [{**t, "id": f"T{n}"} for n, t in enumerate(keep, 1)]}
         if not any(t["action"] == "share" for t in plan["tasks"]):
@@ -4811,7 +4815,9 @@ class Buckets:
             impact=impact_text(api) + self.phrases_now(base) + self.weak_tests_text(base) + self.i18n_text(base)
                    + self.changed_code(base),
             diff=self.diff_text(base), rules=TASK_RULES.format(max_tasks=self.cfg["max_tasks"]),
-            agent_rules=self.agent_rules_text())
+            agent_rules=self.agent_rules_text(),
+            dropped=("Planned but not run (these changes were NOT made):\n" + "\n".join(
+                f"- {d}" for d in getattr(self, "dropped_tasks", [])) + "\n") if getattr(self, "dropped_tasks", []) else "")
 
         def validate(d):
             return {"done": bool(d["done"]), "summary": str(d["summary"]),
