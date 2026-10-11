@@ -26,6 +26,9 @@ What the owner uses Claude Code for, unprioritized, and where buckets stands on 
 | E2E automation tests and CI | — | CI config as a repo check; e2e runs as optional checks |
 | Git conflicts, red CI | conflicts in cherry-picks | read the failing CI log (`gh run view --log-failed`) as check output and fix like a failing check |
 | Sonar issues | — | Sonar's issue list (API/export) as check output, fixed like lint |
+| Patching packages (`patch-package`) | — | a task kind that edits `node_modules/<pkg>` and runs `npx patch-package <pkg>`; the patch file is the change |
+| Use graphify's graph where it exists (`graphify-out/graph.json`: ecotrak-mobile has 20k nodes, 69k edges, 727 communities, 8% model-inferred links) | — | optional facts: files in the same community as the request's leads, inferred links; only when its `built_at_commit` is close to HEAD; skip vendored paths (`.yarn/`); measure on the vague hide-fields request |
+| **AGENTS.md followed, not just read** | long agent docs cut to the sections matching the request (70k chars in ecotrak-mobile) | **its rules (always/never/must lines, plus the checklist sections) as a short block every plan and review sees, and the review checks the diff against each rule** |
 
 ## Done (2026-10-09)
 

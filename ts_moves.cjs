@@ -37,8 +37,11 @@ function program(files) {
                                               path.dirname(cfgPath));
     options = cfg.options;
   }
-  const prog = ts.createProgram(roots, { ...options, noEmit: true });
-  return { prog, checker: prog.getTypeChecker(), sources: roots.map((r) => prog.getSourceFile(r)) };
+  const prog = ts.createProgram(roots, { ...options, allowJs: true, noEmit: true });
+  const sources = roots.map((r) => prog.getSourceFile(r));
+  const missing = roots.filter((r, i) => !sources[i]);
+  if (missing.length) throw new Error(`TypeScript didn't load ${missing.map(rel).join(', ')} (excluded by its tsconfig?)`);
+  return { prog, checker: prog.getTypeChecker(), sources };
 }
 
 const lineOf = (sf, pos) => sf.getLineAndCharacterOfPosition(pos).line + 1;
@@ -485,7 +488,7 @@ function compare() {
     if (!b) { pairs.push({ name: a.name, parent: a.parent, status: 'only_a', a: [a.lo, a.hi] }); continue; }
     const r = similarity(a.flat, b.flat);
     const status = r === 1 ? 'identical' : r >= 0.85 ? 'near' : 'different';
-    const p = { name: a.name, parent: a.parent, status, similarity: Math.round(r * 100) / 100, a: [a.lo, a.hi], b: [b.lo, b.hi],
+    const p = { name: a.name, parent: a.parent, depth: a.depth, status, similarity: Math.round(r * 100) / 100, a: [a.lo, a.hi], b: [b.lo, b.hi],
                 module_level: a.depth === 0 && b.depth === 0 };
     if (status === 'near') p.diff = lineDiff(a.stmt.getText(A), b.stmt.getText(B));
     pairs.push(p);
@@ -584,5 +587,5 @@ try {
   if (!ops[input.op]) throw new Error(`unknown op ${input.op}`);
   process.stdout.write(JSON.stringify({ ok: true, ...ops[input.op]() }));
 } catch (e) {
-  process.stdout.write(JSON.stringify({ ok: false, error: e.message }));
+  process.stdout.write(JSON.stringify({ ok: false, error: e.message, stack: process.env.BUCKETS_DEBUG ? e.stack : undefined }));
 }

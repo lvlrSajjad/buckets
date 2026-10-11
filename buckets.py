@@ -2701,6 +2701,58 @@ def clean_path(p: str) -> str:
 
 
 MOVABLE = (".ts", ".tsx", ".js", ".jsx", ".mts", ".cts")
+MERGE_WORDS = re.compile(r"\b(merg\w*|shar\w*|duplicat\w*|common|diverg\w*|join\w*|unif\w*|dedup\w*|variants?)\b", re.I)
+
+
+def variant_pairs(request: str, files: list[str]) -> list[tuple[str, str]]:
+    """Files that are two variants of one file: the same name in sibling folders (`screens/x/ecotrak/a.tsx`
+    and `screens/x/ecotrak-techs/a.tsx`), among the files and folders the request names."""
+    by_place: dict[tuple[str, str], list[str]] = {}
+    for f in files:
+        parts = f.split("/")
+        if len(parts) >= 3 and f.endswith(MOVABLE):
+            by_place.setdefault(("/".join(parts[:-2]), parts[-1]), []).append(f)
+    groups = [sorted(g, key=len) for g in by_place.values() if len(g) == 2]
+    sides = {g.split("/")[-2] for group in groups for g in group}  # "ecotrak", "ecotrak-techs": not a place
+    words = {w.strip("`'\".,:;()").rstrip("/") for w in re.split(r"\s+", request)} - sides
+    def named(f: str) -> bool:
+        return f in words or any("/" + w + "/" in "/" + f for w in words
+                                 if len(w) > 3 and ("-" in w or "/" in w or "_" in w))
+    return sorted(tuple(g) for g in groups if any(named(x) for x in g))
+
+
+def variants_text(cmp: dict, limit: int = 3500) -> str:
+    """The mechanical comparison of two variants, for the planner: what can be shared as it is, what
+    differs a little (with the differing lines), and what only one side has."""
+    pairs = cmp["pairs"]
+    def names(status, top=None):
+        return [p for p in pairs if p["status"] == status and (top is None or p.get("module_level") == top)]
+    out = [f"Two variants of one file, compared declaration by declaration: `{cmp['a']}` ({cmp['lines'][0]} lines) "
+           f"and `{cmp['b']}` ({cmp['lines'][1]} lines)."]
+    same_top = names("identical", True)
+    if same_top:
+        out.append("Identical top-level declarations (a \"share\" task can move them into one file): "
+                   + ", ".join(f"`{p['name']}`" for p in same_top))
+    same_inner = [p for p in names("identical") if p.get("depth") == 1]
+    if same_inner:
+        out.append("Identical inside a component or function (they use its state; move that logic into a "
+                   "shared hook first): " + ", ".join(f"`{p['parent']}.{p['name']}`" for p in same_inner[:30]))
+    near = sorted(names("near"), key=lambda p: -p["similarity"])
+    for p in near[:8]:
+        out.append(f"Near copy `{p.get('parent') + '.' if p.get('parent') else ''}{p['name']}` ({p['similarity']:.0%} alike; "
+                   f"a {cmp['a'].split('/')[-2]}:{p['a'][0]}-{p['a'][1]}, b {cmp['b'].split('/')[-2]}:{p['b'][0]}-{p['b'][1]}); "
+                   f"lines only in a (-) or b (+):\n" + "\n".join("  " + l for l in p.get("diff", "").splitlines()[:10]))
+    if len(near) > 8:
+        out.append(f"… {len(near) - 8} more near copies: " + ", ".join(f"`{p['name']}`" for p in near[8:30]))
+    diff = names("different")
+    if diff:
+        out.append("Same name, different code: " + ", ".join(f"`{p['name']}` ({p['similarity']:.0%})" for p in diff[:20]))
+    for side, key in (("a", "only_a"), ("b", "only_b")):
+        only = names(key)
+        if only:
+            out.append(f"Only in {side}: " + ", ".join(f"`{p['name']}`" for p in only[:25]) + (" …" if len(only) > 25 else ""))
+    text = "\n".join(out)
+    return text[:limit] + ("\n… (cut off)" if len(text) > limit else "")
 
 
 def validate_move(t: dict, f: str, repo: Path, task_id: str) -> dict:
@@ -3194,6 +3246,11 @@ class Buckets:
         leads = request_leads(self.repo, self.request, files)
         if leads:
             parts.append("Where the request's words appear (found mechanically):\n" + leads)
+        if MERGE_WORDS.search(self.request):
+            for a, b in variant_pairs(self.request, list(files))[:4]:
+                cmp = ts_moves(self.repo, {"op": "compare", "a": a, "b": b}, timeout=120)
+                if cmp.get("ok"):
+                    parts.append(variants_text(cmp))
         for name, path in self.related.items():  # read-only neighbours (the API this app calls…)
             theirs = request_leads(path, self.request, self.related_files(name), prefix=f"{name}:")
             if theirs:
