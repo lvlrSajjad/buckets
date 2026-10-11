@@ -3851,6 +3851,9 @@ class Buckets:
                          + ". A \"signature\" task adds the parameter or prop to it and to every use, mechanically: "
                          + json.dumps({"file": sig["file"], "action": "signature", "where": sig["name"],
                                        "param": {"name": "…", "type": "…", "default": "…", "value": "…"}}))
+        cov = self.coverage_hint()
+        if cov:
+            parts.append(cov)
         rn = self.rename_hint()
         if rn:
             t, r = rn["task"], rn["report"]
@@ -3907,6 +3910,68 @@ class Buckets:
         if self._facts:
             say(f"  {ok()} gathered {len(shown)} code excerpt(s) and related tests mechanically, before planning")
         return self._facts
+
+    def coverage_hint(self) -> str:
+        """For a request to add tests or raise coverage for named files: what the tests don't reach in them yet
+        (functions and lines), from one jest run with coverage over just those files and their related tests."""
+        if hasattr(self, "_coverage_hint"):
+            return self._coverage_hint
+        self._coverage_hint = ""
+        if not re.search(r"\b(tests?|coverage|cover(ed)?|untested|specs?)\b", self.request, re.I):
+            return ""
+        files = [f for f in paths_in_text(self.request, self.index.files)
+                 if f.endswith((".ts", ".tsx", ".js", ".jsx")) and not re.search(r"\.(test|spec)\.|__tests__/", f)]
+        cmd = next((c for c in detect_checks(self.repo, self.rc).values() if re.search(r"\bjest\b", c)), None)
+        if not files or not cmd:
+            return ""
+        m = re.match(r"\s*cd\s+(\S+)\s*&&", cmd)
+        cwd = (self.repo / m.group(1)) if m else self.repo
+        rels = [os.path.relpath(self.repo / f, cwd) for f in files]
+        out = Path(tempfile.mkdtemp(prefix="buckets-coverage-"))
+        run_cmd = (f"{cmd} --coverage --coverageReporters=json --coverageDirectory={shlex.quote(str(out))} --passWithNoTests "
+                   + " ".join(f"--collectCoverageFrom={shlex.quote(r)}" for r in rels)
+                   + " --findRelatedTests " + " ".join(shlex.quote(r) for r in rels))
+        start = time.time()
+        with Ticker("  Measuring test coverage of " + ", ".join(files)):
+            run_proc(run_cmd, self.repo, self.cfg["check_timeout_s"], shell=True)
+        try:
+            data = json.loads((out / "coverage-final.json").read_text())
+        except (OSError, ValueError):
+            detail("no coverage report came back")
+            return ""
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+        lines = []
+        for path, d in data.items():
+            rel = os.path.relpath(os.path.realpath(path), self.repo.resolve())  # jest reports resolved paths
+            statements = d.get("s") or {}
+            covered = sum(1 for v in statements.values() if v)
+            pct = round(100 * covered / len(statements)) if statements else 100
+            decls = self.index.outline().get(rel, [])
+            def fn_name(fn: dict) -> str:  # jest calls arrow functions "(anonymous_4)": name them from the outline
+                lo, hi = fn["loc"]["start"]["line"], fn["loc"]["end"]["line"]
+                if not fn["name"].startswith("(anonymous"):
+                    return fn["name"]
+                own = next((x["name"] for x in decls if x["line"] == lo), None)
+                around = next((x["name"] for x in decls if x["line"] < lo and x.get("end", 0) >= hi), None)
+                return own or (f"a function inside {around}" if around else "an unnamed function")
+            fns = [f"{fn_name(d['fnMap'][k])} (lines {d['fnMap'][k]['loc']['start']['line']}-{d['fnMap'][k]['loc']['end']['line']})"
+                   for k, v in (d.get("f") or {}).items() if not v and k in d.get("fnMap", {})]
+            missed = sorted({d["statementMap"][k]["start"]["line"] for k, v in statements.items() if not v and k in d["statementMap"]})
+            ranges, lo = [], None
+            for i, n in enumerate(missed):
+                lo = n if lo is None else lo
+                if i + 1 == len(missed) or missed[i + 1] > n + 1:
+                    ranges.append(f"{lo}-{n}" if n != lo else str(n))
+                    lo = None
+            lines.append(f"- {rel}: {pct}% of statements covered" + (" (no test reaches it at all)" if covered == 0 else "")
+                         + (f"; functions no test calls: {', '.join(fns[:15])}" if fns and covered else "")
+                         + (f"; lines not run: {', '.join(ranges[:30])}" if ranges and covered else ""))
+        if lines:
+            say(f"  {ok()} measured test coverage of {len(lines)} file(s) ({int(time.time() - start)}s)")
+            self._coverage_hint = ("Test coverage now (jest, with the tests related to these files; measured "
+                                   "mechanically). Write tests for what isn't reached:\n" + "\n".join(lines))
+        return self._coverage_hint
 
     def ci_pr_branch(self) -> str | None:
         """For "fix the red CI on PR 123": that pull request's branch (fetched, made local if needed), so the run

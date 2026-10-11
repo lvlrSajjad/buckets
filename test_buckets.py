@@ -3829,5 +3829,38 @@ class RedCIOnAPullRequest(unittest.TestCase):
         self.assertIsNone(b2.ci_pr_branch())
 
 
+class CoverageFacts(unittest.TestCase):
+    FAKE_JEST = """import json, os, sys
+args = sys.argv[1:]
+out = next(a.split("=", 1)[1] for a in args if a.startswith("--coverageDirectory="))
+cover = [a.split("=", 1)[1] for a in args if a.startswith("--collectCoverageFrom=")]
+assert "--findRelatedTests" in args and "--coverage" in args, args
+data = {}
+for rel in cover:
+    path = os.path.abspath(rel)
+    data[path] = {"path": path,
+                  "statementMap": {"0": {"start": {"line": 2}}, "1": {"start": {"line": 5}}, "2": {"start": {"line": 6}}},
+                  "s": {"0": 3, "1": 0, "2": 0},
+                  "fnMap": {"0": {"name": "a", "loc": {"start": {"line": 1}, "end": {"line": 3}}},
+                            "1": {"name": "b", "loc": {"start": {"line": 4}, "end": {"line": 7}}}},
+                  "f": {"0": 2, "1": 0}}
+os.makedirs(out, exist_ok=True)
+open(os.path.join(out, "coverage-final.json"), "w").write(json.dumps(data))
+"""
+
+    def test_the_planner_gets_what_the_tests_dont_reach(self):
+        repo = make_repo({"pkg/src/m.ts": "export function a() {\n  return 1\n}\nexport function b(x: number) {\n  if (x) return 2\n  return 3\n}\n",
+                          "tools/jest.py": self.FAKE_JEST})
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        b = buckets.Buckets(cfg, repo, "add tests for pkg/src/m.ts to cover what isn't tested")
+        b.rc = {"checks": {"test": f"cd pkg && {sys.executable} ../tools/jest.py --silent"}}
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = b.coverage_hint()
+        self.assertIn("- pkg/src/m.ts: 33% of statements covered", got)
+        self.assertIn("functions no test calls: b (lines 4-7)", got)
+        self.assertIn("lines not run: 5-6", got)
+        self.assertEqual(buckets.Buckets(cfg, repo, "rename a to c in pkg/src/m.ts").coverage_hint(), "")
+
+
 if __name__ == "__main__":
     unittest.main()
