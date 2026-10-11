@@ -84,7 +84,7 @@ def case_problems(c: dict) -> list[str]:
 
 
 FIELDS = {"name", "repo", "commit", "branch", "request", "follow_ups", "expect", "links", "time_limit", "args",
-          "buckets", "config", "_file"}
+          "buckets", "config", "setup", "_file"}
 
 
 def deep_merge(base: dict, more: dict) -> dict:
@@ -168,8 +168,9 @@ def reset_clone(clone: Path, base: str, commit: str) -> None:
         git(clone, "worktree", "remove", "--force", wt, check=False)
     git(clone, "reset", "-q", "--hard")
     git(clone, "checkout", "-q", "-B", base, commit)
-    for b in git(clone, "for-each-ref", "--format=%(refname:short)", "refs/heads/buckets").split():
-        git(clone, "branch", "-q", "-D", b)
+    for b in git(clone, "for-each-ref", "--format=%(refname:short)", "refs/heads/").split():
+        if b != base:  # buckets' branches and any a case's setup made
+            git(clone, "branch", "-q", "-D", b)
     git(clone, "clean", "-qfd")  # untracked files only; ignored ones (the links) stay
     git(clone, "stash", "clear")
 
@@ -358,6 +359,10 @@ def run_case(c: dict, suite: str, rep: int, logs: Path, overrides: dict | None =
     clone = prepare_clone(c, src)
     seed_memory(src, clone)
     config = config_for(clone, src, deep_merge(c.get("config", {}), overrides or {}))
+    for cmd in c.get("setup", []):  # e.g. branches that conflict, for a case about conflicts
+        p = subprocess.run(cmd, shell=True, cwd=clone, capture_output=True, text=True)
+        if p.returncode:
+            raise SystemExit(f"{c['name']}: setup failed: {cmd}: {(p.stderr or p.stdout).strip()[-300:]}")
     log = logs / f"{c['name']}-{rep}.log"
     steps = []
     for request in [c["request"], *c.get("follow_ups", [])]:

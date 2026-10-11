@@ -201,6 +201,18 @@ class Suite(unittest.TestCase):
                                                "plan": {"secs": 30.0, "n": 1, "failed": 0},
                                                "tsc": {"secs": 10.0, "n": 1, "failed": 0}})
 
+    def test_setup_commands_run_in_the_clone_and_their_branches_are_cleaned_up(self):
+        self.case("s", "add hello", {"done": True},
+                  setup=["git checkout -q -B extra && echo s > s.txt && git add s.txt && git commit -qm s && git checkout -q main"])
+        code, _ = self.run_suite()
+        self.assertEqual(code, 0)
+        clone = next((regress.STATE / "clones").glob("*/app"))
+        self.assertEqual(subprocess.run(["git", "branch", "--list", "extra"], cwd=clone, capture_output=True,
+                                        text=True).stdout.strip(), "")
+        self.case("s", "add hello", {"done": True}, setup=["exit 3"])
+        with self.assertRaises(SystemExit):
+            self.run_suite()
+
     def test_bad_case_files_are_refused(self):
         d = self.tmp / "cases"
         d.mkdir()
