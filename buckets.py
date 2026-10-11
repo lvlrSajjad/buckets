@@ -2186,6 +2186,11 @@ SHORTCUTS = {
 }
 
 
+def same_line(text: str) -> str:
+    """A line as a formatter would leave it either way: no spacing differences, no trailing ; or ,."""
+    return re.sub(r"\s+", " ", text).strip().rstrip(";,").strip()
+
+
 def find_shortcuts(diff: str, allowed: list[str]) -> list[str]:
     """Added lines that silence checks or skip tests instead of fixing the problem.
 
@@ -2211,13 +2216,14 @@ def find_shortcuts(diff: str, allowed: list[str]) -> list[str]:
                 added.setdefault((file, key), []).append(line[1:].strip())
             else:
                 removed[(file, key)] = removed.get((file, key), 0) + 1
-                moved[(key, line[1:].strip())] = moved.get((key, line[1:].strip()), 0) + 1
+                k = (key, same_line(line[1:]))
+                moved[k] = moved.get(k, 0) + 1
     hits = []
     for (file, key), lines in added.items():
         fresh = []
         for text in lines:
-            if moved.get((key, text), 0) > 0:  # the same line left another file: moved, not added
-                moved[(key, text)] -= 1
+            if moved.get((key, same_line(text)), 0) > 0:  # the same line left another file: moved, not added
+                moved[(key, same_line(text))] -= 1
                 removed[(file, key)] = max(0, removed.get((file, key), 0) - (1 if (file, key) in removed else 0))
             else:
                 fresh.append(text)
@@ -3343,17 +3349,26 @@ class Buckets:
 
     def prefer_move(self, plan: dict) -> dict:
         """A plan that would retype the moved code (a new file with no exact code) gets the mechanical
-        move instead; the planner's other tasks stay."""
+        move instead; the planner's other tasks stay. Next to a move, edit tasks on its two files with
+        no exact code go: the move already rewires them (one such task spent 9 minutes changing nothing)."""
+        moves = [t for t in plan["tasks"] if t["action"] == "move"]
+        if moves:
+            mine = {f for t in moves for f in (t["file"], t["into"])}
+            extra = [t for t in plan["tasks"] if t["action"] in ("edit", "create") and t["file"] in mine and not t.get("edits")]
+            if extra:
+                say(f"  {paint('dropped', 'dim')} {', '.join(t['id'] for t in extra)}: the move already does "
+                    f"that; anything left over is for the review, after the checks")
+            keep = [t for t in plan["tasks"] if t not in extra]
+            return {**plan, "tasks": [{**t, "id": f"T{n}"} for n, t in enumerate(keep, 1)]}
         hint = self.move_hint()
-        if not hint or any(t["action"] == "move" for t in plan["tasks"]):
+        if not hint:
             return plan
         into, src = hint["task"]["into"], hint["task"]["file"]
         if not any(t["file"] == into and not t.get("edits") for t in plan["tasks"]):
             return plan
         say(f"  {warn()} the plan would retype the moved code; doing it as a mechanical move instead")
-        rest = [t for t in plan["tasks"] if t["file"] not in (into, src)]
-        tasks = [hint["task"]] + rest
-        return {**plan, "tasks": [{**t, "id": f"T{n}"} for n, t in enumerate(tasks, 1)]}
+        rest = [t for t in plan["tasks"] if t["file"] not in (into, src) or t.get("edits")]
+        return self.prefer_move({**plan, "tasks": [hint["task"]] + rest})
 
     def context(self, with_map: bool = True) -> str:
         """Check output, mechanically gathered facts, `--like` examples and the project's notes
@@ -4189,7 +4204,9 @@ class Buckets:
             written.append(f)
         self.involved = list(dict.fromkeys(self.involved + written))
         r = d["report"]
-        if task["action"] == "move":
+        if task["action"] == "move":  # its signature is written from the component's own types
+            self.generated_lines = getattr(self, "generated_lines", set()) | {
+                same_line(l) for f in written for l in d["files"][f].splitlines() if f"function {task['name']}(" in l}
             note = (f"moved {r['moved']} statements ({r['moved_lines']} lines) of {task['where']} into "
                     f"{task['name']} in {', '.join(f for f in written if f != task['file'])}; parameters: "
                     f"{', '.join(p['name'] for p in r['params']) or 'none'}; returns {len(r['returns'])} values; "
@@ -4563,6 +4580,8 @@ class Buckets:
             failing_before = failing
             shortcuts = find_shortcuts(git(repo, "diff", "-U0", f"{shortcut_base or base}..HEAD"),
                                        self.rc.get("allow_shortcuts", []))
+            generated = getattr(self, "generated_lines", set())
+            shortcuts = [h for h in shortcuts if not any(g in same_line(h) for g in generated)]
             if shortcuts:
                 say(f"  {warn()} {len(shortcuts)} shortcut(s) like `any` or skipped tests were added (see the report)")
             api = self.api_impact(base)

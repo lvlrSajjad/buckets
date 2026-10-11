@@ -249,7 +249,7 @@ class Shortcuts(unittest.TestCase):
 """
 
     def test_code_moved_to_another_file_isnt_a_new_shortcut(self):
-        diff = ("--- a/src/screen.tsx\n+++ b/src/screen.tsx\n-  const x = y as any\n-  // @ts-ignore\n"
+        diff = ("--- a/src/screen.tsx\n+++ b/src/screen.tsx\n-  const x = y as any;\n-  // @ts-ignore\n"
                 "--- /dev/null\n+++ b/src/use-screen.ts\n+  const x = y as any\n+  // @ts-ignore\n+  const z = w as any\n")
         hits = buckets.find_shortcuts(diff, [])
         self.assertEqual(len(hits), 1)
@@ -1675,6 +1675,10 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
             got = b.prefer_move(retyped)
         self.assertEqual([(t["id"], t["action"], t["file"]) for t in got["tasks"]],
                          [("T1", "move", "src/thing-screen.tsx"), ("T2", "edit", "src/api.ts")])
+        planned = {"summary": "s", "tasks": [dict(hint["task"]), {"id": "T2", "file": "src/thing-screen.tsx", "action": "edit",
+                                                                    "instructions": "call the hook", "edits": []}]}
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual([t["action"] for t in b.prefer_move(planned)["tasks"]], ["move"])
         self.assertIsNone(buckets.Buckets(cfg, self.repo, "explain src/thing-screen.tsx").move_hint())
         sparse = {"summary": "s", "tasks": [{"id": "T1", "file": "src/thing-screen.tsx", "action": "move",
                                              "instructions": "into: src/use-thing.ts", "done_when": "", "where": "", "edits": []}]}
