@@ -3611,6 +3611,23 @@ class RepeatedLookups(unittest.TestCase):
         cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
         self.b = buckets.Buckets(cfg, self.repo, "make run add 2")
 
+    def test_look_ups_that_outgrow_the_context_are_shortened_oldest_first(self):
+        (self.repo / "src/big.py").write_text("".join(f"def f{i}():\n    return {i}\n" for i in range(3000)))
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "big"], cwd=self.repo, check=True)
+        self.b.planner = {**self.b.planner, "num_ctx": 18000}
+        plan = {"summary": "s", "tasks": [{"file": "src/m.py", "action": "edit", "instructions": "x", "done_when": "y",
+                                           "where": "run", "edits": []}]}
+        sizes = []
+        def fake_turn(cfg, run, label, messages, **kw):
+            sizes.append(sum(buckets.est_tokens(m.get("content") or "") for m in messages))
+            if len(sizes) <= 2:
+                return "", "", [{"id": str(len(sizes)), "name": "read", "arguments": {"what": f"src/big.py:{1 + len(sizes) * 1000}-{1000 + len(sizes) * 1000}"}}], False
+            return json.dumps(plan), "", [], False
+        with mock.patch.object(buckets, "chat_turn", fake_turn), contextlib.redirect_stderr(io.StringIO()):
+            self.b.plan_with_lookups("PLAN PROMPT", lambda d: buckets.validate_plan(d, self.repo, 8))
+        self.assertTrue(all(n <= 18000 - 16000 - 500 for n in sizes), sizes)  # two reads only fit shortened
+
     def test_a_round_of_only_repeats_ends_the_look_ups(self):
         plan = {"summary": "s", "tasks": [{"file": "src/m.py", "action": "edit", "instructions": "x", "done_when": "y",
                                            "where": "run", "edits": []}]}

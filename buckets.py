@@ -5169,6 +5169,8 @@ class Buckets:
         think, asked, seen, enough = True, 0, set(), False
         for turn in range(1, self.cfg.get("lookup_rounds", 4) + 2):
             last = turn > self.cfg.get("lookup_rounds", 4) or enough
+            room = {"num_ctx": self.planner.get("num_ctx", 32768), "max_tokens": 16000}
+            self.fit_messages(messages, room)  # look-ups add up: older answers shortened, or the call is refused
             content, thinking, calls, cut = chat_turn(self.planner, self.run, f"plan-{turn}", messages,
                                                       tools=None if last else LOOKUP_TOOLS, think=think,
                                                       think_budget=budget, max_tokens=16000, timeout=self.timeout)
@@ -5211,6 +5213,7 @@ class Buckets:
                                  "plan as the JSON object."})
                 break
         ask = messages + [{"role": "user", "content": "Reply now with only the plan as the JSON object."}]
+        self.fit_messages(ask, {"num_ctx": self.planner.get("num_ctx", 32768), "max_tokens": 16000})
         content, _, _, _ = chat_turn(self.planner, self.run, "plan-final", ask, schema=PLAN_SCHEMA, think=False,
                                      max_tokens=16000, timeout=self.timeout)
         try:
@@ -5398,7 +5401,8 @@ class Buckets:
         return "\n".join(log), False
 
     def fit_messages(self, messages: list[dict], cfg: dict) -> None:
-        """Older tool results shortened, oldest first, so the conversation fits the coder's context."""
+        """Older tool results shortened, oldest first, so the conversation fits the model's context (the coder's
+        session, or the planner's look-ups: a real plan once grew past 64k tokens and was refused)."""
         room = cfg.get("num_ctx", 32768) - cfg.get("max_tokens", 8000) - 500
         for m in messages[2:]:
             if sum(est_tokens(x.get("content") or "") for x in messages) <= room:
