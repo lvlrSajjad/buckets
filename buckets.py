@@ -5245,12 +5245,17 @@ class Buckets:
                     "tasks": validate_tasks(self.fill_moves({"tasks": d.get("tasks") or []})["tasks"], self.repo,
                                             self.cfg["max_tasks"], f"R{rnd + 1}T")}
 
-        moved = [r for r in results if r.get("action") in ("move", "share") and r.get("status") == "done"]
+        moved = [r for r in results if r.get("action") in ("move", "share", "relocate", "dedupe", "unify", "component", "signature")
+                 and r.get("status") == "done"]
         if moved:
             prompt += ("\n\nCode moved mechanically, byte for byte (" + "; ".join(r["note"].removeprefix("DONE: ")[:300] for r in moved)
                        + "). Judge the move: does everything still connect, and is behaviour unchanged? Problems that were "
                        "already in the moved code before (types, untranslated strings, style) are not this change's to fix "
-                       "unless the request asks: don't list them as issues (the smallest change that does the request wins).")
+                       "unless the request asks: don't list them as issues (the smallest change that does the request wins). "
+                       "Types in a generated signature (a hook's parameters, a new component's props) are copied from the "
+                       "original declarations, so an `any` there is the original code's own type. Helpers and types that moved "
+                       "along are exported from their new file for the code that still uses them; where they should live "
+                       "long-term is a separate refactor.")
         prompt = note + prompt
         if prompt_out is not None:
             prompt_out.append(prompt)
