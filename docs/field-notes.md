@@ -592,7 +592,32 @@ Live in a scratch clone of buckets:
 - Round rollback and diff-checked reviews are covered by unit tests; memory outside the repo is set for the
   work repo (`"memory": "outside"`), so its runs stop creating `.buckets/`.
 
+### 26. Move to a util, and copies that drifted (2026-10-11)
+
+A real case in the work repo: two small time-formatting helpers in a screen folder's helper file, which
+nothing imported, while two screens each kept their own copy of one of them. Request: move them into the
+shared date utils and update everything that uses them, copies included, behaviour unchanged.
+
+| Run | What happened | Result |
+|---|---|---|
+| 1 | `relocate` dropped (the planner left out the target); the reviewers' hand edits broke `tsc` | stopped |
+| 2 | relocate 3 s; `dedupe` rightly refused (the copies differ); round 3's coder deleted the copies by hand and **both reviewers said done**, but the copies guarded empty input and the moved version didn't: an empty value would now show `NaNh NaNm 0s` | **wrong**; caught in verification, never merged |
+| 3–5 | the differences shown to the reviewers; a removed differing copy flagged as a behaviour change; dedupe aimed at the wrong file; an emptied helper file the coder couldn't delete; stale evidence once the shared version was fixed; the confirm step losing its answer when its thinking ran out | each fixed |
+| **6** | relocate (3 s), dedupe shows the difference, the planner adds the guard to the shared version, **dedupe replaces both copies mechanically** (now equivalent), emptied helper deleted | **7m 09s, both reviews done; verified**: the new version behaves like both original copies on 12 inputs, `tsc`, eslint, all tests pass, 66 lines out |
+
+What made it work: **running the code instead of reading it.** For small pure functions, `dedupe` compiles
+both versions and runs them on sample inputs from their parameter types (empty and odd strings, edge
+numbers, null/undefined): equivalent copies are replaced even when written differently, and otherwise the
+first differing input is shown (`("") gives "NaNh NaNm 0s" … "0h 0m 0s"`). That turned a review argument
+into a fact, and it is checked again at review time against the code as it is then.
+
+Lessons: two confident reviewers can both miss a behaviour change that the checks don't cover; a
+mechanical behaviour comparison catches it. Evidence must be recomputed when the code it describes changes.
+
 ## Lessons so far
+
+- Run it, don't argue about it: comparing two versions of a small function on sample inputs settles
+  "does this change behaviour?" where two reviewers disagreed or both missed it (field notes 26).
 
 - Moving code is a job for a tool, not a model: a 1,450-line split failed after 20 min of retyping and took 3 s
   as a mechanical move (field notes 22). The model decides what goes where; buckets moves it.

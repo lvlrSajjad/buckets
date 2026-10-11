@@ -4657,7 +4657,8 @@ class Buckets:
         elif task["action"] == "dedupe":
             copies = task.get("from") or copies_of(self.repo, task["select"], (task["file"],))
             if not copies:
-                return {**task, "status": "failed", "note": "BLOCKED: no other file defines its own copy"}
+                say(f"  {ok()} {task['id']} dedupe: no other file defines its own copy")
+                return {**task, "status": "done", "note": "DONE: no other file defines its own copy"}
             d = ts_moves(self.repo, {"op": "dedupe", "file": task["file"], "names": task["select"], "copies": copies})
             if not d.get("ok"):
                 return {**task, "status": "failed", "note": f"BLOCKED: {d.get('error', 'dedupe failed')}"}
@@ -4675,6 +4676,9 @@ class Buckets:
                        f"better version, unify it into {task['file']} first; otherwise keep it): "
                        + "; ".join(f"{x['file']}: {x['name']} (lines only in {task['file']} (-) or the copy (+):\n{x['diff']})"
                                    for x in r["differ"]) if r["differ"] else ""))
+            if not written and not r["differ"]:  # every copy is already gone: nothing left to do
+                say(f"  {ok()} {task['id']} dedupe: no copies left to replace")
+                return {**task, "status": "done", "note": "DONE: no copies left to replace"}
             if not written:
                 say(f"  {warn()} {task['id']} dedupe: nothing replaced; {len(r['differ'])} cop{'y differs' if len(r['differ']) == 1 else 'ies differ'} "
                     f"from {task['file']} ({', '.join(x['file'].split('/')[-1] for x in r['differ'])})")
