@@ -2194,6 +2194,7 @@ def find_shortcuts(diff: str, allowed: list[str]) -> list[str]:
     """
     added: dict[tuple[str, str], list[str]] = {}
     removed: dict[tuple[str, str], int] = {}
+    moved: dict[tuple[str, str], int] = {}  # (pattern, line) removed anywhere: code that moved between files
     file = "?"
     for line in diff.splitlines():
         if line.startswith("+++ "):
@@ -2210,9 +2211,17 @@ def find_shortcuts(diff: str, allowed: list[str]) -> list[str]:
                 added.setdefault((file, key), []).append(line[1:].strip())
             else:
                 removed[(file, key)] = removed.get((file, key), 0) + 1
+                moved[(key, line[1:].strip())] = moved.get((key, line[1:].strip()), 0) + 1
     hits = []
     for (file, key), lines in added.items():
-        for text in lines[removed.get((file, key), 0):]:
+        fresh = []
+        for text in lines:
+            if moved.get((key, text), 0) > 0:  # the same line left another file: moved, not added
+                moved[(key, text)] -= 1
+                removed[(file, key)] = max(0, removed.get((file, key), 0) - (1 if (file, key) in removed else 0))
+            else:
+                fresh.append(text)
+        for text in fresh[removed.get((file, key), 0):]:
             hits.append(f"`{file}` {SHORTCUTS[key][1]}: {text[:120]}")
     return hits
 

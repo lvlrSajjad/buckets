@@ -248,6 +248,13 @@ class Shortcuts(unittest.TestCase):
 +  it('fine', () => {});
 """
 
+    def test_code_moved_to_another_file_isnt_a_new_shortcut(self):
+        diff = ("--- a/src/screen.tsx\n+++ b/src/screen.tsx\n-  const x = y as any\n-  // @ts-ignore\n"
+                "--- /dev/null\n+++ b/src/use-screen.ts\n+  const x = y as any\n+  // @ts-ignore\n+  const z = w as any\n")
+        hits = buckets.find_shortcuts(diff, [])
+        self.assertEqual(len(hits), 1)
+        self.assertIn("const z = w as any", hits[0])
+
     def test_flags_added_lines_only(self):
         hits = buckets.find_shortcuts(self.DIFF, [])
         # src/a.ts adds one `as any` and removes one, so only the @ts-ignore counts there.
