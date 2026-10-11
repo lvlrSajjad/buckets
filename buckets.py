@@ -3921,6 +3921,33 @@ class Buckets:
                         return self._signature_hint
         return None
 
+    def prefer_dedupe(self, tasks: list[dict]) -> list[dict]:
+        """Follow-ups that hand-edit the copies an earlier dedupe found different become that dedupe again, after
+        any fix to the shared version: once it behaves like the copies, the tool replaces them exactly (hand edits
+        of those copies broke the checks in a real run)."""
+        out = list(tasks)
+        for d in getattr(self, "dedupes", []):
+            names = d.get("select") or []
+            hand = [t for t in out if t["action"] == "edit" and t["file"] in (d.get("from") or [])
+                    and any(re.search(rf"\b{re.escape(n)}\b", t["instructions"] + json.dumps(t.get("edits") or []))
+                            for n in names)]
+            if not hand:
+                continue
+            task = {"id": hand[0]["id"], "file": d["file"], "action": "dedupe", "select": names,
+                    "from": [t["file"] for t in hand], "instructions": "", "done_when": "", "edits": [],
+                    "read_first": [], "where": ""}
+            try:
+                task = validate_move(task, d["file"], self.repo, hand[0]["id"])
+            except ValueError as e:
+                detail(f"no dedupe for the follow-ups ({e})")
+                continue
+            rest = [t for t in out if t not in hand]
+            fix = max((i for i, t in enumerate(rest) if t["file"] == d["file"]), default=-1)
+            out = rest[:fix + 1] + [task] + rest[fix + 1:]
+            say(f"  {ok()} the follow-ups that edit {', '.join(task['from'])} by hand become a dedupe of "
+                f"{', '.join(names)} (the tool replaces copies that now behave the same, exactly)")
+        return out
+
     def prefer_signature(self, plan: dict, prompt: str, validate) -> dict:
         """A plan that hand-edits the definition and several call sites of a function the facts offered a
         signature change for gets one more try, asked for exactly that task (the model knows the parameter's
@@ -5851,6 +5878,7 @@ class Buckets:
                              + f": {len(tasks)} task{'s' if len(tasks) != 1 else ''} on {machine_label(self.cfg['coder'])}")
             results = [self.code_task(t) for t in tasks]
             rounds.append(results)
+            self.dedupes = getattr(self, "dedupes", []) + [r for r in results if r.get("action") == "dedupe"]
             self.heading(review_step, "Checks and review" + (f" (round {rnd})" if rnd > 1 else ""))
             if tasks:
                 self.auto_fix(shortcut_base or base)
@@ -5918,7 +5946,7 @@ class Buckets:
             if verdict["done"]:
                 break
             skeleton = skeleton_tasks(now, repo, self.index.files, f"R{rnd + 1}S", self.cfg["max_tasks"])
-            tasks = with_exact_errors(verdict["tasks"], skeleton, self.cfg["max_tasks"])
+            tasks = self.prefer_dedupe(with_exact_errors(verdict["tasks"], skeleton, self.cfg["max_tasks"]))
             # Rule 5b: the same error in the same file after the coder said it was done: rewrite those tasks.
             errors_now = {(sk["file"], m) for sk in skeleton for m in re.findall(r"\): (.+)", sk["instructions"])}
             repeated = {f for f, m in errors_now & errors_before}

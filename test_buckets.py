@@ -3455,5 +3455,42 @@ class WindowsAgent(unittest.TestCase):
         self.assertTrue((shared / "setup-buckets-agent.ps1").exists())
 
 
+class PreferDedupe(unittest.TestCase):
+    """Follow-ups that hand-edit copies an earlier dedupe found different become that dedupe again."""
+
+    def setUp(self):
+        self.repo = make_repo({"src/utils/time.ts": "export const fmt = (s: string) => s\n",
+                               "src/a.tsx": "const fmt = (s: string) => s || '0'\n", "src/b.tsx": "const fmt = (s: string) => s || '0'\n",
+                               "src/c.tsx": "export const other = 1\n"})
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        self.b = buckets.Buckets(cfg, self.repo, "move fmt into src/utils/time.ts")
+        self.b.dedupes = [{"id": "T2", "action": "dedupe", "file": "src/utils/time.ts", "select": ["fmt"],
+                           "from": ["src/a.tsx", "src/b.tsx"], "status": "failed"}]
+
+    def edit(self, tid, f, text):
+        return {"id": tid, "file": f, "action": "edit", "instructions": text, "done_when": "", "edits": [],
+                "read_first": [], "where": ""}
+
+    def test_hand_edits_of_the_copies_become_one_dedupe_after_the_shared_fix(self):
+        tasks = [self.edit("R2T1", "src/utils/time.ts", "make fmt return '0' for an empty string"),
+                 self.edit("R2T2", "src/a.tsx", "remove the local fmt and import it from utils/time"),
+                 self.edit("R2T3", "src/b.tsx", "replace the local `fmt` copy with the import"),
+                 self.edit("R2T4", "src/c.tsx", "rename other")]
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            got = self.b.prefer_dedupe(tasks)
+        self.assertEqual([(t["id"], t["action"], t["file"]) for t in got],
+                         [("R2T1", "edit", "src/utils/time.ts"), ("R2T2", "dedupe", "src/utils/time.ts"),
+                          ("R2T4", "edit", "src/c.tsx")])
+        self.assertEqual((got[1]["select"], got[1]["from"]), (["fmt"], ["src/a.tsx", "src/b.tsx"]))
+        self.assertIn("become a dedupe of fmt", err.getvalue())
+
+    def test_edits_that_dont_touch_the_copied_names_stay(self):
+        tasks = [self.edit("R2T1", "src/a.tsx", "fix the header text")]
+        self.assertEqual(self.b.prefer_dedupe(tasks), tasks)
+        self.b.dedupes = []
+        tasks = [self.edit("R2T1", "src/a.tsx", "remove the local fmt")]
+        self.assertEqual(self.b.prefer_dedupe(tasks), tasks)
+
+
 if __name__ == "__main__":
     unittest.main()
