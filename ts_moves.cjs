@@ -1080,6 +1080,101 @@ function dedupe() {
   return { files, report: { replaced, differ, missing, equivalent } };
 }
 
+// A function or component gets a new parameter (or prop) everywhere: the definition (optional, or with a
+// default, so existing callers keep working), and every call or JSX use when a value is given.
+function signature() {
+  const file = abs(input.file);
+  const users = (input.importers || []).filter((f) => abs(f) !== file);
+  const { checker, sources } = program([input.file, ...users]);
+  const sf = sources[0];
+  const p = input.param;  // {name, type, default?, value?}
+  if (!p || !/^[A-Za-z_$][\w$]*$/.test(p.name || '')) throw new Error('param needs a name');
+  let decl = null, fn = null;
+  for (const st of sf.statements) {
+    if (ts.isFunctionDeclaration(st) && st.name && st.name.text === input.name) { decl = st.name; fn = st; }
+    if (ts.isVariableStatement(st)) for (const d of st.declarationList.declarations) {
+      if (ts.isIdentifier(d.name) && d.name.text === input.name && d.initializer) {
+        decl = d.name;
+        const visit = (n) => { if (!fn && (ts.isArrowFunction(n) || ts.isFunctionExpression(n))) fn = n; else if (!fn) ts.forEachChild(n, visit); };
+        visit(d.initializer);  // observer(function X(...)), memo(() => ...)
+      }
+    }
+  }
+  if (!decl || !fn) throw new Error(`no function or component named ${input.name} at the top level of ${input.file}`);
+  const target = checker.getSymbolAtLocation(decl);
+  const isTarget = (id) => {
+    let sym = checker.getSymbolAtLocation(id);
+    if (sym && sym.flags & ts.SymbolFlags.Alias) sym = checker.getAliasedSymbol(sym);
+    return sym === target;
+  };
+  const files = {}, sites = [], skipped = [];
+  const edits = new Map(sources.map((s) => [s, []]));
+  const component = fn.parameters.length <= 1 && fn.parameters[0] && ts.isObjectBindingPattern(fn.parameters[0].name);
+  const opt = p.default === undefined || p.default === null || p.default === '';
+  if (component) {
+    // the prop: in the props type, and in the destructure
+    const par = fn.parameters[0];
+    const member = `${p.name}${opt ? '?' : '?'}: ${p.type || 'unknown'}`;
+    let typeNode = par.type;
+    if (!typeNode) {
+      let n = fn; while (n && !ts.isVariableDeclaration(n)) n = n.parent;
+      const t = n && n.type;
+      if (t && ts.isTypeReferenceNode(t) && t.typeArguments && t.typeArguments.length) typeNode = t.typeArguments[0];
+    }
+    if (typeNode && ts.isTypeLiteralNode(typeNode)) {
+      edits.get(sf).push([typeNode.members.end, typeNode.members.end, `${typeNode.members.length ? '; ' : ' '}${member}`]);
+    } else if (typeNode && ts.isTypeReferenceNode(typeNode)) {
+      const tsym = checker.getSymbolAtLocation(typeNode.typeName);
+      const td = tsym && tsym.declarations && tsym.declarations[0];
+      if (td && td.getSourceFile() === sf && ts.isInterfaceDeclaration(td)) {
+        edits.get(sf).push([td.members.end, td.members.end, `\n  ${member}`]);
+      } else if (td && td.getSourceFile() === sf && ts.isTypeAliasDeclaration(td) && ts.isTypeLiteralNode(td.type)) {
+        edits.get(sf).push([td.type.members.end, td.type.members.end, `\n  ${member}`]);
+      } else skipped.push(`the props type ${typeNode.getText(sf)} isn't declared in ${input.file}; add \`${member}\` to it`);
+    } else skipped.push('the component has no props type to extend');
+    const els = par.name.elements;
+    const add = opt ? p.name : `${p.name} = ${p.default}`;
+    edits.get(sf).push([els.end, els.end, `${els.length ? ', ' : ''}${add}`]);
+  } else {
+    const params = fn.parameters;
+    const text = `${p.name}${opt ? '?' : ''}${p.type ? `: ${p.type}` : ''}${opt ? '' : ` = ${p.default}`}`;
+    edits.get(sf).push([params.end, params.end, `${params.length ? ', ' : ''}${text}`]);
+  }
+  // every use
+  const index = component ? null : fn.parameters.length;  // the new parameter's position
+  for (const o of sources) {
+    const visit = (n) => {
+      if (!component && ts.isCallExpression(n)) {
+        const callee = ts.isPropertyAccessExpression(n.expression) ? n.expression.name : n.expression;
+        if (ts.isIdentifier(callee) && isTarget(callee)) {
+          sites.push(`${rel(o.fileName)}:${lineOf(o, n.getStart(o))}`);
+          if (p.value !== undefined && p.value !== null && p.value !== '') {
+            const have = n.arguments.length;
+            if (have > index) skipped.push(`${rel(o.fileName)}:${lineOf(o, n.getStart(o))} already passes more arguments`);
+            else {
+              const fill = Array(index - have).fill('undefined');
+              const args = [...fill, p.value].join(', ');
+              edits.get(o).push([n.arguments.end, n.arguments.end, `${have ? ', ' : ''}${args}`]);
+            }
+          }
+        }
+      }
+      if (component && (ts.isJsxSelfClosingElement(n) || ts.isJsxOpeningElement(n)) && ts.isIdentifier(n.tagName) && isTarget(n.tagName)) {
+        sites.push(`${rel(o.fileName)}:${lineOf(o, n.getStart(o))}`);
+        if (p.value !== undefined && p.value !== null && p.value !== '') {
+          const has = n.attributes.properties.some((a) => ts.isJsxAttribute(a) && a.name.getText(o) === p.name);
+          if (has) skipped.push(`${rel(o.fileName)}:${lineOf(o, n.getStart(o))} already sets ${p.name}`);
+          else edits.get(o).push([n.attributes.end, n.attributes.end, ` ${p.name}={${p.value}}`]);
+        }
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(o);
+  }
+  for (const [o, e] of edits) if (e.length) files[rel(o.fileName)] = applyEdits(o.text, e);
+  return { files, report: { kind: component ? 'component' : 'function', sites, skipped } };
+}
+
 // Does `name` in one text behave like `name` in another (e.g. the shared version now vs a copy as it was)?
 function sameBehaviour() {
   const os = require('os');
@@ -1100,7 +1195,7 @@ function sameBehaviour() {
 }
 
 try {
-  const ops = { extract, compare, share, share_hook: shareHook, unify, relocate, dedupe, same_behaviour: sameBehaviour };
+  const ops = { extract, compare, share, share_hook: shareHook, unify, relocate, dedupe, same_behaviour: sameBehaviour, signature };
   if (!ops[input.op]) throw new Error(`unknown op ${input.op}`);
   process.stdout.write(JSON.stringify({ ok: true, ...ops[input.op]() }));
 } catch (e) {

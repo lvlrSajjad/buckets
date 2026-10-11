@@ -2286,7 +2286,7 @@ TASK_SCHEMA = {
     "properties": {
         "id": {"type": "string"},
         "file": {"type": "string"},
-        "action": {"type": "string", "enum": ["edit", "create", "delete", "move", "share", "unify", "relocate", "dedupe"]},
+        "action": {"type": "string", "enum": ["edit", "create", "delete", "move", "share", "unify", "relocate", "dedupe", "signature"]},
         "instructions": {"type": "string"},
         "done_when": {"type": "string"},
         "read_first": {"type": "array", "items": {"type": "string"}},
@@ -2300,6 +2300,8 @@ TASK_SCHEMA = {
         "name": {"type": "string"},
         "select": {"type": "array", "items": {"type": "string"}},
         "from": {"type": "array", "items": {"type": "string"}},
+        "param": {"type": "object", "properties": {"name": {"type": "string"}, "type": {"type": "string"},
+                                                   "default": {"type": "string"}, "value": {"type": "string"}}},
     },
     "required": ["id", "file", "action", "instructions", "done_when", "where", "edits"],
 }
@@ -2468,6 +2470,10 @@ text and the files it opens itself, and it cannot run commands):
   copies of a function with an import of the one that stays: "file" is where it lives (exported; plan it
   after a relocate when the function is being moved), "select" its name(s); the copies are found, and
   identical ones are replaced, copies that differ are reported. Don't hand-edit those copies.
+- Adding a parameter to a function, or a prop to a component, used across the app: plan action "signature":
+  "file" defines it, "where" its name, "param" {{"name", "type", "default" (keeps existing callers
+  working), "value" (what every call or use should pass, if anything)}}. The definition and every use are
+  updated mechanically; plan separate tasks only for uses that need a different value or new logic.
 - Instructions must be self-contained and concrete: name the functions, types and exports to add
   or change, their signatures, and where in the file they go. Include exact code when it's short.
 - "read_first" lists other files the coder should open for context (types it must use, patterns to
@@ -2926,6 +2932,15 @@ def validate_move(t: dict, f: str, repo: Path, task_id: str) -> dict:
             raise ValueError("move: \"name\" (the new hook) and \"where\" (the component it comes from) must be names")
         return {**base, "file": f, "into": into, "name": name, "where": where.split(".")[-1],
                 "select": "logic" if not select or [x.lower() for x in select] == ["logic"] else select}
+    if t["action"] == "signature":
+        param = t.get("param") if isinstance(t.get("param"), dict) else {}
+        where = str(t.get("where") or "").strip().split(".")[-1]
+        if not f.endswith(MOVABLE) or not (repo / f).is_file() or not re.fullmatch(r"[A-Za-z_$][\w$]*", where) \
+                or not re.fullmatch(r"[A-Za-z_$][\w$]*", str(param.get("name") or "")):
+            raise ValueError("signature: \"file\" defines the function or component, \"where\" its name, \"param\" "
+                             "{name, type, default, value}: the new parameter or prop")
+        return {**base, "file": f, "where": where, "param": {k: str(param[k]) for k in ("name", "type", "default", "value")
+                                                            if param.get(k) not in (None, "")}}
     if t["action"] == "dedupe":
         copies = [inside(x) for x in t.get("from") or [] if (repo / clean_path(str(x))).is_file()]
         if not f.endswith(MOVABLE) or not select:  # the file may come from a relocate earlier in the plan
@@ -2958,7 +2973,7 @@ def validate_tasks(tasks: list, repo: Path, max_tasks: int, prefix: str) -> list
         if not f or f.startswith("/") or ".." in f.split("/"):
             raise ValueError(f"task file path {t['file']!r} must be relative to the repo root")
         action = t["action"]
-        if action in ("move", "share", "unify", "relocate", "dedupe"):
+        if action in ("move", "share", "unify", "relocate", "dedupe", "signature"):
             try:
                 out.append(validate_move(t, f, repo, f"{prefix}{len(out) + 1}"))
             except ValueError as e:
@@ -3442,6 +3457,13 @@ class Buckets:
         leads = request_leads(self.repo, self.request, files)
         if leads:
             parts.append("Where the request's words appear (found mechanically):\n" + leads)
+        sig = self.signature_hint()
+        if sig:
+            parts.append(f"`{sig['name']}` ({sig['kind']}, defined in {sig['file']}) is used at {len(sig['sites'])} place(s): "
+                         + ", ".join(sig["sites"][:20]) + (" …" if len(sig["sites"]) > 20 else "")
+                         + ". A \"signature\" task adds the parameter or prop to it and to every use, mechanically: "
+                         + json.dumps({"file": sig["file"], "action": "signature", "where": sig["name"],
+                                       "param": {"name": "…", "type": "…", "default": "…", "value": "…"}}))
         rh = self.relocate_hint()
         if rh:
             r, t = rh["report"], rh["task"]
@@ -3511,6 +3533,31 @@ class Buckets:
                                                                f"now at {head[:8]}, so some of it may be fixed already)")
         say(f"  {ok()} read the failed CI run on {branch}: {r['name']}{stale}")
         return f"CI run that failed: {r['name']}: {r['displayTitle']} ({r['url']}){stale}\n{log}"
+
+    def signature_hint(self) -> dict | None:
+        """For a request to add a parameter, prop, argument or option to a named function or component: where
+        it's defined and every place it's used (a dry run of the signature change)."""
+        if hasattr(self, "_signature_hint"):
+            return self._signature_hint
+        self._signature_hint = None
+        if not re.search(r"\b(add|adding|new|pass|support)\b.{0,60}\b(param\w*|props?|argument|arg|option)\b", self.request, re.I):
+            return None
+        words = set(request_names(self.request)) | set(re.findall(r"`([A-Za-z_$][\w$]*)`", self.request)) \
+            | set(re.findall(r"\b([A-Z][a-z]+[A-Z]\w*|[a-z]+[A-Z]\w*|[A-Z][a-z]{2,})\b", self.request))
+        for f, decls in self.index.outline().items():
+            if not f.endswith(MOVABLE):
+                continue
+            for d in decls:
+                if d["name"] in words:
+                    r = ts_moves(self.repo, {"op": "signature", "file": f, "name": d["name"], "param": {"name": "probe"},
+                                             "importers": self.index.importers([f]).get(f, [])}, timeout=120)
+                    if r.get("ok"):
+                        self._signature_hint = {"name": d["name"], "file": f, "kind": r["report"]["kind"],
+                                                "sites": r["report"]["sites"]}
+                        say(f"  {ok()} {d['name']} ({r['report']['kind']}) is used at {len(r['report']['sites'])} place(s); "
+                            f"a signature change can update them all")
+                        return self._signature_hint
+        return None
 
     def relocate_hint(self) -> dict | None:
         """When the request asks to move named top-level declarations from one file into another (a util):
@@ -4519,7 +4566,7 @@ class Buckets:
         """One file's task: the planner's exact edits applied directly when they fit, else a coder
         session. Anything else the coder touches is put back as it was."""
         self.involved = list(dict.fromkeys(getattr(self, "involved", []) + [task["file"]]))
-        if task["action"] in ("move", "share", "unify", "relocate", "dedupe"):
+        if task["action"] in ("move", "share", "unify", "relocate", "dedupe", "signature"):
             return self.apply_move(task, commit)
         if task["action"] == "delete":  # the coder can't delete files; nothing to decide here anyway
             git(self.repo, "rm", "-q", "--", task["file"])
@@ -4653,6 +4700,27 @@ class Buckets:
                 git(self.repo, "add", "-A", "--", *written)
                 git(self.repo, "commit", "--no-verify", "-q", "-m", f"buckets {task['id']}: relocate ({note[:200]})\n\n{note}")
             say(f"  {ok()} {task['id']} relocate ({int(time.time() - start)}s): {paint(note[:220], 'dim')}")
+            return {**task, "status": "done", "note": f"DONE: {note}"}
+        elif task["action"] == "signature":
+            d = ts_moves(self.repo, {"op": "signature", "file": task["file"], "name": task["where"], "param": task["param"],
+                                     "importers": self.index.importers([task["file"]]).get(task["file"], [])})
+            if not d.get("ok"):
+                return {**task, "status": "failed", "note": f"BLOCKED: {d.get('error', 'signature failed')}"}
+            written = []
+            for f, text in d["files"].items():
+                (self.repo / f).write_text(text)
+                written.append(f)
+            r, prm = d["report"], task["param"]
+            note = (f"added {prm['name']}{': ' + prm['type'] if prm.get('type') else ''}"
+                    + (f" (default {prm['default']})" if prm.get("default") else " (optional)")
+                    + f" to the {r['kind']} {task['where']}; {len(r['sites'])} use(s)"
+                    + (f", each now passing {prm['value']}" if prm.get("value") else ", unchanged (they get the default)")
+                    + (f"; left for you: {'; '.join(r['skipped'])}" if r["skipped"] else ""))
+            self.involved = list(dict.fromkeys(self.involved + written))
+            if commit:
+                git(self.repo, "add", "-A", "--", *written)
+                git(self.repo, "commit", "--no-verify", "-q", "-m", f"buckets {task['id']}: signature ({note[:200]})\n\n{note}")
+            say(f"  {ok()} {task['id']} signature ({int(time.time() - start)}s): {paint(note[:220], 'dim')}")
             return {**task, "status": "done", "note": f"DONE: {note}"}
         elif task["action"] == "dedupe":
             copies = task.get("from") or copies_of(self.repo, task["select"], (task["file"],))

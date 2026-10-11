@@ -2209,6 +2209,37 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
             self.assertEqual(b.code_task(delete)["status"], "done")
         self.assertFalse((self.repo / "src/a.ts").exists())
 
+    def test_signature_changes_reach_every_use(self):
+        files = {
+            "sig/jsx.d.ts": "declare namespace JSX { interface Element {} interface IntrinsicElements { [k: string]: any } }\n",
+            "sig/price.ts": "export const price = (n: number, digits?: number) => n.toFixed(digits ?? 2)\n",
+            "sig/badge.tsx": "export const Badge = ({ label }: { label: string }) => <b>{label}</b>\n",
+            "sig/page.tsx": 'import { price } from "./price"\nimport { Badge } from "./badge"\n'
+                            'export const Page = () => <div>{price(1)}{price(2, 1)}<Badge label="x" /></div>\n',
+        }
+        for f, t in files.items():
+            (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / f).write_text(t)
+        d = buckets.ts_moves(self.repo, {"op": "signature", "file": "sig/price.ts", "name": "price", "importers": ["sig/page.tsx"],
+                                         "param": {"name": "currency", "type": "string", "default": '"USD"', "value": '"EUR"'}})
+        self.assertTrue(d["ok"], d)
+        self.assertIn('digits?: number, currency: string = "USD")', d["files"]["sig/price.ts"])
+        self.assertIn('price(1, undefined, "EUR")', d["files"]["sig/page.tsx"])          # the skipped optional is filled
+        self.assertIn('price(2, 1, "EUR")', d["files"]["sig/page.tsx"])
+        for f, t in d["files"].items():
+            (self.repo / f).write_text(t)
+        c = buckets.ts_moves(self.repo, {"op": "signature", "file": "sig/badge.tsx", "name": "Badge", "importers": ["sig/page.tsx"],
+                                         "param": {"name": "tone", "type": '"info" | "warn"', "default": '"info"', "value": '"warn"'}})
+        self.assertTrue(c["ok"], c)
+        self.assertEqual(c["report"]["kind"], "component")
+        self.assertIn('{ label, tone = "info" }: { label: string; tone?: "info" | "warn" }', c["files"]["sig/badge.tsx"])
+        self.assertIn('<Badge label="x" tone={"warn"} />', c["files"]["sig/page.tsx"])
+        for f, t in c["files"].items():
+            (self.repo / f).write_text(t)
+        tsc = subprocess.run(["node", str(TS_PKG / "bin" / "tsc"), "--noEmit", "--strict", "--ignoreConfig", "--jsx", "preserve",
+                              "sig/jsx.d.ts", "sig/price.ts", "sig/badge.tsx", "sig/page.tsx"], cwd=self.repo, capture_output=True, text=True)
+        self.assertEqual(tsc.returncode, 0, tsc.stdout + tsc.stderr)
+
     def test_shared_hook_names(self):
         self.assertEqual(buckets.shared_hook_names("a/b/billing-shared.tsx", "a/b/x/use-billing-screen.tsx"),
                          ("a/b/use-billing-screen-shared.ts", "useBillingScreenShared"))
