@@ -3478,8 +3478,8 @@ class Buckets:
         return data
 
     def prefer_move(self, plan: dict) -> dict:
-        """A plan that would retype the moved code (a new file with no exact code) gets the mechanical
-        move instead; the planner's other tasks stay. Next to a move or share, edit tasks on its files go,
+        """A plan that would retype the moved code (a task writing the new file, with or without exact
+        edits: copying 1,000 lines into an edit is still retyping) gets the mechanical move instead; the planner's other tasks stay. Next to a move or share, edit tasks on its files go,
         even with exact edits: it already rewires them (one such task spent 9 minutes changing nothing,
         another replaced each shared declaration by hand), and what's left is for the review."""
         moves = [t for t in plan["tasks"] if t["action"] in ("move", "share")]
@@ -3494,7 +3494,7 @@ class Buckets:
         if not any(t["action"] == "share" for t in plan["tasks"]):
             for h in self.share_hints():
                 ht = h["task"]
-                if ht and any(t["file"] == ht["file"] and not t.get("edits") for t in plan["tasks"]):
+                if ht and any(t["file"] == ht["file"] and t["action"] in ("create", "edit") for t in plan["tasks"]):
                     say(f"  {warn()} the plan would retype the shared code; sharing it mechanically instead")
                     rest = [t for t in plan["tasks"] if t["file"] != ht["file"]]
                     fixed = validate_move(dict(ht), ht["file"], self.repo, "T1")
@@ -3503,10 +3503,10 @@ class Buckets:
         if not hint:
             return plan
         into, src = hint["task"]["into"], hint["task"]["file"]
-        if not any(t["file"] == into and not t.get("edits") for t in plan["tasks"]):
+        if not any(t["file"] == into and t["action"] in ("create", "edit") for t in plan["tasks"]):
             return plan
         say(f"  {warn()} the plan would retype the moved code; doing it as a mechanical move instead")
-        rest = [t for t in plan["tasks"] if t["file"] not in (into, src) or t.get("edits")]
+        rest = [t for t in plan["tasks"] if t["file"] not in (into, src)]
         return self.prefer_move({**plan, "tasks": [hint["task"]] + rest})
 
     def context(self, with_map: bool = True) -> str:
