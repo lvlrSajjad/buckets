@@ -452,12 +452,23 @@ function declarations(sf) {
     if (name) {
       const stmt = ts.isVariableDeclaration(n) ? n.parent.parent : n;
       list.push({ name, depth, parent, node: n, stmt, lo: lineOf(sf, stmt.getStart(sf)), hi: lineOf(sf, stmt.end),
-                  flat: stmt.getText(sf).replace(/\s+/g, '').replace(/[;,]+([})\]])/g, '$1') });
+                  flat: normalized(stmt, sf) });
     }
     ts.forEachChild(n, (c) => visit(c, depth + (name ? 1 : 0), name || parent));
   };
   visit(sf, 0, null);
   return list;
+}
+
+// A declaration as TypeScript prints it, without spacing: two copies that differ only in formatting
+// (semicolons, line breaks, quotes' spacing) print the same.
+const printer = ts.createPrinter({ removeComments: true });
+function normalized(node, sf) {
+  try {
+    return printer.printNode(ts.EmitHint.Unspecified, node, sf).replace(/\s+/g, '');
+  } catch (e) {
+    return node.getText(sf).replace(/\s+/g, '');
+  }
 }
 
 function similarity(a, b) {
@@ -521,7 +532,7 @@ function share() {
     for (const name of [...moving]) {
       const sa = topDecl(A, name), sb = topDecl(B, name);
       const why = !sa || !sb ? 'not a module-level declaration in both files'
-        : sa.getText(A).replace(/\s+/g, '') !== sb.getText(B).replace(/\s+/g, '') ? 'not identical in both files'
+        : normalized(sa, A) !== normalized(sb, B) ? 'not identical in both files'
         : isExported(sa) || isExported(sb) ? 'exported from the screen; other files may import it from there' : null;
       if (why) { moving.delete(name); skipped.push({ name, why }); changed = true; continue; }
       for (const { sym } of references(checker, sa)) {
