@@ -3544,9 +3544,9 @@ class Buckets:
         if converted != plan["tasks"]:
             n = sum(t["action"] == "unify" for t in converted) - sum(t["action"] == "unify" for t in plan["tasks"])
             say(f"  {paint('as unify', 'dim')}: {n} edit task(s) that make near copies match, copied exactly instead")
-            order = {"unify": 0}
-            converted = sorted(converted, key=lambda t: order.get(t["action"], 1))
-            plan = {**plan, "tasks": converted}
+        # Unifies always run first, so the share after them finds those copies identical.
+        converted = sorted(converted, key=lambda t: 0 if t["action"] == "unify" else 1)
+        plan = {**plan, "tasks": [{**t, "id": f"T{n}"} for n, t in enumerate(converted, 1)]}
         moves = [t for t in plan["tasks"] if t["action"] in ("move", "share")]
         if moves:
             mine = {f for t in moves for f in ([t["file"], t["into"]] if t["action"] == "move" else [t["file"], *t["from"]])}
