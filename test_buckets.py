@@ -3885,5 +3885,19 @@ class Bisect(unittest.TestCase):
         self.assertEqual(subprocess.run(["git", "worktree", "list"], cwd=repo, capture_output=True, text=True).stdout.count("\n"), 1)
 
 
+class Decisions(unittest.TestCase):
+    def test_judgment_calls_are_picked_from_the_run_log(self):
+        run = Path(tempfile.mkdtemp())
+        (run / "run.log").write_text("[00:01] Step 3/5 · Reading the code and planning\n"
+                                     "[07:08]   as unify: 2 edit task(s) that make near copies match, copied exactly instead\n"
+                                     "[07:08]   dropped T4, T5: the move already does that\n"
+                                     "[07:12]   \u2713 T1 unify (4s): made onAddressPress identical\n"
+                                     "[13:41]   \u26a0 round 2 broke typecheck, which passed before it; undid that round and stopped here\n")
+        self.assertEqual(buckets.decisions(run), [
+            "as unify: 2 edit task(s) that make near copies match, copied exactly instead",
+            "dropped T4, T5: the move already does that",
+            "round 2 broke typecheck, which passed before it; undid that round and stopped here"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6930,6 +6930,25 @@ def render_pick_report(b, picks, commits, rounds, verdict, checks, baseline, now
     return "\n".join(lines)
 
 
+DECISIONS = re.compile(r"(instead\b|^dropped |^as unify|become a dedupe|undid that round|^added a dedupe|kept in each|"
+                       r"module state|treating them as real|didn't hold up|stopping here|answering from the facts)", re.I)
+
+
+def decisions(run_dir: Path) -> list[str]:
+    """The judgment calls buckets made on its own during a run (plans swapped for mechanical tools, tasks dropped,
+    rounds undone, claims weighed), from the run's log: for the owner to look at first."""
+    try:
+        text = (run_dir / "run.log").read_text(errors="replace")
+    except OSError:
+        return []
+    out = []
+    for line in text.splitlines():
+        line = strip_ansi(re.sub(r"^\[[\d:]+\]\s*", "", line)).strip().lstrip("⚠✓✗– ").strip()
+        if DECISIONS.search(line) and line not in out:
+            out.append(line[:300])
+    return out
+
+
 def render_report(b: Buckets, plan, rounds, verdict, checks, baseline, now, branch, base, start_branch) -> str:
     done = bool(verdict and verdict["done"])
     lines = [
@@ -6957,6 +6976,9 @@ def render_report(b: Buckets, plan, rounds, verdict, checks, baseline, now, bran
         for r in results:
             note = r["note"].replace("|", "\\|")[:160]
             lines.append(f"| {i} | {r['id']} {r['action']} | `{r['file']}` | {r['status']} | {note} |")
+    made = decisions(b.run.dir)
+    if made:
+        lines += ["", "## Decided without asking (look at these first)", ""] + [f"- {d}" for d in made[:20]]
     lines += ["", "## Checks", "", "| Check | Before | After |", "|---|---|---|"]
     for name in checks:
         before = "pass" if baseline.get(name, {}).get("ok") else "FAIL"
