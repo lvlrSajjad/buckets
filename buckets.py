@@ -2774,7 +2774,7 @@ MERGE_WORDS = re.compile(r"\b(merg\w*|shar\w*|duplicat\w*|common|diverg\w*|join\
 def shared_hook_names(shared_file: str, variant: str) -> tuple[str, str]:
     """Where the shared hook of two variants goes and what it's called: next to the shared file,
     `use-<screen>-shared.ts` and `use<Screen>Shared`."""
-    stem = re.sub(r"\.(tsx?|jsx?)$", "", PurePosixPath(variant).name)
+    stem = re.sub(r"^use[-_]", "", re.sub(r"\.(tsx?|jsx?)$", "", PurePosixPath(variant).name))
     folder = PurePosixPath(shared_file).parent
     pascal = "".join(w[:1].upper() + w[1:] for w in re.split(r"[-_.]", stem) if w)
     return str(folder / f"use-{stem}-shared.ts"), f"use{pascal}Shared"
@@ -2805,7 +2805,11 @@ def variants_text(cmp: dict, limit: int = 3500) -> str:
         return [p for p in pairs if p["status"] == status and (top is None or p.get("module_level") == top)]
     out = [f"Two variants of one file, compared declaration by declaration: `{cmp['a']}` ({cmp['lines'][0]} lines) "
            f"and `{cmp['b']}` ({cmp['lines'][1]} lines)."]
-    same_top = names("identical", True)
+    same_top = [p for p in names("identical", True) if not p.get("mutable")]
+    state = [p for p in names("identical", True) if p.get("mutable")]
+    if state:
+        out.append("Identical module state (module-level `let`/`var`; it can move only with everything that assigns "
+                   "it): " + ", ".join(f"`{p['name']}`" for p in state))
     if same_top:
         out.append("Identical top-level declarations (a \"share\" task can move them into one file): "
                    + ", ".join(f"`{p['name']}`" for p in same_top))
@@ -3432,7 +3436,10 @@ class Buckets:
             cmp = ts_moves(self.repo, {"op": "compare", "a": a, "b": b}, timeout=120)
             if not cmp.get("ok"):
                 continue
-            same = [p["name"] for p in cmp["pairs"] if p["status"] == "identical" and p.get("module_level")]
+            same = [p["name"] for p in cmp["pairs"] if p["status"] == "identical" and p.get("module_level")
+                    and not p.get("mutable")]
+            same += [p["name"] for p in cmp["pairs"] if p["status"] == "identical" and p.get("module_level")
+                     and p.get("mutable")]  # tried too: they move when everything assigning them does
             inner = [p for p in cmp["pairs"] if p["status"] == "identical" and p.get("depth") == 1]
             parent = str(PurePosixPath(a).parent.parent)
             into = next((n for n in named_new if n.startswith(parent + "/")), None) \

@@ -742,7 +742,8 @@ function compare() {
     if (!b) { pairs.push({ name: a.name, parent: a.parent, status: 'only_a', a: [a.lo, a.hi] }); continue; }
     const r = similarity(a.flat, b.flat);
     const status = r === 1 ? 'identical' : r >= 0.85 ? 'near' : 'different';
-    const p = { name: a.name, parent: a.parent, depth: a.depth, status, similarity: Math.round(r * 100) / 100, a: [a.lo, a.hi], b: [b.lo, b.hi],
+    const mutable = ts.isVariableStatement(a.stmt) && !(a.stmt.declarationList.flags & ts.NodeFlags.Const);
+    const p = { name: a.name, parent: a.parent, depth: a.depth, status, similarity: Math.round(r * 100) / 100, a: [a.lo, a.hi], b: [b.lo, b.hi], mutable,
                 module_level: a.depth === 0 && b.depth === 0 };
     if (status === 'near') p.diff = lineDiff(a.stmt.getText(A), b.stmt.getText(B));
     pairs.push(p);

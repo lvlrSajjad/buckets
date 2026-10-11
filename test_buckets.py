@@ -1835,6 +1835,11 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
                                            "names": ["onlyA"], "into": "src/x/use-other.ts", "name": "useOther"})
         self.assertFalse(bad["ok"])
 
+    def test_shared_hook_names(self):
+        self.assertEqual(buckets.shared_hook_names("a/b/create-invoice-shared.tsx", "a/b/x/use-create-invoice-screen.tsx"),
+                         ("a/b/use-create-invoice-screen-shared.ts", "useCreateInvoiceScreenShared"))
+        self.assertEqual(buckets.shared_hook_names("a/rfp-shared.tsx", "a/x/rfp-details-screen.tsx")[1], "useRfpDetailsScreenShared")
+
     def test_validation(self):
         bad = {"id": "T1", "file": "src/thing-screen.tsx", "action": "move", "where": "ThingScreen", "into": "src/ui.tsx",
                "name": "useThing", "select": [], "instructions": "", "done_when": "", "edits": []}
