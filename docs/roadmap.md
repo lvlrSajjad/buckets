@@ -7,8 +7,7 @@ behind these are in [field-notes.md](field-notes.md).
 
 Size: S under ~1 h, M a few hours, L a day or more. Each item is tested live (the work repo left as found).
 
-**0. Now:** decide what to do about app-a-specific detail in this public repo's field notes (make the repo
-private, or move the app-a notes to a private file).
+**0.** ~~Public-repo detail~~ **done**: work-repo specifics moved to git-ignored `docs/private/`.
 
 **Tier 1: gaps in what exists (trust)** · **done** (field notes 25)
 1. Follow-ups build on the previous run's unmerged branch ("now fix w in x, z" starts from `main` today). S
