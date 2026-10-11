@@ -3582,10 +3582,13 @@ class Buckets:
             comp = max(self.index.outline().get(f, []), key=lambda d: d["end"] - d["line"], default=None)
             if not comp:
                 continue
-            words = {w.lower() for w in re.findall(r"[A-Za-z]+", self.request)}
+            prose = re.sub(r"[\w@.+\-]*/[\w@.+\-/]*", " ", self.request)  # words in paths don't name a part
+            words = {w.lower() for w in re.findall(r"[A-Za-z]+", prose)}
+            def near(a: str, b: str) -> bool:  # small misspellings in code count ("Refrence" for "reference")
+                return a == b or (len(a) >= 5 and len(b) >= 5 and difflib.SequenceMatcher(None, a, b).ratio() >= 0.85)
             def score(h):
                 parts = [p.lower() for p in re.findall(r"[A-Z][a-z]+", h[6:])]
-                return sum(p in words for p in parts) + (5 if h in self.request else 0)
+                return sum(any(near(p, w) for w in words) for p in parts) + (5 if h in self.request else 0)
             pick = max(helpers, key=score)
             hint = {"file": f, "where": comp["name"], "helpers": helpers}
             if score(pick) > 0:
