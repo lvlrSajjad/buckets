@@ -261,25 +261,24 @@ function typeText(checker, decl, at, target) {
 
 // ---------------------------------------------------------------- extract
 
-function extract() {
-  const file = abs(input.file);
-  const target = abs(input.into);
-  const hook = input.name;
-  if (fs.existsSync(target)) throw new Error(`${input.into} already exists`);
-  const { checker, sources: [sf] } = program([input.file]);
+// What moving a component's statements into a hook means for one file: which statements move and
+// which must stay, the module helpers that come along, the hook's parameters and returns, and
+// builders for the hook's text and the file's new text.
+function analyze(sf, checker, relFile, fnName, select, target, hook) {
+  const file = abs(relFile);
   const text = sf.text;
-  const fn = findFunction(sf, input.function);
-  if (!fn) throw new Error(`no function or component named ${input.function} in ${input.file}`);
+  const fn = findFunction(sf, fnName);
+  if (!fn) throw new Error(`no function or component named ${fnName} in ${relFile}`);
   const body = fn.body.statements;
   const component = topStatement(sf, fn);
 
   // What moves: the named statements and line ranges, or (select "logic") every statement that
   // renders nothing and doesn't return.
-  const wanted = new Set(Array.isArray(input.select) ? input.select.filter((s) => !/^\d+(-\d+)?$/.test(s)) : []);
-  const ranges = Array.isArray(input.select) ? input.select.filter((s) => /^\d+(-\d+)?$/.test(s))
+  const wanted = new Set(Array.isArray(select) ? select.filter((s) => !/^\d+(-\d+)?$/.test(s)) : []);
+  const ranges = Array.isArray(select) ? select.filter((s) => /^\d+(-\d+)?$/.test(s))
     .map((s) => s.split('-').map(Number)).map(([a, b]) => [a, b || a]) : [];
   const picked = (stmt) => {
-    if (input.select === 'logic') return !hasJsx(stmt) && !hasOwnReturn(stmt);
+    if (select === 'logic') return !hasJsx(stmt) && !hasOwnReturn(stmt);
     const line = lineOf(sf, stmt.getStart(sf));
     return declaredBy(stmt).some((id) => wanted.has(id.text)) || ranges.some(([a, b]) => line >= a && line <= b);
   };
@@ -387,7 +386,101 @@ function extract() {
       paramSyms.set(sym, d);
     }
   }
-  const paramList = [...paramSyms.entries()].map(([sym, d]) => ({ name: sym.name, type: typeText(checker, d, fn, target) }));
+  // A parameter set by a statement that's safe to run again (a context hook like useStores(), or a
+  // destructure of something that is) is re-derived inside the hook instead of passed: no long
+  // inferred store types in the signature. Stateful hooks (useState, useRef…) never are.
+  const STATEFUL = /^use(State|Ref|Reducer|Memo|Callback|Transition|Id|Optimistic|ActionState|SyncExternalStore)$/;
+  const rederivable = new Map(); // statement -> names the hook needs from it
+  const canRederive = (stmt, seen = new Set()) => {
+    if (!stmt || seen.has(stmt) || !ts.isVariableStatement(stmt) || stmt.declarationList.declarations.length !== 1) return false;
+    const decl = stmt.declarationList.declarations[0];
+    if (!decl.initializer || hasJsx(stmt) || (stmt.declarationList.flags & ts.NodeFlags.Let)) return false;
+    seen.add(stmt);
+    let ok = true;
+    const visit = (n) => {
+      if (!ok) return;
+      if (ts.isFunctionLike(n)) { ok = false; return; }
+      if (ts.isCallExpression(n)) {
+        const callee = ts.isIdentifier(n.expression) ? n.expression.text : '';
+        if (!/^use[A-Z]/.test(callee) || STATEFUL.test(callee)) { ok = false; return; }
+      }
+      if (ts.isNewExpression(n) || ts.isAwaitExpression(n)) { ok = false; return; }
+      ts.forEachChild(n, visit);
+    };
+    visit(decl.initializer);
+    if (!ok) return false;
+    for (const { sym } of references(checker, decl.initializer)) {
+      const d = sym.declarations && sym.declarations[0];
+      if (!d || d.getSourceFile() !== sf || !within(d, fn.body)) continue;
+      const ds = declStmt(d);
+      if (ds && !moved.has(ds) && !canRederive(ds, seen)) return false;
+    }
+    return true;
+  };
+  const prelude = new Set();
+  const needFrom = (stmt, name) => {
+    if (!rederivable.has(stmt)) rederivable.set(stmt, new Set());
+    rederivable.get(stmt).add(name);
+    const decl = stmt.declarationList.declarations[0];
+    for (const { sym } of references(checker, decl.initializer)) {
+      const d = sym.declarations && sym.declarations[0];
+      if (!d || d.getSourceFile() !== sf || !within(d, fn.body)) continue;
+      const ds = declStmt(d);
+      if (ds && !moved.has(ds)) needFrom(ds, sym.name);
+    }
+    prelude.add(stmt);
+  };
+  for (const [sym, d] of [...paramSyms.entries()]) {
+    const ds = declStmt(d);
+    if (ds && ds.pos < first.pos && canRederive(ds)) {
+      needFrom(ds, sym.name);
+      paramSyms.delete(sym);
+    }
+  }
+  const preludeText = body.filter((st) => prelude.has(st)).map((st) => {
+    const decl = st.declarationList.declarations[0];
+    const want = rederivable.get(st);
+    const ind = text.slice(lineStart(text, st.getStart(sf)), st.getStart(sf)).match(/^\s*/)[0];
+    if (ts.isObjectBindingPattern(decl.name)) {
+      const keep = decl.name.elements.filter((e) => bindingNames(e.name).some((id) => want.has(id.text)));
+      return `${ind}const { ${keep.map((e) => e.getText(sf)).join(', ')} } = ${decl.initializer.getText(sf)}\n`;
+    }
+    return text.slice(lineStart(text, st.getStart(sf)), lineEnd(text, st.end));
+  }).join('');
+  for (const st of prelude) for (const { sym } of references(checker, st.declarationList.declarations[0].initializer)) {
+    if (imports.has(sym)) usedImports.add(imports.get(sym));
+  }
+  // A prop's type comes from the component's own props type (`Props["navigation"]`), with that type's
+  // names imported; another local keeps its printed type when it's plain, else `any` with a note.
+  let propsType = fn.parameters[0] && fn.parameters[0].type;
+  if (!propsType) {
+    let n = fn;
+    while (n && !ts.isVariableDeclaration(n)) n = n.parent;
+    const t = n && n.type;
+    if (t && ts.isTypeReferenceNode(t) && /(^|\.)(FunctionComponent|FC|VFC|ComponentType)$/.test(t.typeName.getText(sf))
+        && t.typeArguments && t.typeArguments.length) propsType = t.typeArguments[0];
+  }
+  const propNames = new Set(fn.parameters[0] ? bindingNames(fn.parameters[0].name).map((id) => id.text) : []);
+  const typeOf = (sym, d) => {
+    if (propsType && propNames.has(sym.name) && ts.isBindingElement(d)) {
+      const key = d.propertyName ? d.propertyName.getText(sf) : sym.name;
+      const member = ts.isTypeLiteralNode(propsType)
+        && propsType.members.find((m) => ts.isPropertySignature(m) && m.name.getText(sf) === key && m.type);
+      const typeNode = member ? member.type : propsType;
+      for (const { sym: s2 } of references(checker, typeNode)) if (imports.has(s2)) usedImports.add(imports.get(s2));
+      if (member) return member.type.getText(sf) + (member.questionToken && member.type.kind !== ts.SyntaxKind.AnyKeyword ? ' | undefined' : '');
+      return `${propsType.getText(sf)}["${key}"]`;
+    }
+    if (d.type) {
+      for (const { sym: s2 } of references(checker, d.type)) if (imports.has(s2)) usedImports.add(imports.get(s2));
+      return d.type.getText(sf);
+    }
+    const t = typeText(checker, d, fn, target);
+    if (!/import\(/.test(t) && t.length <= 120) return t;
+    notes.push(`\`${sym.name}\` is passed in typed \`any\`: its inferred type is too long to write out`);
+    return 'any';
+  };
+  const paramList = [...paramSyms.entries()].map(([sym, d]) => ({ name: sym.name, type: typeOf(sym, d) }));
   for (const { node, sym } of movedList.flatMap((s) => refsOf.get(s))) {
     if (paramSyms.has(sym) && isAssigned(node)) throw new Error(`the moved code assigns to \`${sym.name}\`, which stays`);
   }
@@ -398,45 +491,138 @@ function extract() {
   const stillUsed = new Set();
   for (const { sym } of keptRefs) if (imports.has(sym)) stillUsed.add(imports.get(sym));
 
-  // The hook's file: imports, the helpers that came along (exported when the component still uses
-  // them), then the hook with the moved statements exactly as they were.
   const indent = text.slice(lineStart(text, first.getStart(sf)), first.getStart(sf)).match(/^\s*/)[0];
   const chunk = (s) => text.slice(fullStart(sf, s), lineEnd(text, s.end)).replace(/\n*$/, '\n');
-  const helperText = moduleMoved.map((s) => {
+  const exported = (s, names) => {
     const t = chunk(s);
-    if (!declaredBy(s).some((id) => sharedModule.includes(id.text))) return t;
+    if (!declaredBy(s).some((id) => names.includes(id.text))) return t;
     const at = s.getStart(sf) - fullStart(sf, s);
     return t.slice(0, at) + 'export ' + t.slice(at);
-  });
-  const sig = paramList.length
-    ? `{ ${paramList.map((p) => p.name).join(', ')} }: { ${paramList.map((p) => `${p.name}: ${p.type}`).join('; ')} }` : '';
-  const ret = returns.length ? `\n${indent}return {\n${returns.map((r) => `${indent}  ${r},`).join('\n')}\n${indent}}\n` : '';
-  const hookText = [hookImports.join('\n'), ...helperText, `export function ${hook}(${sig}) {\n`
-    + movedList.map(chunk).join('') + ret + '}\n'].filter(Boolean).join('\n');
-
+  };
+  // The hook's file: imports, the helpers that came along (exported when a component still uses
+  // them), then the hook with the moved statements exactly as they were.
+  const hookText = (rets, exportNames) => {
+    const sig = paramList.length
+      ? `{ ${paramList.map((p) => p.name).join(', ')} }: { ${paramList.map((p) => `${p.name}: ${p.type}`).join('; ')} }` : '';
+    const ret = rets.length ? `\n${indent}return {\n${rets.map((r) => `${indent}  ${r},`).join('\n')}\n${indent}}\n` : '';
+    return [hookImports.join('\n'), ...moduleMoved.map((s) => exported(s, exportNames)),
+            `export function ${hook}(${sig}) {\n` + preludeText + movedList.map(chunk).join('') + ret + '}\n'].filter(Boolean).join('\n');
+  };
   // The component's file: the moved statements become one call; helpers and unused imports go.
-  const edits = [];
-  const call = `${hook}(${paramList.length ? `{ ${paramList.map((p) => p.name).join(', ')} }` : ''})`;
-  const callText = returns.length > 3
-    ? `${indent}const {\n${returns.map((r) => `${indent}  ${r},`).join('\n')}\n${indent}} = ${call}\n`
-    : returns.length ? `${indent}const { ${returns.join(', ')} } = ${call}\n` : `${indent}${call}\n`;
-  for (const s of movedList) edits.push([fullStart(sf, s), lineEnd(text, s.end), s === first ? callText : '']);
-  for (const s of moduleMoved) edits.push([fullStart(sf, s), lineEnd(text, s.end), '']);
-  pruneImports(sf, stillUsed, edits);
-  const names = [hook, ...sharedModule];
-  edits.push([afterImports(sf), afterImports(sf), `import { ${names.join(', ')} } from "${importPath(file, target)}"\n`]);
-  let finalTarget = target;
-  if (/\.ts$/.test(target) && (movedList.some(hasJsx) || moduleMoved.some(hasJsx))) {
-    finalTarget = target.replace(/\.ts$/, '.tsx');
-    notes.push(`the moved code has JSX, so the new file is ${rel(finalTarget)}`);
+  const fileText = (importPathTo) => {
+    const edits = [];
+    const call = `${hook}(${paramList.length ? `{ ${paramList.map((p) => p.name).join(', ')} }` : ''})`;
+    const callText = returns.length > 3
+      ? `${indent}const {\n${returns.map((r) => `${indent}  ${r},`).join('\n')}\n${indent}} = ${call}\n`
+      : returns.length ? `${indent}const { ${returns.join(', ')} } = ${call}\n` : `${indent}${call}\n`;
+    for (const s of movedList) edits.push([fullStart(sf, s), lineEnd(text, s.end), s === first ? callText : '']);
+    for (const s of moduleMoved) edits.push([fullStart(sf, s), lineEnd(text, s.end), '']);
+    edits.push(...unusedEdits);
+    pruneImports(sf, stillUsed, edits);
+    const names = [hook, ...sharedModule];
+    edits.push([afterImports(sf), afterImports(sf), `import { ${names.join(', ')} } from "${importPath(file, importPathTo)}"\n`]);
+    return applyEdits(text, edits);
+  };
+  // Names a kept destructure set only for the moved code are now unused (lint errors): drop them,
+  // and the whole statement when nothing is left and running it has no effect.
+  const movedUses = new Set(movedList.flatMap((st) => refsOf.get(st)).map(({ sym }) => sym));
+  const removedStmts = new Set();
+  const dropped = new Map(); // statement -> elements dropped
+  for (let changed = true; changed;) {
+    changed = false;
+    const live = keptRefs.filter(({ node }) => ![...removedStmts].some((st) => within(node, st))
+      && ![...dropped.values()].some((els) => els.some((e) => within(node, e))));
+    for (const st of keptList) {
+      if (removedStmts.has(st) || !ts.isVariableStatement(st) || st.declarationList.declarations.length !== 1) continue;
+      const decl = st.declarationList.declarations[0];
+      if (!ts.isObjectBindingPattern(decl.name)) continue;
+      const already = dropped.get(st) || [];
+      const unused = (id) => {
+        const sym = checker.getSymbolAtLocation(id);
+        return !live.some(({ node, sym: s2 }) => s2 === sym && node !== id);
+      };
+      const lost = (id) => movedUses.has(checker.getSymbolAtLocation(id))
+        || [...removedStmts, ...already].length > 0; // made unused by the move or by an earlier removal
+      const more = decl.name.elements.filter((e) => !already.includes(e)
+        && bindingNames(e.name).every((id) => unused(id) && lost(id)));
+      if (!more.length) continue;
+      dropped.set(st, [...already, ...more]);
+      if (dropped.get(st).length === decl.name.elements.length && canRederive(st)) removedStmts.add(st);
+      changed = true;
+    }
   }
+  // Imports still used once the unused statements and names are gone.
+  const finalRefs = keptRefs.filter(({ node }) => ![...removedStmts].some((st) => within(node, st))
+    && ![...dropped.values()].some((els) => els.some((e) => within(node, e))));
+  stillUsed.clear();
+  for (const { sym } of finalRefs) if (imports.has(sym)) stillUsed.add(imports.get(sym));
+  const unusedEdits = [];
+  for (const [st, els] of dropped) {
+    if (removedStmts.has(st)) { unusedEdits.push([fullStart(sf, st), lineEnd(text, st.end), '']); continue; }
+    const decl = st.declarationList.declarations[0];
+    const keep = decl.name.elements.filter((e) => !els.includes(e));
+    if (keep.length) unusedEdits.push([decl.name.getStart(sf), decl.name.end, `{ ${keep.map((e) => e.getText(sf)).join(', ')} }`]);
+  }
+  const hasJsxMoved = movedList.some(hasJsx) || moduleMoved.some(hasJsx);
   return {
-    files: { [input.file]: applyEdits(text, edits), [rel(finalTarget)]: hookText },
+    sf, movedList, keptList, moduleMoved, sharedModule, paramList, returns, notes, hookText, fileText, hasJsxMoved,
     report: {
       moved: movedList.length, kept: keptList.length,
       moved_lines: movedList.reduce((n, s) => n + lineOf(sf, s.end) - lineOf(sf, s.getStart(sf)) + 1, 0),
       params: paramList, returns, helpers_moved: moduleMoved.map(firstName), helpers_shared: sharedModule, notes,
+      rederived: [...prelude].map(firstName),
     },
+  };
+}
+
+function withJsxExtension(target, hasJsx, notes) {
+  if (/\.ts$/.test(target) && hasJsx) {
+    notes.push(`the moved code has JSX, so the new file is ${rel(target.replace(/\.ts$/, '.tsx'))}`);
+    return target.replace(/\.ts$/, '.tsx');
+  }
+  return target;
+}
+
+function extract() {
+  const target = abs(input.into);
+  if (fs.existsSync(target)) throw new Error(`${input.into} already exists`);
+  const { checker, sources: [sf] } = program([input.file]);
+  const a = analyze(sf, checker, input.file, input.function, input.select, target, input.name);
+  const finalTarget = withJsxExtension(target, a.hasJsxMoved, a.notes);
+  return { files: { [input.file]: a.fileText(finalTarget), [rel(finalTarget)]: a.hookText(a.returns, a.sharedModule) },
+           report: a.report };
+}
+
+// The same statements in two variants of a component (identical as TypeScript prints them) become one
+// hook: written from the first copy, returning what either variant still uses; each variant calls it.
+function shareHook() {
+  const [fa, fb] = input.files;
+  const target = abs(input.into);
+  if (fs.existsSync(target)) throw new Error(`${input.into} already exists`);
+  const { checker, sources: [A, B] } = program([fa, fb]);
+  const fnB = input.function_b || input.function;
+  const a = analyze(A, checker, fa, input.function, input.names, target, input.name);
+  const b = analyze(B, checker, fb, fnB, input.names, target, input.name);
+  const key = (list, sf) => list.map((s) => normalized(s, sf));
+  const ka = key(a.movedList, A), kb = key(b.movedList, B);
+  if (ka.length !== kb.length || ka.some((x, i) => x !== kb[i])) {
+    const firstDiff = a.movedList.find((s, i) => ka[i] !== kb[i]) || a.movedList[0];
+    throw new Error(`the statements aren't the same in both variants (first difference near \`${(declaredBy(firstDiff)[0] || {}).text || '?'}\`); make them identical first`);
+  }
+  const helpersB = new Map(b.moduleMoved.map((s) => [declaredBy(s).map((id) => id.text).join(','), normalized(s, B)]));
+  for (const s of a.moduleMoved) {
+    const k = declaredBy(s).map((id) => id.text).join(',');
+    if (helpersB.has(k) && helpersB.get(k) !== normalized(s, A)) throw new Error(`the helper \`${k}\` differs between the variants`);
+    if (!helpersB.has(k)) throw new Error(`the helper \`${k}\` exists in only one variant`);
+  }
+  const pa = a.paramList.map((p) => p.name).sort().join(','), pb = b.paramList.map((p) => p.name).sort().join(',');
+  if (pa !== pb) throw new Error(`the hook would take different parameters in the two variants (${pa || 'none'} vs ${pb || 'none'})`);
+  const returns = [...a.returns, ...b.returns.filter((r) => !a.returns.includes(r))];
+  const exportNames = [...new Set([...a.sharedModule, ...b.sharedModule])];
+  const finalTarget = withJsxExtension(target, a.hasJsxMoved, a.notes);
+  return {
+    files: { [fa]: a.fileText(finalTarget), [fb]: b.fileText(finalTarget), [rel(finalTarget)]: a.hookText(returns, exportNames) },
+    report: { ...a.report, returns, returns_a: a.returns, returns_b: b.returns, helpers_shared: exportNames },
   };
 }
 
@@ -531,7 +717,14 @@ function share() {
     changed = false;
     for (const name of [...moving]) {
       const sa = topDecl(A, name), sb = topDecl(B, name);
+      const assignedOutside = (sf, st) => ts.isVariableStatement(st) && !(st.declarationList.flags & ts.NodeFlags.Const)
+        && declaredBy(st).some((id) => {
+          const sym = checker.getSymbolAtLocation(id);
+          return sf.statements.some((other) => other !== st && references(checker, other)
+            .some(({ node, sym: s2 }) => s2 === sym && isAssigned(node)));
+        });
       const why = !sa || !sb ? 'not a module-level declaration in both files'
+        : assignedOutside(A, sa) || assignedOutside(B, sb) ? 'module state the screen assigns to (an import can\'t be assigned)'
         : normalized(sa, A) !== normalized(sb, B) ? 'not identical in both files'
         : isExported(sa) || isExported(sb) ? 'exported from the screen; other files may import it from there' : null;
       if (why) { moving.delete(name); skipped.push({ name, why }); changed = true; continue; }
@@ -594,7 +787,7 @@ function share() {
 }
 
 try {
-  const ops = { extract, compare, share };
+  const ops = { extract, compare, share, share_hook: shareHook };
   if (!ops[input.op]) throw new Error(`unknown op ${input.op}`);
   process.stdout.write(JSON.stringify({ ok: true, ...ops[input.op]() }));
 } catch (e) {

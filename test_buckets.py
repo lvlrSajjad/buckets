@@ -1799,6 +1799,40 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
         task = buckets.validate_plan(b.fill_moves(sparse), self.repo, 8)["tasks"][0]
         self.assertEqual((task["from"], task["select"]), (["src/a/screen.ts", "src/b/screen.ts"], ["same"]))
 
+    def test_share_hook_and_inner_statements(self):
+        comp = ('import { useState } from "react"\nimport { useStores } from "../stores"\n\n'
+                'export const Screen = ({ id }: { id: number }) => {\n  const { auth } = useStores()\n'
+                '  const [count, setCount] = useState(0)\n  const label = `#${id}: ${auth.name}`\n'
+                '  const bump = () => setCount(count + 1)\n  %s\n  return <div onClick={bump}>{label}{count}</div>\n}\n')
+        files = {"src/stores.ts": "export const useStores = () => ({ auth: { name: 'x' } })\n",
+                 "src/x/a/screen.tsx": comp % "const onlyA = 1", "src/x/b/screen.tsx": comp % "const onlyB = 2"}
+        for f, t in files.items():
+            (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / f).write_text(t)
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "variants"], cwd=self.repo, check=True)
+        d = buckets.ts_moves(self.repo, {"op": "share_hook", "files": ["src/x/a/screen.tsx", "src/x/b/screen.tsx"], "function": "Screen",
+                                         "names": ["count", "label", "bump"], "into": "src/x/use-screen-shared.ts", "name": "useScreenShared"})
+        self.assertTrue(d["ok"], d)
+        hook = d["files"]["src/x/use-screen-shared.ts"]
+        self.assertIn("export function useScreenShared({ id }: { id: number }) {\n  const { auth } = useStores()\n", hook)  # re-derived
+        self.assertIn("const [count, setCount] = useState(0)", hook)
+        for f in ("src/x/a/screen.tsx", "src/x/b/screen.tsx"):
+            self.assertIn("const { count, label, bump } = useScreenShared({ id })", d["files"][f])
+            self.assertNotIn("useStores", d["files"][f])                       # its only user moved, so it went
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        b = buckets.Buckets(cfg, self.repo, "x")
+        task = buckets.validate_tasks([{"id": "T1", "file": "src/x/screen-shared.ts", "action": "share",
+                                        "from": ["src/x/a/screen.tsx", "src/x/b/screen.tsx"], "select": ["count", "label", "bump"],
+                                        "instructions": "", "done_when": "", "edits": []}], self.repo, 8, "T")[0]
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = b.code_task(task)
+        self.assertEqual(got["status"], "done", got)
+        self.assertTrue((self.repo / "src/x/use-screen-shared.ts").is_file())
+        bad = buckets.ts_moves(self.repo, {"op": "share_hook", "files": ["src/x/a/screen.tsx", "src/x/b/screen.tsx"], "function": "Screen",
+                                           "names": ["onlyA"], "into": "src/x/use-other.ts", "name": "useOther"})
+        self.assertFalse(bad["ok"])
+
     def test_validation(self):
         bad = {"id": "T1", "file": "src/thing-screen.tsx", "action": "move", "where": "ThingScreen", "into": "src/ui.tsx",
                "name": "useThing", "select": [], "instructions": "", "done_when": "", "edits": []}

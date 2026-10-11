@@ -2771,6 +2771,15 @@ Plan this as T1 (copy it). Add tasks only for what the request asks beyond the m
 MERGE_WORDS = re.compile(r"\b(merg\w*|shar\w*|duplicat\w*|common|diverg\w*|join\w*|unif\w*|dedup\w*|variants?)\b", re.I)
 
 
+def shared_hook_names(shared_file: str, variant: str) -> tuple[str, str]:
+    """Where the shared hook of two variants goes and what it's called: next to the shared file,
+    `use-<screen>-shared.ts` and `use<Screen>Shared`."""
+    stem = re.sub(r"\.(tsx?|jsx?)$", "", PurePosixPath(variant).name)
+    folder = PurePosixPath(shared_file).parent
+    pascal = "".join(w[:1].upper() + w[1:] for w in re.split(r"[-_.]", stem) if w)
+    return str(folder / f"use-{stem}-shared.ts"), f"use{pascal}Shared"
+
+
 def variant_pairs(request: str, files: list[str]) -> list[tuple[str, str]]:
     """Files that are two variants of one file: the same name in sibling folders (`screens/x/ecotrak/a.tsx`
     and `screens/x/ecotrak-techs/a.tsx`), among the files and folders the request names."""
@@ -3424,9 +3433,19 @@ class Buckets:
             if not cmp.get("ok"):
                 continue
             same = [p["name"] for p in cmp["pairs"] if p["status"] == "identical" and p.get("module_level")]
+            inner = [p for p in cmp["pairs"] if p["status"] == "identical" and p.get("depth") == 1]
             parent = str(PurePosixPath(a).parent.parent)
             into = next((n for n in named_new if n.startswith(parent + "/")), None) \
                 or f"{parent}/{PurePosixPath(a).stem}-shared{PurePosixPath(a).suffix}"
+            parents = {p["parent"] for p in inner}
+            if inner and len(parents) == 1:
+                hook_file, hook = shared_hook_names(f"{parent}/x.ts", a)
+                dry = ts_moves(self.repo, {"op": "share_hook", "files": [a, b], "function": parents.pop(),
+                                           "names": [p["name"] for p in inner], "into": hook_file, "name": hook}, timeout=120)
+                if dry.get("ok"):
+                    same += [p["name"] for p in inner]
+                else:
+                    detail(f"the identical statements inside the components can't be shared yet ({dry.get('error', '')[:160]})")
             task = None
             if same:
                 task = {"id": "T1", "file": into, "action": "share", "from": [a, b], "select": same,
@@ -4311,7 +4330,7 @@ class Buckets:
             payload = {"op": "extract", "file": task["file"], "function": task["where"], "select": task["select"],
                        "into": task["into"], "name": task["name"]}
         else:
-            payload = {"op": "share", "files": task["from"], "names": task["select"], "into": task["file"]}
+            return self.apply_share(task, commit, start)
         d = ts_moves(self.repo, payload)
         if not d.get("ok"):
             why = d.get("error", "it didn't run")
@@ -4345,6 +4364,67 @@ class Buckets:
             git(self.repo, "add", "-A", "--", *written)
             git(self.repo, "commit", "--no-verify", "-q", "-m", f"buckets {task['id']}: {task['action']} ({note[:200]})\n\n{note}")
         say(f"  {ok()} {task['id']} {task['action']} ({int(time.time() - start)}s): {paint(note[:220], 'dim')}")
+        return {**task, "status": "done", "note": f"DONE: {note}"}
+
+    def apply_share(self, task: dict, commit: bool, start: float) -> dict:
+        """Identical top-level declarations of two variants go into the shared file; identical statements
+        inside their components go into a shared hook next to it. Each part is mechanical."""
+        a, b = task["from"]
+        cmp = ts_moves(self.repo, {"op": "compare", "a": a, "b": b}, timeout=120)
+        if not cmp.get("ok"):
+            return {**task, "status": "failed", "note": f"BLOCKED: {cmp.get('error', 'compare failed')}"}
+        same = {p["name"]: p for p in cmp["pairs"] if p["status"] == "identical"}
+        top = [n for n in task["select"] if same.get(n, {}).get("module_level")]
+        inner = [n for n in task["select"] if same.get(n, {}).get("depth") == 1]
+        skipped = [n for n in task["select"] if n not in top and n not in inner]
+        notes, written, kept_why = [], [], []
+
+        def write(d: dict) -> None:
+            for f, text in d["files"].items():
+                path = (self.repo / f).resolve()
+                if self.repo.resolve() in path.parents:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(text)
+                    written.append(f)
+        if top:
+            d = ts_moves(self.repo, {"op": "share", "files": [a, b], "names": top, "into": task["file"]})
+            if d.get("ok") and d["report"]["shared"]:
+                write(d)
+                notes.append(f"moved {', '.join(d['report']['shared'])} into {task['file']}")
+                kept_why = d["report"]["skipped"]
+            else:
+                notes.append(f"top-level share not done ({d.get('error') or 'nothing could move'})")
+        if inner:
+            parents = {same[n]["parent"] for n in inner}
+            hook_file, hook = shared_hook_names(task["file"], a)
+            d = ts_moves(self.repo, {"op": "share_hook", "files": [a, b], "function": parents.pop(), "names": inner,
+                                     "into": hook_file, "name": hook}) if len(parents) == 1 else \
+                {"ok": False, "error": "the statements are in different functions"}
+            if d.get("ok"):
+                write(d)
+                r = d["report"]
+                notes.append(f"moved {len(inner)} identical statements of the components into {hook} in {hook_file}; "
+                             f"parameters: {', '.join(p['name'] for p in r['params']) or 'none'}; re-derived inside: "
+                             f"{', '.join(r.get('rederived') or []) or 'nothing'}")
+                self.generated_lines = getattr(self, "generated_lines", set()) | {
+                    same_line(l) for l in d["files"][[f for f in d["files"] if f not in (a, b)][0]].splitlines()
+                    if f"function {hook}(" in l}
+            else:
+                notes.append(f"shared hook not made ({d.get('error', '')[:200]})")
+        if skipped:
+            notes.append(f"not moved (not identical in both): {', '.join(skipped[:12])}")
+        if kept_why:
+            notes.append("left in place: " + "; ".join(f"{x['name']} ({x['why']})" for x in kept_why[:8]))
+        note = "; ".join(notes)
+        written = list(dict.fromkeys(written))
+        if not written:
+            say(f"  {warn()} {task['id']}: nothing was shared ({note[:160]})")
+            return {**task, "status": "failed", "note": f"BLOCKED: {note}"}
+        self.involved = list(dict.fromkeys(self.involved + written))
+        if commit:
+            git(self.repo, "add", "-A", "--", *written)
+            git(self.repo, "commit", "--no-verify", "-q", "-m", f"buckets {task['id']}: share ({note[:200]})\n\n{note}")
+        say(f"  {ok()} {task['id']} share ({int(time.time() - start)}s): {paint(note[:220], 'dim')}")
         return {**task, "status": "done", "note": f"DONE: {note}"}
 
     def changed_code(self, base: str, budget: int = 14000) -> str:
@@ -4554,6 +4634,12 @@ class Buckets:
                     "issues": [str(i) for i in d.get("issues") or []],
                     "tasks": validate_tasks(d.get("tasks") or [], self.repo, self.cfg["max_tasks"], f"R{rnd + 1}T")}
 
+        moved = [r for r in results if r.get("action") in ("move", "share") and r.get("status") == "done"]
+        if moved:
+            prompt += ("\n\nCode moved mechanically, byte for byte (" + "; ".join(r["note"].removeprefix("DONE: ")[:300] for r in moved)
+                       + "). Judge the move: does everything still connect, and is behaviour unchanged? Problems that were "
+                       "already in the moved code before (types, untranslated strings, style) are not this change's to fix "
+                       "unless the request asks: don't list them as issues (the smallest change that does the request wins).")
         prompt = note + prompt
         if prompt_out is not None:
             prompt_out.append(prompt)
@@ -5065,8 +5151,7 @@ def i18n_gaps(repo: Path, diff: str, files) -> list[str]:
         return []
     out, file = [], ""
     # Strings on removed lines moved with their code (a move or share); only new ones count.
-    gone = {next(g for g in m.groups() if g).strip() for l in diff.splitlines()
-            if l.startswith("-") and not l.startswith("---") for m in UI_STRING.finditer(l[1:])}
+    gone = " ".join(re.sub(r"\s+", " ", l[1:]) for l in diff.splitlines() if l.startswith("-") and not l.startswith("---"))
     for line in diff.splitlines():
         if line.startswith("+++ "):
             file = line[6:] if line.startswith("+++ b/") else ""
@@ -5077,7 +5162,7 @@ def i18n_gaps(repo: Path, diff: str, files) -> list[str]:
             if m.group(5) and not file.endswith((".tsx", ".jsx")):
                 continue
             text = next(g for g in m.groups() if g).strip()
-            if text in gone:
+            if text in gone:  # also when a formatter joined `<Text>`, the text and `</Text>` onto one line
                 continue
             if " " not in text and not text[:1].isupper() or re.search(r"https?:|[/_]|\.(png|jpg|svg)$", text):
                 continue
