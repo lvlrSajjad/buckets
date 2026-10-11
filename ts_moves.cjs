@@ -361,7 +361,19 @@ function analyze(sf, checker, relFile, fnName, select, target, hook) {
   const movedList = body.filter((s) => moved.has(s));
   if (!movedList.length) throw new Error('nothing to move: no statement matched, or every match has to stay');
   const keptList = body.filter((s) => !moved.has(s));
-  const first = movedList[0];
+  let first = movedList[0];
+  // A hook can't be called after an early return. When one comes before the moved statements, the call
+  // goes before it, if what moves past the return only declares functions (so running it earlier changes
+  // nothing) and what the hook needs is set by then.
+  const early = body.slice(0, body.indexOf(first)).find((st) => !moved.has(st) && hasOwnReturn(st));
+  let callBefore = null;
+  if (early) {
+    const pure = (st) => ts.isFunctionDeclaration(st) || (ts.isVariableStatement(st) && (st.declarationList.flags & ts.NodeFlags.Const)
+      && st.declarationList.declarations.every((d) => d.initializer && (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer))));
+    const late = movedList.filter((st) => st.pos > early.pos);
+    if (!late.every(pure)) throw new Error(`the statements to move come after an early return (line ${lineOf(sf, early.getStart(sf))}), and a hook can't be called there`);
+    callBefore = early;
+  }
 
   // Module-level statements the moved code needs, transitively; they move to the hook's file.
   const imports = importBindings(sf, checker);
@@ -423,6 +435,7 @@ function analyze(sf, checker, relFile, fnName, select, target, hook) {
   const rederivable = new Map(); // statement -> names the hook needs from it
   const canRederive = (stmt, seen = new Set()) => {
     if (!stmt || seen.has(stmt) || !ts.isVariableStatement(stmt) || stmt.declarationList.declarations.length !== 1) return false;
+    if (callBefore && stmt.pos >= callBefore.pos) return false; // set after an early return: it relies on that guard
     const decl = stmt.declarationList.declarations[0];
     if (!decl.initializer || hasJsx(stmt) || (stmt.declarationList.flags & ts.NodeFlags.Let)) return false;
     seen.add(stmt);
@@ -511,6 +524,12 @@ function analyze(sf, checker, relFile, fnName, select, target, hook) {
     return 'any';
   };
   const paramList = [...paramSyms.entries()].map(([sym, d]) => ({ name: sym.name, type: typeOf(sym, d) }));
+  if (callBefore) {
+    for (const [sym, d] of paramSyms) {
+      const ds = declStmt(d);
+      if (ds && ds.pos >= callBefore.pos) throw new Error(`the hook would need \`${sym.name}\`, which is set after the early return at line ${lineOf(sf, callBefore.getStart(sf))}`);
+    }
+  }
   for (const { node, sym } of movedList.flatMap((s) => refsOf.get(s))) {
     if (paramSyms.has(sym) && isAssigned(node)) throw new Error(`the moved code assigns to \`${sym.name}\`, which stays`);
   }
@@ -545,7 +564,12 @@ function analyze(sf, checker, relFile, fnName, select, target, hook) {
     const callText = returns.length > 3
       ? `${indent}const {\n${returns.map((r) => `${indent}  ${r},`).join('\n')}\n${indent}} = ${call}\n`
       : returns.length ? `${indent}const { ${returns.join(', ')} } = ${call}\n` : `${indent}${call}\n`;
-    for (const s of movedList) edits.push([fullStart(sf, s), lineEnd(text, s.end), s === first ? callText : '']);
+    if (callBefore) {
+      for (const s of movedList) edits.push([fullStart(sf, s), lineEnd(text, s.end), '']);
+      edits.push([fullStart(sf, callBefore), fullStart(sf, callBefore), callText]);
+    } else {
+      for (const s of movedList) edits.push([fullStart(sf, s), lineEnd(text, s.end), s === first ? callText : '']);
+    }
     for (const s of moduleMoved) edits.push([fullStart(sf, s), lineEnd(text, s.end), '']);
     edits.push(...unusedEdits);
     pruneImports(sf, stillUsed, edits);
