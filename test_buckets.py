@@ -1888,6 +1888,10 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
             got = b.prefer_move(plan)
         self.assertEqual([(t["id"], t["action"]) for t in got["tasks"]], [("T1", "unify"), ("T2", "share")])
         self.assertEqual((got["tasks"][0]["from"], got["tasks"][0]["select"]), (["src/a/screen.ts"], ["near"]))
+        bad = {"summary": "s", "tasks": [{"id": "T1", "file": "src/b/screen.ts", "action": "unify", "from": ["/"], "select": ["near"],
+                                          "instructions": "", "done_when": "", "where": "", "edits": []}]}
+        fixed = buckets.validate_plan(b.fill_moves(bad), self.repo, 8)["tasks"][0]
+        self.assertEqual(fixed["from"], ["src/a/screen.ts"])
 
     def test_shared_hook_names(self):
         self.assertEqual(buckets.shared_hook_names("a/b/create-invoice-shared.tsx", "a/b/x/use-create-invoice-screen.tsx"),

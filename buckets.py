@@ -3492,6 +3492,15 @@ class Buckets:
                 for k in ("into", "name", "where"):
                     t[k] = t.get(k) or hint["task"][k]
                 t["select"] = t.get("select") or ["logic"]
+        pairs = [(h["compare"]["a"], h["compare"]["b"]) for h in self.share_hints()]
+        for t in data.get("tasks") or []:  # a unify's "from" is the other variant of the file it changes
+            if not (isinstance(t, dict) and t.get("action") == "unify"):
+                continue
+            f = clean_path(str(t.get("file", ""))).lstrip("/")
+            src = [clean_path(str(x)).lstrip("/") for x in t.get("from") or []]
+            other = next((b if f == a else a for a, b in pairs if f in (a, b)), None)
+            if other and not (len(src) == 1 and (self.repo / src[0]).is_file() and src[0] != f):
+                t["file"], t["from"] = f, [other]
         hints = [h for h in self.share_hints() if h["task"]]
         for t in data.get("tasks") or []:
             if not (isinstance(t, dict) and t.get("action") == "share"):
@@ -4730,7 +4739,8 @@ class Buckets:
         def validate(d):
             return {"done": bool(d["done"]), "summary": str(d["summary"]),
                     "issues": [str(i) for i in d.get("issues") or []],
-                    "tasks": validate_tasks(d.get("tasks") or [], self.repo, self.cfg["max_tasks"], f"R{rnd + 1}T")}
+                    "tasks": validate_tasks(self.fill_moves({"tasks": d.get("tasks") or []})["tasks"], self.repo,
+                                            self.cfg["max_tasks"], f"R{rnd + 1}T")}
 
         moved = [r for r in results if r.get("action") in ("move", "share") and r.get("status") == "done"]
         if moved:
