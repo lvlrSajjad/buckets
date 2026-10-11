@@ -82,8 +82,11 @@ DEFAULT_CONFIG = {
         "url": "",                  # e.g. "http://192.168.1.111:8766"; empty: no agent
         "token_file": "~/.config/buckets/agent.token",
         "checks": "off",            # "shadow": the checks also run there and the results are compared (proof);
-                                    # "split": the ones in "remote" run there, the rest here, side by side
+                                    # "split": the ones in "remote" run there, the rest here, side by side;
+                                    # "overflow": like split, but only while this machine is busy and that one idle
         "remote": ["lint", "test"],
+        "busy_load": 0.7,           # overflow: this machine is busy above this load per CPU (1-minute average)
+        "idle_cpu": 40,             # overflow: that machine is idle below this CPU % (and its model isn't working)
     },
     "reader": {                     # chores and summarizing code
         "url": "http://localhost:11434",
@@ -1761,13 +1764,20 @@ def remote_checks(agent: dict | None, checks: dict[str, str], repo: Path, tree: 
     committed code goes over, and only when that machine's model isn't busy (its checks would slow it)."""
     mode = (agent or {}).get("checks", "off")
     names = [n for n, c in checks.items() if c != "(code index)"]
-    if mode not in ("shadow", "split") or not (agent or {}).get("url") or not tree or not names:
+    if mode not in ("shadow", "split", "overflow") or not (agent or {}).get("url") or not tree or not names:
         return "off", []
+    if mode == "overflow" and os.getloadavg()[0] / (os.cpu_count() or 1) < agent.get("busy_load", 0.7):
+        return "off", []  # this machine has room: checks run here, where they're fastest
     try:
-        if agent_call({"agent": agent}, "GET", "/status", timeout=5).get("model_busy"):
-            return "off", []
+        there = agent_call({"agent": agent}, "GET", "/status", timeout=5)
     except AgentError:
         return "off", []
+    if there.get("model_busy") or (mode == "overflow" and (there.get("cpu_percent") or 0) >= agent.get("idle_cpu", 40)):
+        return "off", []
+    if mode == "overflow":
+        say(f"  this machine is busy (load {os.getloadavg()[0]:.1f}) and the other idle: "
+            f"{', '.join(n for n in names if n in (agent.get('remote') or []))} run there")
+        mode = "split"
     return mode, names if mode == "shadow" else [n for n in names if n in (agent.get("remote") or [])]
 
 
@@ -4951,9 +4961,9 @@ class Buckets:
         an `ask` goes to the fast reader (Windows), so the planner's machine doesn't read whole files."""
         budget = self.think_budget().get("think_budget", self.planner.get("think_budget", 2500))
         messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt + LOOKUP_NOTE}]
-        think, asked = True, 0
+        think, asked, seen, enough = True, 0, set(), False
         for turn in range(1, self.cfg.get("lookup_rounds", 4) + 2):
-            last = turn > self.cfg.get("lookup_rounds", 4)
+            last = turn > self.cfg.get("lookup_rounds", 4) or enough
             content, thinking, calls, cut = chat_turn(self.planner, self.run, f"plan-{turn}", messages,
                                                       tools=None if last else LOOKUP_TOOLS, think=think,
                                                       think_budget=budget, max_tokens=16000, timeout=self.timeout)
@@ -4965,7 +4975,15 @@ class Buckets:
                 continue
             if calls and not last:
                 messages.append({"role": "assistant", "content": content, "tool_calls": calls})
+                repeats = 0
                 for call in calls[:6]:
+                    key = (call["name"], json.dumps(call.get("arguments"), sort_keys=True))
+                    if key in seen:  # asked again for what it already has: point back instead of repeating it
+                        repeats += 1
+                        messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"],
+                                         "content": "(you looked this up already in this plan; the answer is above)"})
+                        continue
+                    seen.add(key)
                     result = self.lookup(call, asked)
                     asked += call["name"] == "ask"
                     messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"],
@@ -4973,6 +4991,11 @@ class Buckets:
                 for call in calls[6:]:
                     messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"],
                                      "content": "(not run: at most 6 look-ups per round)"})
+                if repeats and repeats == len(calls[:6]):  # nothing new was asked: it has what it needs
+                    detail(f"plan-{turn}: every look-up was a repeat; asking for the plan")
+                    messages.append({"role": "user", "content": "Everything you asked for is above. Reply now with "
+                                     "the plan as the JSON object."})
+                    enough = True
                 think = False  # thinking once is enough; later rounds read the answers and decide
                 continue
             try:

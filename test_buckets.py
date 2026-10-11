@@ -3451,6 +3451,19 @@ class WindowsAgent(unittest.TestCase):
         self.assertEqual({r["check"]: (r["mac_ok"], r["win_ok"]) for r in mine},
                          {"lint": (True, True), "test": (True, True), "where": (True, False)})
 
+    def test_overflow_sends_checks_there_only_while_this_machine_is_busy(self):
+        repo, run, checks = self.checks_repo()
+        agent = {**self.cfg["agent"], "checks": "overflow", "remote": ["test"], "idle_cpu": 101}
+        tree = buckets.clean_tree(repo)
+        with mock.patch.object(buckets.os, "getloadavg", return_value=(0.5, 0, 0)):
+            self.assertEqual(buckets.remote_checks(agent, checks, repo, tree), ("off", []))
+        with mock.patch.object(buckets.os, "getloadavg", return_value=(99.0, 0, 0)), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(buckets.remote_checks(agent, checks, repo, tree), ("split", ["test"]))
+        self.assertIn("this machine is busy", err.getvalue())
+        with mock.patch.object(buckets.os, "getloadavg", return_value=(99.0, 0, 0)):  # that one isn't idle either
+            self.assertEqual(buckets.remote_checks({**agent, "idle_cpu": -1}, checks, repo, tree), ("off", []))
+
     def test_uncommitted_code_or_no_agent_keeps_the_checks_here(self):
         repo, run, checks = self.checks_repo()
         (repo / "new.txt").write_text("x")
@@ -3582,6 +3595,29 @@ class Reflexes(unittest.TestCase):
         self.assertIn("<Text>Hello</Text>", (self.repo / "src/row.tsx").read_text())
         self.assertEqual(buckets.syntax_errors(self.repo, "src/row.tsx", (self.repo / "src/row.tsx").read_text()), [])
         self.assertEqual(buckets.git(self.repo, "status", "--porcelain").strip(), "")    # committed once, fixed
+
+
+class RepeatedLookups(unittest.TestCase):
+    def setUp(self):
+        self.repo = make_repo({"src/m.py": "def run(x):\n    return x + 1\n"})
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        self.b = buckets.Buckets(cfg, self.repo, "make run add 2")
+
+    def test_a_round_of_only_repeats_ends_the_look_ups(self):
+        plan = {"summary": "s", "tasks": [{"file": "src/m.py", "action": "edit", "instructions": "x", "done_when": "y",
+                                           "where": "run", "edits": []}]}
+        turns = []
+        def fake_turn(cfg, run, label, messages, **kw):
+            turns.append((label, kw.get("tools") is not None))
+            if len(turns) <= 2:  # the same read twice
+                return "", "", [{"id": str(len(turns)), "name": "read", "arguments": {"what": "src/m.py:1-2"}}], False
+            self.assertIn("you looked this up already", messages[-2]["content"])
+            self.assertIn("Everything you asked for is above", messages[-1]["content"])
+            return json.dumps(plan), "", [], False
+        with mock.patch.object(buckets, "chat_turn", fake_turn), contextlib.redirect_stderr(io.StringIO()):
+            got = self.b.plan_with_lookups("PLAN PROMPT", lambda d: buckets.validate_plan(d, self.repo, 8))
+        self.assertEqual(got["tasks"][0]["file"], "src/m.py")
+        self.assertEqual(turns, [("plan-1", True), ("plan-2", True), ("plan-3", False)])  # no more tools offered
 
 
 if __name__ == "__main__":
