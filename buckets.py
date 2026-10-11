@@ -7336,6 +7336,128 @@ def win_setup(cfg: dict, to: Path | None = None) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- buckets measure
+
+
+NUMBER = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?(?![\w.])")
+
+
+def number_lines(output: str) -> dict[str, list[float]]:
+    """Each output line that has numbers, keyed by its template ("Tests: # failed, # passed"), with its numbers.
+    Lines whose template repeats keep the first; ANSI colours and timestamps-like noise stay out."""
+    out: dict[str, list[float]] = {}
+    for line in strip_ansi(output).splitlines():
+        line = line.strip()
+        nums = NUMBER.findall(line)
+        if not nums or len(line) > 200 or re.match(r"^\s*(at |\d{4}-\d\d-\d\d)", line):
+            continue
+        key = NUMBER.sub("#", line)
+        out.setdefault(key, [float(n) for n in nums])
+    return out
+
+
+def ignored_dirs(repo: Path, name: str = "node_modules", depth: int = 3) -> list[str]:
+    """Ignored folders called `name` near the top of the repo (to link into a worktree)."""
+    listed = git(repo, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", check=False).split("\n")
+    return [d.rstrip("/") for d in listed if d.rstrip("/").split("/")[-1] == name and d.count("/") <= depth]
+
+
+def measure_side(repo: Path, ref: str, where: Path) -> Path:
+    git(repo, "worktree", "add", "-q", "--detach", str(where), ref)
+    for d in ignored_dirs(repo):
+        (where / d).parent.mkdir(parents=True, exist_ok=True)
+        (where / d).symlink_to(repo / d)
+    return where
+
+
+def cmd_measure(cfg: dict, argv: list[str]) -> int:
+    """`buckets measure "<command>"`: run a command on two versions of the code (the latest buckets branch and the
+    branch it merges into, or --against REF / --branch REF), --runs N times each, alternating, in worktrees of
+    their own; then compare every number the output prints, line by line, and the time it took."""
+    runs, against, branch, timeout = 3, None, None, 1800.0
+    while argv and argv[0].startswith("--"):
+        flag = argv.pop(0)
+        if flag in ("--runs", "--against", "--branch", "--timeout") and argv:
+            value = argv.pop(0)
+            if flag == "--runs":
+                runs = max(1, int(value))
+            elif flag == "--timeout":
+                timeout = float(value)
+            elif flag == "--against":
+                against = value
+            else:
+                branch = value
+        else:
+            die(f"buckets measure: unknown option {flag}")
+    if not argv:
+        die('buckets measure: say the command, e.g. buckets measure "yarn jest --silent"')
+    command = " ".join(argv)
+    repo = git_toplevel(".")
+    if repo is None:
+        die("run this inside the repo")
+    if branch is None or against is None:
+        last = next((d for d in runs_newest_first(repo, ("code", "pick")) if d.get("branch")
+                     and branch_exists(repo, d["branch"])), None)
+        branch = branch or (last["branch"] if last else "HEAD")
+        against = against or (last["merge_into"] if last else "HEAD~1")
+    sides = {"before": against, "after": branch}
+    heads = {k: git(repo, "rev-parse", "--short", v).strip() for k, v in sides.items()}
+    with one_run(repo, f"measure: {command}"):
+        tmp = Path(tempfile.mkdtemp(prefix="buckets-measure-"))
+        trees = {}
+        try:
+            for k, ref in sides.items():
+                trees[k] = measure_side(repo, ref, tmp / k)
+            say(f"{paint('buckets measure', 'bold')} · {repo.name} · {command}")
+            say(f"  before = {against} ({heads['before']}), after = {branch} ({heads['after']}), {runs} run(s) each, alternating")
+            results: dict[str, list[dict]] = {"before": [], "after": []}
+            for n in range(1, runs + 1):
+                for k in ("before", "after") if n % 2 else ("after", "before"):
+                    start = time.time()
+                    with Ticker(f"  run {n}/{runs} on {k}"):
+                        code, out, timed_out = run_proc(command, trees[k], timeout, shell=True)
+                    results[k].append({"exit": code, "secs": time.time() - start, "timed_out": timed_out,
+                                       "numbers": number_lines(out), "output": out})
+        finally:
+            for k in trees:
+                git(repo, "worktree", "remove", "--force", str(trees[k]), check=False)
+            git(repo, "worktree", "prune", check=False)
+            shutil.rmtree(tmp, ignore_errors=True)
+    print(measure_report(command, sides, heads, results))
+    return 0
+
+
+def measure_report(command: str, sides: dict, heads: dict, results: dict) -> str:
+    def med(xs):
+        xs = sorted(xs)
+        return xs[len(xs) // 2] if len(xs) % 2 else (xs[len(xs) // 2 - 1] + xs[len(xs) // 2]) / 2
+    def fmt(x):
+        return f"{x:g}" if abs(x) >= 1 or x == 0 else f"{x:.3g}"
+    rows = [("time (s)", med([r["secs"] for r in results["before"]]), med([r["secs"] for r in results["after"]]))]
+    exits = {k: sorted({r["exit"] for r in v}) for k, v in results.items()}
+    common = [t for t in results["before"][0]["numbers"] if all(t in r["numbers"] for side in results.values() for r in side)]
+    for template in common:
+        width = min(len(r["numbers"][template]) for side in results.values() for r in side)
+        for i in range(width):
+            b = med([r["numbers"][template][i] for r in results["before"]])
+            a = med([r["numbers"][template][i] for r in results["after"]])
+            label = template if width == 1 else f"{template} [{i + 1}]"
+            if b != a or len(common) <= 12:
+                rows.append((label, b, a))
+    only = {k: sorted(set().union(*(r["numbers"] for r in v)) - set(common)) for k, v in results.items()}
+    lines = [f"## Measured: `{command}`", "",
+             f"before = {sides['before']} ({heads['before']}), after = {sides['after']} ({heads['after']}), "
+             f"{len(results['before'])} run(s) each · exit codes: before {exits['before']}, after {exits['after']}", "",
+             "| What | Before | After | Change |", "|---|---|---|---|"]
+    for label, b, a in rows:
+        change = "same" if a == b else (f"{a - b:+g}" + (f" ({(a - b) / b * 100:+.0f}%)" if b else ""))
+        lines.append(f"| {label[:90].replace('|', '/')} | {fmt(b)} | {fmt(a)} | {change} |")
+    for k, label in (("before", "only before"), ("after", "only after")):
+        if only[k]:
+            lines += ["", f"Lines with numbers {label}: " + "; ".join(f"`{t[:80]}`" for t in only[k][:8])]
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------- buckets live
 
 
@@ -8368,6 +8490,8 @@ def start_time_limit(minutes: float | None) -> None:
 def main(argv: list[str] | None = None) -> int:
     if (sys.argv[1:] if argv is None else argv)[:1] == ["win"]:  # before argparse: the command keeps its own flags
         return cmd_win(load_config(), (sys.argv[1:] if argv is None else argv)[1:])
+    if (sys.argv[1:] if argv is None else argv)[:1] == ["measure"]:
+        return cmd_measure(load_config(), (sys.argv[1:] if argv is None else argv)[1:])
     ap = argparse.ArgumentParser(prog="buckets", description=__doc__.split("\n\n")[0])
     ap.add_argument("request", nargs="*", help="what you want, in plain words")
     ap.add_argument("-f", "--file", help="read the request from a file")

@@ -234,6 +234,19 @@ the rest here side by side, `"overflow"` does that only while this machine is bu
 Measured on the machines this was built on (field notes 30), checks there were 2.5–15 times slower and
 pushed the model out of memory, so overflow is the setting worth using there.
 
+## Measuring a change (`buckets measure`)
+
+```bash
+buckets measure "yarn jest --silent"                      # the latest run's branch against where it merges
+buckets measure --runs 5 --against main --branch my-fix "du -sk dist"
+```
+
+Runs the command on both versions, each in a worktree of its own (with the repo's `node_modules` linked
+in, so nothing is installed and your checkout isn't touched), alternating so drift hits both alike. Then
+every output line with numbers is compared with its counterpart ("Tests: # failed, # passed", "bundle # kB"),
+by the median over the runs, along with the time and exit codes. No parser per tool: anything that prints
+numbers can be measured.
+
 ## Watching it work (`buckets live`)
 
 Every run writes `events.jsonl` (each model session with its token counts, each tool, each step).

@@ -3682,5 +3682,36 @@ class RenameAction(unittest.TestCase):
         self.assertIn("renaming mechanically instead", err.getvalue())
 
 
+class Measure(unittest.TestCase):
+    def test_numbers_are_compared_line_by_line_between_two_versions(self):
+        repo = make_repo({"count.txt": "3\n", ".gitignore": "node_modules/\n"})
+        (repo / "node_modules").mkdir()
+        (repo / "node_modules/size.txt").write_text("120\n")
+        subprocess.run(["git", "tag", "before"], cwd=repo, check=True)
+        (repo / "count.txt").write_text("4\n")
+        subprocess.run(["git", "commit", "-qam", "more"], cwd=repo, check=True)
+        cmd = 'echo "Tests: $(cat count.txt) passed, 0 failed"; echo "bundle $(cat node_modules/size.txt) kB"'
+        out = io.StringIO()
+        old = os.getcwd()
+        os.chdir(repo)
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                code = buckets.cmd_measure({}, ["--runs", "2", "--against", "before", "--branch", "HEAD", cmd])
+        finally:
+            os.chdir(old)
+        text = out.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("| Tests: # passed, # failed [1] | 3 | 4 | +1 (+33%) |", text)
+        self.assertIn("| Tests: # passed, # failed [2] | 0 | 0 | same |", text)
+        self.assertIn("| bundle # kB | 120 | 120 | same |", text)  # node_modules was linked into both
+        self.assertIn("2 run(s) each", text)
+        self.assertEqual(subprocess.run(["git", "worktree", "list"], cwd=repo, capture_output=True, text=True)
+                         .stdout.count("\n"), 1)  # the worktrees are gone
+
+    def test_number_lines_keeps_templates_and_skips_noise(self):
+        got = buckets.number_lines("Tests: 2 failed, 1543 passed\n    at foo (a.ts:12:5)\nTime: 7.9 s\nno numbers\n")
+        self.assertEqual(got, {"Tests: # failed, # passed": [2.0, 1543.0], "Time: # s": [7.9]})
+
+
 if __name__ == "__main__":
     unittest.main()
