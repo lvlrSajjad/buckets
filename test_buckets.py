@@ -252,6 +252,14 @@ class Shortcuts(unittest.TestCase):
 +  it('fine', () => {});
 """
 
+    def test_leftover_debugging_code_is_flagged_unless_allowed(self):
+        diff = ("--- a/src/a.ts\n+++ b/src/a.ts\n+  console.log('here', x)\n+  debugger;\n+  console.error('real')\n"
+                "-  console.log('old')\n+  console.log('old')\n")
+        hits = buckets.find_shortcuts(diff, [])
+        self.assertEqual(len(hits), 2)
+        self.assertTrue(all("debugging" in h for h in hits))
+        self.assertEqual(buckets.find_shortcuts(diff, ["debug"]), [])
+
     def test_code_moved_to_another_file_isnt_a_new_shortcut(self):
         diff = ("--- a/src/screen.tsx\n+++ b/src/screen.tsx\n-  const x = y as any;\n-  // @ts-ignore\n"
                 "--- /dev/null\n+++ b/src/use-screen.ts\n+  const x = y as any\n+  // @ts-ignore\n+  const z = w as any\n")

@@ -2475,6 +2475,7 @@ SHORTCUTS = {
                    "skips or narrows tests"),
     "py-ignore": (r"#\s*type:\s*ignore|#\s*noqa", "silences a Python checker"),
     "nolint": (r"//\s*nolint|#\[allow\(", "silences the linter"),
+    "debug": (r"\bconsole\.(log|debug|trace)\(|\bdebugger\b|\bbreakpoint\(\)|\bpdb\.set_trace\(", "leaves debugging code in"),
 }
 
 
@@ -5977,8 +5978,9 @@ class Buckets:
                     and self.cfg.get("offload", {}).get("escalate_when_stuck")):
                 self.escalate_to_mac(f"round {rnd} made no progress on {', '.join(sorted(failing))}")
             failing_before = failing
+            asked_logs = ["debug"] if re.search(r"\b(log|logs|logging|console|debug\w*)\b", self.request, re.I) else []
             shortcuts = find_shortcuts(git(repo, "diff", "-U0", f"{shortcut_base or base}..HEAD"),
-                                       self.rc.get("allow_shortcuts", []), getattr(self, "generated_lines", set()))
+                                       self.rc.get("allow_shortcuts", []) + asked_logs, getattr(self, "generated_lines", set()))
             if shortcuts:
                 say(f"  {warn()} {len(shortcuts)} shortcut(s) like `any` or skipped tests were added (see the report)")
             api = self.api_impact(base)
