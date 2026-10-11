@@ -1,4 +1,4 @@
-# Handoff (2026-10-11, before compacting the session)
+# Handoff (updated 2026-10-11 night)
 
 Read this first. Details: [../README.md](../README.md), [field-notes.md](field-notes.md) (every
 measurement; 16–19 are the latest), [roadmap.md](roadmap.md), and the research in
@@ -35,8 +35,18 @@ itself was left exactly as found (no branches, no `.buckets/`).
 2. ~~Double review + evidence rules~~ **done** (field notes 21): both machines review at once; a lone
    definite-error claim while checks pass is confirmed by the other reviewer; weak new tests are listed
    mechanically for the reviewers. Still to see live: a disagreement (the confirm step).
-2b. **Big-file refactor: mechanical extract** (agreed 2026-10-11). Baseline first: "move the logic of `packages/shared/app/screens/assessment-questionnaire/assessment-questionnaire-screen.tsx` (3,687 lines) into a `useAssessmentQuestionnaire` hook" in ecotrak-mobile, local (20 min cap) then `--claude`, throwaway branches deleted after. Then build extract-to-hook (roadmap, Mechanical hands) and rerun locally.
-2c. **Merge ecotrak / ecotrak-techs screen variants** (owner's harder test, 2026-10-11): needs 2b's mechanical moves plus a declaration matcher (prototype: `node tools/variant-decls.cjs`, `python3 tools/variant-rank.py <ts> tools/variant-decls.cjs <screens dir>`). Ladder: rfp-details → inventory-details → create-invoice (shared parts only).
+2b. ~~Big-file refactor: mechanical extract~~ **done** (field notes 22): `ts_moves.cjs` (extract / compare /
+   share), task actions `move` and `share`, a dry-run suggestion in the planner's facts, a guard that swaps a
+   retyping plan for the move, redundant edit tasks next to a move dropped. The questionnaire split: 20 min
+   and nothing (retyping) → **5m 14s, correct**.
+2c. **Merge ecotrak / ecotrak-techs variants** (in progress): `compare` facts for merge/share requests, `share`
+   suggested with the identical top-level declarations. Ladder: rfp-details (running live) → inventory-details →
+   create-invoice (shared parts only). Next pieces: near copies (the model makes them identical from the small
+   diff, then `share`), identical code inside the component (extract to a shared hook first), JSX sections.
+2d. **Owner's job list** (docs/roadmap.md, "Where it has to help"). Done tonight: AGENTS.md rule digest in every
+   plan and review; locale-entry check for reviews (10 real gaps found in 60 ecotrak-mobile commits); red CI
+   (failed GitHub Actions log as check output). Next: PR conflicts on PR branches, dependency batches,
+   graphify communities as facts, Sonar issues as check output, a backend contract check.
 3. **Prompt layout for cache reuse:** byte-stable front (system, tool schema in fixed order, guidance,
    map, facts), the step's instructions last; check `prompt_eval_cached_count`. Ollama: constant
    `num_ctx`, a longer `keep_alive` during a run.
@@ -52,6 +62,13 @@ itself was left exactly as found (no branches, no `.buckets/`).
    prioritization. Diagnostics in the research file, section 8.
 
 ## How to test changes (gotchas learned the hard way)
+
+- **Live runs on ecotrak-mobile:** start with `python3 <scratchpad>/capped.py 1200 buckets --local -y "<request>"`
+  (a 20-min cap whose Ctrl-C reaches buckets: background shells ignore SIGINT otherwise); afterwards delete the
+  `buckets/…` branch and the untracked `.buckets/` it creates, so the repo is as found. Verify a branch in a
+  separate worktree with `node_modules` symlinked (`tsc` 10 s, eslint, jest 1,545 tests ~8 s).
+- Don't edit `ts_moves.cjs` or `ts_index.cjs` during a live run (buckets calls them as it goes); `buckets.py`
+  edits are safe once a run has started.
 
 - **buckets runs from this working copy.** Never `git stash` buckets.py before a live run: the run uses
   the stashed-away (old) code. Commit first, then run.
