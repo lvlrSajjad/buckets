@@ -3345,6 +3345,27 @@ class Buckets:
             say(f"  {ok()} gathered {len(shown)} code excerpt(s) and related tests mechanically, before planning")
         return self._facts
 
+    def ci_failures(self) -> str:
+        """The newest failed CI run on this branch (GitHub Actions, through gh with the folder's account):
+        the end of each failed step's log, as check output for the planner. "" when there's none."""
+        g = GitAssistant(self)
+        try:
+            branch = g.current()
+            runs = json.loads(g.gh("run", "list", "--branch", branch, "--limit", "8", "--json",
+                                   "databaseId,conclusion,status,name,headSha,displayTitle,url", check=False) or "[]")
+        except (RuntimeError, OSError, ValueError):
+            return ""
+        failed = [r for r in runs if r.get("conclusion") in ("failure", "timed_out", "startup_failure")]
+        if not failed:
+            return ""
+        r = failed[0]
+        log = trim_ci_log(g.gh("run", "view", str(r["databaseId"]), "--log-failed", check=False))
+        head = git(self.repo, "rev-parse", "HEAD").strip()
+        stale = "" if head.startswith(r["headSha"][:12]) else (f" (that run was for {r['headSha'][:8]}; this branch is "
+                                                               f"now at {head[:8]}, so some of it may be fixed already)")
+        say(f"  {ok()} read the failed CI run on {branch}: {r['name']}{stale}")
+        return f"CI run that failed: {r['name']}: {r['displayTitle']} ({r['url']}){stale}\n{log}"
+
     def move_hint(self) -> dict | None:
         """When the request asks to move code out of one existing file into a new one: the move task that
         does it mechanically, checked with a dry run. None when the request isn't that or the dry run fails."""
@@ -3993,6 +4014,9 @@ class Buckets:
         cover = coverage_text(self.repo, self.index.files) if wants_coverage else ""
         if cover:
             self.checks_seen = (self.checks_seen + "\n\n" + cover).strip()
+        ci = self.ci_failures() if CI_WORDS.search(self.request) else ""
+        if ci:
+            self.checks_seen = (self.checks_seen + "\n\n" + ci).strip()
         baseline_text = ", ".join(f"{n} {'passes' if r['ok'] else 'FAILS'}" for n, r in baseline.items()) or "n/a"
         if self.mode == "claude":
             self.heading(3, "Claude is reading the code and planning")
@@ -4926,6 +4950,31 @@ def checks_settle_job(results: list, baseline: dict, now: dict, shortcuts: list,
             and any(not r["ok"] for r in baseline.values())
             and bool(now) and all(r["ok"] for r in now.values())
             and not shortcuts and not (api and api.get("untouched")))
+
+
+CI_WORDS = re.compile(r"\b(ci|pipeline|github actions|workflow|checks? (?:are|is) (?:red|failing)|red (?:build|checks?)|"
+                      r"build (?:is )?(?:red|failing|broken))\b", re.I)
+
+
+def trim_ci_log(log: str, limit: int = 12000) -> str:
+    """`gh run view --log-failed` output without the job/step/timestamp columns, ANSI codes and runner
+    noise, keeping the end of each failed step (where the errors are)."""
+    steps: dict[str, list[str]] = {}
+    for raw in log.splitlines():
+        cols = raw.split("\t", 2)
+        step = " / ".join(cols[:2]) if len(cols) == 3 else ""
+        line = re.sub(r"^\ufeff?\d{4}-\d\d-\d\dT[\d:.]+Z ?", "", cols[-1])
+        line = strip_ansi(line).rstrip()
+        if not line or line.startswith(("##[group]", "##[endgroup]")):
+            continue
+        steps.setdefault(step, []).append(line)
+    per = max(40, (limit // 120) // max(1, len(steps)))
+    out = []
+    for step, lines in steps.items():
+        out.append(f"--- {step or 'log'} ---")
+        out += (["…"] if len(lines) > per else []) + lines[-per:]
+    text = "\n".join(out)
+    return text[-limit:]
 
 
 LOCALE_DIRS = ("localization", "locales", "locale", "i18n", "lang", "translations")

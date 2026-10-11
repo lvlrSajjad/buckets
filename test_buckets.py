@@ -1513,6 +1513,31 @@ class Localization(unittest.TestCase):
         self.assertIn('`app/localization/fr_ca.json` lacks 1 key(s) added to `app/localization/en_us.json`: "PICK A VENDOR"', gaps[1])
 
 
+class RedCI(unittest.TestCase):
+    LOG = ("lint\tRun yarn lint\t2026-10-11T01:02:03.4567890Z ##[group]Run yarn lint\n"
+           "lint\tRun yarn lint\t2026-10-11T01:02:04.0000000Z src/a.ts(12,3): error TS2304: Cannot find name 'x'.\n"
+           "lint\tRun yarn lint\t2026-10-11T01:02:05.0000000Z \x1b[31mError: Process completed with exit code 2.\x1b[0m\n")
+
+    def test_the_failed_run_becomes_check_output(self):
+        repo = make_repo({"src/a.ts": "export const a = 1\n"})
+        b = buckets.Buckets(buckets.deep_merge(buckets.DEFAULT_CONFIG, {"memory": False}), repo, "CI is red, fix it")
+        head = buckets.git(repo, "rev-parse", "HEAD").strip()
+        runs = json.dumps([{"databaseId": 7, "conclusion": "failure", "status": "completed", "name": "lint",
+                            "headSha": head, "displayTitle": "fix things", "url": "https://x/runs/7"}])
+        def fake_gh(self, *args, check=True):
+            return runs if args[:2] == ("run", "list") else self_log
+        self_log = self.LOG
+        with mock.patch.object(buckets.GitAssistant, "gh", fake_gh), contextlib.redirect_stderr(io.StringIO()):
+            got = b.ci_failures()
+        self.assertIn("CI run that failed: lint: fix things (https://x/runs/7)\n--- lint / Run yarn lint ---", got)
+        self.assertIn("src/a.ts(12,3): error TS2304: Cannot find name 'x'.", got)
+        self.assertIn("Error: Process completed with exit code 2.", got)
+        self.assertNotIn("2026-10-11T", got)
+        self.assertNotIn("##[group]", got)
+        self.assertTrue(buckets.CI_WORDS.search("the pipeline is failing"))
+        self.assertFalse(buckets.CI_WORDS.search("add a city field"))
+
+
 class DoubleReview(unittest.TestCase):
     """Two machines review each round; a lone "undefined"-style claim while the checks pass is confirmed
     before it can send working code back for rewriting."""
