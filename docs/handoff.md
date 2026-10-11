@@ -78,9 +78,10 @@ Next (in order):
    (TypeScript getEditsForFileRename for both copies → one file in the parent folder; refuse on new type
    errors), a plan action and a hint from the variant inventory. Was being written when compacting.
 4. **Contract from code:** the backend's exported swagger is ~2.5 months stale, so most "no endpoint" results
-   are false; read NestJS routes from `@Controller`/`@Get…` decorators instead (owner to confirm). Owner
-   questions open: module state shared between variants in merges (suggested: keep it, convert separately);
-   the contract findings (details in `docs/private/contract-report-2026-10-11.md`).
+   are false; read NestJS routes from `@Controller`/`@Get…` decorators instead (**owner agreed**). Owner's
+   call on module state: the module-level variables were his "stateless variables"; `useRef` is the standard
+   React Native way, so when a merge or move meets module state a screen assigns, convert it to `useRef` (or
+   state) in the hook rather than sharing the module variable; reviewers should expect that.
 5. Then item 12 (shared hooks past early returns), JSX chunks → components, simframe UI checks; the other
    session owns 29b (review thinking budget) and tier 6.
 
