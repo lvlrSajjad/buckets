@@ -43,10 +43,9 @@ references through TypeScript)
     counts, where changes land, commands and answers, and keeps times, pass rates and time per kind of
     model call. `--set` for A/B runs. Its first run caught opencode editing the source repo from a clone
     (fixed: a data folder per repo path).
-15a. **A native coder loop instead of opencode** (agreed 2026-10-11): buckets' own tool loop on the coder's
-    model (read, search, edit tolerant of indentation, write; edits only in the task's file), opt-in with
-    `coder.engine = "native"`. Becomes the default when the suite's A/B says it's as reliable and faster.
-    opencode stays as the fallback. M
+15a. ~~A native coder loop instead of opencode~~ **done, the default since 2026-10-12** (field notes 32): the A/B
+    on 12 real cases gave the same results on every task both coders did, in the same time; opencode is the
+    fallback for a native try that changed nothing. M
 15b. UI checks through simframe: a saved flow (`simframe flow run`) as one more check before and after,
     with Metro reloaded on the branch; opt-in for UI changes. No new code needed to start: a repo check can be
     `"ui": "curl -s -X POST localhost:8081/reload >/dev/null; sleep 5; simframe flow run <flow>"` (Metro serves the

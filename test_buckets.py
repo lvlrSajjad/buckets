@@ -22,6 +22,7 @@ buckets.CONFIG_PATH = _SANDBOX / "config.json"
 buckets.OPENCODE_CONFIG = _SANDBOX / "opencode.json"
 buckets.STATE_DIR = _SANDBOX / "state"
 buckets.LOCK_PATH = _SANDBOX / "active.lock"
+buckets.DEFAULT_CONFIG["coder"]["fallback"] = ""  # never a real opencode from a test that makes no change
 
 
 def make_repo(files: dict[str, str]) -> Path:
@@ -912,6 +913,7 @@ class FasterRuns(unittest.TestCase):
         self.repo = make_repo({"src/m.py": "def run(x):\n    y = x\n    return y + 1\n\n\n"
                                            "def other():\n    return 2\n"})
         cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "opencode_bin": "no-such-opencode",
+                                                          "coder": {"engine": "opencode"},  # its process is what's faked
                                                           "offload": {"escalate_repeated_failure": False}})
         self.b = buckets.Buckets(cfg, self.repo, "x")
 
@@ -2687,7 +2689,7 @@ class EndToEnd(unittest.TestCase):
         (tools / "opencode").chmod(0o755)
         role = {"url": fake.url, "model": "fake-m", "label": "the fake box"}
         cfg = {"planner": role, "reader": role, "thinker": {**role, "opencode_model": "p/fake-m"},
-               "coder": {**role, "opencode_model": "p/fake-m"}, "opencode_bin": str(tools / "opencode"),
+               "coder": {**role, "opencode_model": "p/fake-m", "engine": "opencode"}, "opencode_bin": str(tools / "opencode"),
                "notify": False, "mode": "local"}
         buckets.CONFIG_PATH.write_text(json.dumps(cfg))
         try:
@@ -3611,6 +3613,22 @@ class Reflexes(unittest.TestCase):
             "path": "src/row.tsx", "old": "  <HStack>\n", "new": "  <HStack>{\n"}})
         self.assertIn("not applied, the file wouldn't parse (line ", out)
         self.assertEqual((self.repo / "src/row.tsx").read_text(), self.good)
+
+    def test_a_native_try_that_changes_nothing_hands_the_last_try_to_opencode(self):
+        task = {"id": "T1", "file": "src/row.tsx", "action": "edit", "instructions": "say hello",
+                "done_when": "d", "read_first": [], "where": "", "edits": []}
+        cfg = buckets.deep_merge(self.b.cfg, {"coder": {"fallback": "opencode"}, "opencode_bin": "sh"})
+        b = buckets.Buckets(cfg, self.repo, "x")
+        ran = []
+        def fake_proc(cmd, repo, timeout, on_line=None, env=None, **kw):
+            ran.append(cmd[0])
+            (self.repo / "src/row.tsx").write_text(self.good.replace("Hi", "Hello"))
+            return 0, "DONE: said hello", False
+        with mock.patch.object(buckets.Buckets, "native_coder", return_value=("no luck", False)), \
+                mock.patch.object(buckets, "run_proc", fake_proc), contextlib.redirect_stderr(io.StringIO()) as err:
+            got = b.code_task(task)
+        self.assertEqual((got["status"], ran), ("done", ["sh"]))
+        self.assertIn("last try through opencode", err.getvalue())
 
     def test_a_coder_that_breaks_the_file_fixes_it_in_the_same_task(self):
         task = {"id": "T1", "file": "src/row.tsx", "action": "edit", "instructions": "say hello",

@@ -2,7 +2,8 @@
 
 Empty the pool with many small buckets. `buckets` is a local orchestrator for two
 machines: a **planner** model reads the repo, splits the job into one-file tasks and
-reviews the result, and a **coder** model runs each task in its own opencode session.
+reviews the result, and a **coder** model runs each task in its own short session (buckets' own
+read/search/edit/write loop; opencode is the fallback).
 
 The script owns the control flow, git and the checks. The models only make
 judgments, and always answer in JSON that the script validates.
@@ -364,8 +365,12 @@ starts where the last one ended (after `buckets merge`) reuses its final check r
 **The coder starts at its place:** each task names a `where` (`GitAssistant.fill_in`, or a line
 range), and the coder's prompt carries that code exactly as it is when the task starts, so it doesn't
 read a long file to find it. When the planner leaves `where` empty, buckets uses the places the
-instructions name (code names, "lines 120-140"). Coders run with `opencode run --standalone`, so
-stopping buckets stops their edits too (the shared background server kept editing after Ctrl-C).
+instructions name (code names, "lines 120-140"). The coder is buckets' own tool loop on the coder's model
+(`"coder": {"engine": "native"}`, the default since a 12-case A/B: as reliable as opencode on every task both did,
+as fast, and nothing outside buckets to break): read, search, an edit tolerant of indentation, write, only in the
+task's file. When a native try changes nothing, the last try goes through opencode (`"fallback": "opencode"`),
+run with `opencode run --standalone` so stopping buckets stops its edits too. `"engine": "opencode"` brings back
+the old way.
 
 On the worker, every 1,000 tokens sent costs about 5 seconds before the model writes anything, so
 keeping prompts short is most of the speed: the same small Python change went from 20+ minutes to

@@ -740,7 +740,13 @@ A cut-off review thinks ~60–80 s, then needs another call to answer (10–20 s
   required" findings dropped from 15 to 0: the swagger had marked named query params required. Most of what's
   left looks real (routes since removed or renamed). Two were matcher limits, both fixed: words compared with
   case, and an unresolved part that couldn't match a literal route.
-- **opencode A/B, opencode half**: 8 of 12. Two of the failures were buckets bugs, now fixed. The planner
+- **The coder A/B, both halves** (frozen code from before tonight's fixes; one run each): opencode 8/12, native
+  10/12. Most of the gap is the planner's run-to-run variation in cases where no coder ran at all. On the tasks both
+  coders did, the results and times matched: hiding two fields took 94 s vs 90 s, a new prop 42 s vs 39 s. Native
+  failed one case that opencode passed: its planner added an unasked-for file, and the round tidying it up broke
+  lint. The native coder is now the default (nothing outside buckets, no `$PWD` class of bug), with opencode for
+  the last try when a native try changes nothing.
+- **The opencode half, read closely**: 8 of 12. Two of the failures were buckets bugs, now fixed. The planner
   dropped the new parameter's default and the value every call should pass, then three rounds hand-edited 37
   calls in 18 min (the request's words fill those fields now). And one plan overflowed the planner's context.
 

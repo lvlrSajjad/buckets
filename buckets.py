@@ -70,7 +70,9 @@ DEFAULT_CONFIG = {
         "think_budget": 6000,
         "temperature": 0.3,
     },
-    "coder": {                      # writes the code, through opencode
+    "coder": {                      # writes the code: buckets' own tool loop ("native"), or opencode
+        "engine": "native",         # "native" (default since the 2026-10-12 A/B) or "opencode"
+        "fallback": "opencode",     # a native coder's last try goes through opencode instead, when it's installed
         "url": "http://localhost:11434",
         "model": "qwen3.6:35b-a3b",
         "opencode_model": "buckets_local/qwen3.6:35b-a3b",
@@ -5452,6 +5454,7 @@ class Buckets:
                "--auto", "--title", f"buckets {task['id']} {task['file']}", prompt]
         note, path = "", self.repo / task["file"]
         original = path.read_text(errors="replace") if path.is_file() else None
+        nothing_made = False  # a native try that changed nothing: the last try goes through the fallback
         for attempt in range(1, c["attempts"] + 1):
             before = snapshot(self.repo, changed_paths(self.repo) + [task["file"]])
             start = time.time()
@@ -5461,7 +5464,13 @@ class Buckets:
                     action = coder_action(line)
                     if action:
                         tick.text = f"{head} · {action}"
-                if c.get("engine") == "native":
+                engine = c.get("engine", "native")
+                if engine == "native" and attempt == c["attempts"] and nothing_made and c.get("fallback") == "opencode" \
+                        and shutil.which(self.cfg["opencode_bin"]):
+                    engine = "opencode"  # the native loop didn't get there: one try through opencode
+                    tid = task["id"]
+                    say(f"  {paint(f'{tid}: last try through opencode', 'dim')}")
+                if engine == "native":
                     out, timed_out = self.native_coder(task, cmd[-1], start + c["timeout_s"], tick, head)
                 else:
                     cid = live("call", label=f"code-{task['id']}", machine=machine_of(c.get("url", "")),
@@ -5502,6 +5511,7 @@ class Buckets:
                 say(f"  {warn()} {task['id']} {task['file']}: {final}")
                 return {**task, "status": "blocked", "note": final}
             note = "timed out" if timed_out else (final or "no change made")
+            nothing_made = not timed_out
             if (attempt < c["attempts"] and not timed_out
                     and self.cfg.get("offload", {}).get("escalate_repeated_failure")):
                 task = self.rewrite_tasks([task], f"{task['id']} made no change on its first try")[0]
