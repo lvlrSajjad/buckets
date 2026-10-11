@@ -2558,6 +2558,7 @@ TASK_SCHEMA = {
         "name": {"type": "string"},
         "select": {"type": "array", "items": {"type": "string"}},
         "from": {"type": "array", "items": {"type": "string"}},
+        "lines": {"type": "array", "items": {"type": "integer"}},
         "param": {"type": "object", "properties": {"name": {"type": "string"}, "type": {"type": "string"},
                                                    "default": {"type": "string"}, "value": {"type": "string"}}},
     },
@@ -2732,7 +2733,8 @@ text and the files it opens itself, and it cannot run commands):
   plan action "component": "file" is the screen, "where" the component it's in, "select" [the helper's
   name], "into" the new .tsx file, "name" the new component. Its parameters and the values it uses become
   props, its body moves exactly, every call becomes an element. Extract small helpers (used by others)
-  before the bigger ones that call them.
+  before the bigger ones that call them. A JSX chunk with no helper: "lines" [first, last] (the lines of one
+  element, or of sibling elements) instead of "select"; the facts list the elements' line ranges.
 - Adding a parameter to a function, or a prop to a component, used across the app: plan action "signature":
   "file" defines it, "where" its name, "param" {{"name", "type", "default" (keeps existing callers
   working), "value" (what every call or use should pass, if anything)}}. The definition and every use are
@@ -3306,11 +3308,17 @@ def validate_move(t: dict, f: str, repo: Path, task_id: str) -> dict:
     if t["action"] == "component":
         into, name, where = inside(t.get("into")), str(t.get("name") or "").strip(), str(t.get("where") or "").strip().split(".")[-1]
         helper = (select or [""])[0]
+        lines = [int(x) for x in t.get("lines") or [] if str(x).strip().isdigit()][:2]
+        if len(lines) == 1:
+            lines = lines * 2
         if not f.endswith(MOVABLE) or not (repo / f).is_file() or not into.endswith((".tsx", ".jsx")) or (repo / into).exists() \
                 or not re.fullmatch(r"[A-Z][\w$]*", name) or not re.fullmatch(r"[A-Za-z_$][\w$]*", where) \
-                or not re.fullmatch(r"[A-Za-z_$][\w$]*", helper):
+                or not (lines and lines[0] <= lines[1] or re.fullmatch(r"[A-Za-z_$][\w$]*", helper)):
             raise ValueError("component: \"file\" is the screen, \"where\" the component the render helper is in, \"select\" "
-                             "[the helper's name], \"into\" a new .tsx file, \"name\" the new component (capitalized)")
+                             "[the helper's name] or \"lines\" [first, last] of a JSX chunk, \"into\" a new .tsx file, \"name\" "
+                             "the new component (capitalized)")
+        if lines:
+            return {**base, "file": f, "where": where, "select": [], "lines": lines, "into": into, "name": name}
         return {**base, "file": f, "where": where, "select": [helper], "into": into, "name": name}
     if t["action"] == "to_ref":
         where = str(t.get("where") or "").strip().split(".")[-1]
@@ -3896,7 +3904,16 @@ class Buckets:
         if leads:
             parts.append("Where the request's words appear (found mechanically):\n" + leads)
         ch = self.component_hint()
-        if ch:
+        if ch and ch.get("outline") is not None:
+            rows = [f"- lines {e['lines'][0]}-{e['lines'][1]}: {'  ' * e['depth']}<{e['tag']}>"
+                    + (f" {e['hint']}" if e.get("hint") else "") + (f" — {e['first']}" if e.get("first") else "") for e in ch["outline"]]
+            parts.append(f"JSX blocks of {ch['where']} in {ch['file']} (exact line ranges, nested by indent). A \"component\" "
+                         "task with \"lines\" [first, last] of one block (or of sibling blocks) turns it into its own component "
+                         "mechanically: what it uses becomes props\n" + "\n".join(rows)
+                         + (("\nDry run of the lines the request gives: " + json.dumps({k: ch["task"][k] for k in ("file", "action", "where", "lines", "into", "name")})
+                             + f" (props {', '.join(ch['report']['props'])}). Plan it (copy it).") if ch.get("task") else "")
+                         + (f"\nThe lines the request gives don't fit: {ch['error'][:300]}" if ch.get("error") else ""))
+        elif ch:
             parts.append(f"Render helpers in {ch['where']} ({ch['file']}): " + ", ".join(ch["helpers"])
                          + ". A \"component\" task turns one into its own component mechanically"
                          + (": " + json.dumps({k: ch["task"][k] for k in ("file", "action", "where", "select", "into", "name")})
@@ -4105,10 +4122,14 @@ class Buckets:
         for f in files:
             text = (self.repo / f).read_text(errors="replace")
             helpers = re.findall(r"(?m)^\s+const (render[A-Z]\w*)\s*=", text)
-            if not helpers:
-                continue
             comp = max(self.index.outline().get(f, []), key=lambda d: d["end"] - d["line"], default=None)
             if not comp:
+                continue
+            chunk = self.chunk_hint(f, comp["name"])
+            if chunk:
+                self._component_hint = chunk
+                return chunk
+            if not helpers:
                 continue
             prose = re.sub(r"[\w@.+\-]*/[\w@.+\-/]*", " ", self.request)  # words in paths don't name a part
             words = {w.lower() for w in re.findall(r"[A-Za-z]+", prose)}
@@ -4139,6 +4160,35 @@ class Buckets:
             self._component_hint = hint
             return hint
         return None
+
+    def chunk_hint(self, f: str, comp: str) -> dict | None:
+        """A JSX chunk of the screen by lines ("lines 120-180", or the element the request's words name): the
+        screen's JSX blocks with their line ranges, and a dry run when the request gives the lines."""
+        out = ts_moves(self.repo, {"op": "jsx_outline", "file": f, "function": comp}, timeout=120)
+        if not out.get("ok") or not out["elements"]:
+            return None
+        hint = {"file": f, "where": comp, "helpers": [], "outline": out["elements"]}
+        m = re.search(r"\blines?\s+(\d+)\s*(?:-|–|to|through)\s*(\d+)", self.request, re.I)
+        if not m:
+            return hint if not re.search(r"(?m)^\s+const render[A-Z]\w*\s*=", (self.repo / f).read_text(errors="replace")) else None
+        lines = [int(m.group(1)), int(m.group(2))]
+        named = [n for n in re.findall(r"\b([A-Z][a-z]+(?:[A-Z][a-z0-9]*)+)\b", self.request) if n != comp] \
+            + re.findall(r"\b([A-Z][a-z0-9]+)\s+component\b", self.request)  # ListRow, or "a Header component"
+        cname = named[0] if named else f"{comp.removesuffix('Screen')}Section{lines[0]}"
+        stem = re.sub(r"(?<!^)([A-Z])", r"-\1", cname).lower()
+        into = str(PurePosixPath(f).parent / f"{stem}.tsx")
+        d = ts_moves(self.repo, {"op": "component", "file": f, "function": comp, "lines": lines, "into": into, "name": cname},
+                     timeout=120)
+        if d.get("ok"):
+            hint["task"] = validate_move({"id": "T1", "file": f, "action": "component", "where": comp, "lines": lines,
+                                          "into": into, "name": cname, "instructions": f"Turn lines {lines[0]}-{lines[1]} into <{cname}>.",
+                                          "done_when": "", "edits": []}, f, self.repo, "T1")
+            hint["report"] = d["report"]
+            say(f"  {ok()} lines {lines[0]}-{lines[1]} can become <{cname}> mechanically: {len(d['report']['props'])} props (dry run)")
+        else:
+            hint["error"] = d.get("error", "")
+            detail(f"lines {lines[0]}-{lines[1]} can't become a component mechanically ({hint['error'][:160]})")
+        return hint
 
     def signature_hint(self) -> dict | None:
         """For a request to add a parameter, prop, argument or option to a named function or component: where
@@ -4414,8 +4464,9 @@ class Buckets:
             sel = [str(x).strip() for x in t.get("select") or [] if str(x).strip()] if isinstance(t.get("select"), list) else []
             if f == ct["file"] and sel in ([], ct["select"]):
                 t["file"] = f
-                for k in ("into", "name", "where", "select"):
-                    t[k] = t.get(k) or ct[k]
+                for k in ("into", "name", "where", "select", "lines"):
+                    if ct.get(k) is not None:
+                        t[k] = t.get(k) or ct[k]
         rh = self.relocate_hint()
         for t in data.get("tasks") or [] if rh else []:  # a dedupe aimed at a copy instead of the shared one
             if isinstance(t, dict) and t.get("action") == "dedupe" and clean_path(str(t.get("file", ""))) in (rh.get("copies") or []):
@@ -5598,8 +5649,8 @@ class Buckets:
             say(f"  {ok()} {task['id']} relocate ({int(time.time() - start)}s): {paint(note[:220], 'dim')}")
             return {**task, "status": "done", "note": f"DONE: {note}"}
         elif task["action"] == "component":
-            d = ts_moves(self.repo, {"op": "component", "file": task["file"], "function": task["where"], "helper": task["select"][0],
-                                     "into": task["into"], "name": task["name"]})
+            d = ts_moves(self.repo, {"op": "component", "file": task["file"], "function": task["where"], "into": task["into"],
+                                     "name": task["name"], **({"lines": task["lines"]} if task.get("lines") else {"helper": task["select"][0]})})
             if not d.get("ok"):
                 say(f"  {warn()} {task['id']}: the component couldn't be made ({d.get('error', '')[:160]})")
                 return {**task, "status": "failed", "note": f"BLOCKED: {d.get('error', 'component failed')}"}
@@ -5614,7 +5665,8 @@ class Buckets:
             # its prop types are written from the screen's own types: not shortcuts the model added
             self.generated_lines = getattr(self, "generated_lines", set()) | {same_line(t) for t in r.get("prop_types", [])} | {
                 same_line(l) for f in written for l in d["files"][f].splitlines() if f"const {task['name']} = (" in l}
-            note = (f"turned {task['select'][0]} into <{task['name']}> in {task['into']}: {r['calls']} use(s) now render it; props: "
+            what = task["select"][0] if task["select"] else f"lines {task['lines'][0]}-{task['lines'][1]} of {task['where']}"
+            note = (f"turned {what} into <{task['name']}> in {task['into']}: {r['calls']} use(s) now render it; props: "
                     f"{', '.join(r['props'])}" + (f"; re-derived inside: {', '.join(r['rederived'])}" if r["rederived"] else "")
                     + (f"; notes: {'; '.join(r['notes'])}" if r["notes"] else ""))
             self.involved = list(dict.fromkeys(self.involved + written))

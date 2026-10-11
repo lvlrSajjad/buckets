@@ -3786,6 +3786,48 @@ class ModuleStateRefs(unittest.TestCase):
         self.assertIn("no module-level let/var by that name", none["note"])
 
 
+class ComponentByLinesAction(unittest.TestCase):
+    """A JSX chunk by lines becomes a component: the outline in the facts, the dry run, the task."""
+
+    def setUp(self):
+        if not (TS_PKG.exists() and shutil.which("node")):
+            self.skipTest("needs node and a typescript package")
+        from test_component_lines import REACT, SCREEN
+        self.repo = make_repo({"src/list.tsx": SCREEN, "src/jsx.d.ts": JSX_TYPES,
+                               "src/attrs.d.ts": "declare namespace JSX { interface IntrinsicAttributes { key?: string | number } }\n",
+                               "tsconfig.json": '{"compilerOptions": {"jsx": "preserve", "strict": true, "noEmit": true, "skipLibCheck": true}}'})
+        (self.repo / "node_modules/@types/react").mkdir(parents=True)
+        (self.repo / "node_modules/@types/react/index.d.ts").write_text(REACT.split("\n", 1)[1].rsplit("}", 1)[0])
+        (self.repo / "node_modules/typescript").symlink_to(TS_PKG)
+        (self.repo / ".git/info/exclude").write_text("node_modules\n")
+        self.cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+
+    def test_the_request_lines_get_a_dry_run_and_the_task_makes_the_component(self):
+        b = buckets.Buckets(self.cfg, self.repo, "Turn lines 14-17 of src/list.tsx into a ListRow component")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            hint = b.component_hint()
+            facts = b.facts()
+        self.assertIn("lines 14-17 can become <ListRow> mechanically", err.getvalue())
+        self.assertIn("JSX blocks of ListScreen in src/list.tsx", facts)
+        self.assertIn("- lines 9-21: <div>", facts)
+        self.assertEqual((hint["task"]["lines"], hint["task"]["into"]), ([14, 17], "src/list-row.tsx"))
+        sparse = {"summary": "s", "tasks": [{"id": "T1", "file": "src/list.tsx", "action": "component", "instructions": "",
+                                             "done_when": "", "where": "", "edits": []}]}
+        with contextlib.redirect_stderr(io.StringIO()):
+            task = buckets.validate_plan(b.fill_moves(sparse), self.repo, 8)["tasks"][0]
+            got = b.code_task(task)
+        self.assertEqual(got["status"], "done", got)
+        self.assertIn("turned lines 14-17 of ListScreen into <ListRow>", got["note"])
+        self.assertIn("<ListRow key={item.id} item={item} open={open} />", (self.repo / "src/list.tsx").read_text())
+
+    def test_without_lines_the_outline_is_enough(self):
+        b = buckets.Buckets(self.cfg, self.repo, "Split the header of src/list.tsx into its own component")
+        with contextlib.redirect_stderr(io.StringIO()):
+            hint = b.component_hint()
+        self.assertNotIn("task", hint)
+        self.assertEqual([e["lines"] for e in hint["outline"]], [[9, 21]])   # blocks of 8+ lines: the root <div>
+
+
 class FoldAction(unittest.TestCase):
     """The "fold" plan action: two copies that are the same code become one file, from the hint or a share task."""
 

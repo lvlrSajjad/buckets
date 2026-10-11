@@ -39,6 +39,9 @@ function rel(p) {
   return r.split(path.sep).join('/');
 }
 
+// Texts that stand in for files on disk (a step's output another step reads, in one run).
+const OVERRIDES = new Map();
+
 function program(files) {
   const roots = files.map(abs);
   const cfgPath = ts.findConfigFile(path.dirname(roots[0]), ts.sys.fileExists);
@@ -48,7 +51,15 @@ function program(files) {
                                               path.dirname(cfgPath));
     options = cfg.options;
   }
-  const prog = ts.createProgram(roots, { ...options, allowJs: true, noEmit: true });
+  const opts = { ...options, allowJs: true, noEmit: true };
+  const host = ts.createCompilerHost(opts);
+  if (OVERRIDES.size) {
+    const { getSourceFile, readFile, fileExists } = host;
+    host.getSourceFile = (f, lang, ...rest) => (OVERRIDES.has(path.resolve(f)) ? ts.createSourceFile(f, OVERRIDES.get(path.resolve(f)), lang, true) : getSourceFile.call(host, f, lang, ...rest));
+    host.readFile = (f) => (OVERRIDES.has(path.resolve(f)) ? OVERRIDES.get(path.resolve(f)) : readFile.call(host, f));
+    host.fileExists = (f) => OVERRIDES.has(path.resolve(f)) || fileExists.call(host, f);
+  }
+  const prog = ts.createProgram(roots, opts, host);
   const sources = roots.map((r) => prog.getSourceFile(r));
   const missing = roots.filter((r, i) => !sources[i]);
   if (missing.length) throw new Error(`TypeScript didn't load ${missing.map(rel).join(', ')} (excluded by its tsconfig?)`);
@@ -1501,6 +1512,76 @@ function signature() {
   return { files, report: { kind: component ? 'component' : 'function', sites, skipped } };
 }
 
+// A JSX chunk of a component, by lines, becomes a render helper declared just before the statement it's in
+// (`const renderX = (item) => (<chunk>)`, with what the chunk uses from inside that statement, like a map
+// callback's item, as parameters) and the chunk becomes the call: the component op then takes it from there.
+function wrapChunk() {
+  const [from, to] = input.lines.map(Number);
+  if (!(from > 0 && to >= from)) throw new Error('"lines" must be [first, last]');
+  const { checker, sources: [sf] } = program([input.file]);
+  const text = sf.text;
+  const fn = findFunction(sf, input.function);
+  if (!fn) throw new Error(`no function or component named ${input.function} in ${input.file}`);
+  const isJsx = (n) => ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n) || ts.isJsxFragment(n);
+  let chunk = null, run = null;
+  const visit = (n) => {
+    if (chunk || run) return;
+    if (isJsx(n) && lineOf(sf, n.getStart(sf)) === from && lineOf(sf, n.getEnd()) === to) { chunk = n; return; }
+    if ((ts.isJsxElement(n) || ts.isJsxFragment(n)) && lineOf(sf, n.getStart(sf)) < from && lineOf(sf, n.getEnd()) > to) {
+      const kids = n.children.filter((c) => !(ts.isJsxText(c) && !c.text.trim()));
+      const i = kids.findIndex((c) => lineOf(sf, c.getStart(sf)) === from);
+      const j = kids.findIndex((c) => lineOf(sf, c.getEnd()) === to);
+      if (i >= 0 && j > i) { run = kids.slice(i, j + 1); return; }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(fn.body);
+  if (!chunk && !run) {
+    const near = [];
+    const list = (n) => { if (isJsx(n) && lineOf(sf, n.getStart(sf)) >= from - 3 && lineOf(sf, n.getStart(sf)) <= from + 3) near.push(`${lineOf(sf, n.getStart(sf))}-${lineOf(sf, n.getEnd())}`); ts.forEachChild(n, list); };
+    list(fn.body);
+    throw new Error(`no JSX element (or run of sibling elements) of ${input.function} spans exactly lines ${from}-${to}` + (near.length ? `; elements near there: ${[...new Set(near)].slice(0, 8).join(', ')}` : ''));
+  }
+  const start = (chunk || run[0]).getStart(sf), end = (chunk || run[run.length - 1]).getEnd();
+  const nodes = chunk ? [chunk] : run;
+  const stmt = fn.body.statements.find((st) => st.getStart(sf) <= start && st.getEnd() >= end);
+  if (!stmt) throw new Error('the chunk isn\'t inside one statement of the component');
+  let bad = null;
+  const scan = (n) => {
+    if (bad) return;
+    if (n.kind === ts.SyntaxKind.ThisKeyword) bad = '`this`';
+    if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && /^use[A-Z]/.test(n.expression.text)) bad = `a hook call (${n.expression.text})`;
+    ts.forEachChild(n, scan);
+  };
+  nodes.forEach(scan);
+  if (bad) throw new Error(`the chunk has ${bad}; it can't become a component`);
+  // what the chunk uses that's declared inside the statement (outside the chunk): parameters
+  const params = [];
+  for (const n of nodes) for (const { node, sym } of references(checker, n)) {
+    const d = sym.declarations && sym.declarations[0];
+    if (!d || d.getSourceFile() !== sf || !within(d, stmt) || (d.pos >= start && d.end <= end)) continue;
+    if (!params.some((p) => p.sym === sym)) {
+      const type = checker.typeToString(checker.getTypeOfSymbolAtLocation(sym, d), undefined, ts.TypeFormatFlags.NoTruncation);
+      params.push({ sym, name: node.text, type: /^any$|import\(/.test(type) ? '' : type });
+    }
+  }
+  const helper = `render${input.name}`;
+  if (new RegExp(`(?<![\\w$])${helper}(?![\\w$])`).test(text)) throw new Error(`\`${helper}\` is already a name in ${input.file}`);
+  const indent = text.slice(lineStart(text, stmt.getStart(sf)), stmt.getStart(sf));
+  // the chunk's lines, re-indented to sit inside the helper
+  const col = start - lineStart(text, start), pad = indent + (chunk ? '  ' : '    ');
+  const lines = text.slice(start, end).split('\n').map((l, i) => (i === 0 ? pad + l : pad + l.slice(Math.min(col, l.length - l.trimStart().length))));
+  const body = chunk ? lines.join('\n') : `${indent}  <>\n${lines.join('\n')}\n${indent}  </>`;
+  const sig = params.map((p) => (p.type ? `${p.name}: ${p.type}` : p.name)).join(', ');
+  const decl = `${indent}const ${helper} = (${sig}) => (\n${body}\n${indent})\n\n`;
+  const call = `${helper}(${params.map((p) => p.name).join(', ')})`;
+  const parent = nodes[0].parent;
+  const inJsx = ts.isJsxElement(parent) || ts.isJsxFragment(parent);
+  const out = applyEdits(text, [[lineStart(text, stmt.getStart(sf)), lineStart(text, stmt.getStart(sf)), decl],
+                                [start, end, inJsx ? `{${call}}` : call]]);
+  return { text: out, helper, params: params.map((p) => p.name) };
+}
+
 // A render helper inside a component (`const renderRow = (item) => <...>`) becomes a component in its own
 // file: its parameters and the component's values it uses become props (context values like useStores()
 // are re-derived inside), its body moves exactly, and every `renderRow(x)` becomes `<Row item={x} ... />`.
@@ -1508,6 +1589,11 @@ function component() {
   const file = abs(input.file), target = abs(input.into);
   if (fs.existsSync(target)) throw new Error(`${input.into} already exists`);
   if (!/^[A-Z][\w$]*$/.test(input.name || '')) throw new Error('the component name must start with a capital letter');
+  if (input.lines) {  // a chunk by lines: a render helper first (in memory), then the same as for one
+    const w = wrapChunk();
+    OVERRIDES.set(path.resolve(file), w.text);
+    input.helper = w.helper;
+  }
   const { checker, sources: [sf] } = program([input.file]);
   const text = sf.text;
   const fn = findFunction(sf, input.function);
@@ -1662,7 +1748,37 @@ function component() {
   }).join('');
   const sig = props.length ? `{ ${props.map((p) => p.name).join(', ')} }: { ${props.map((p) => `${p.name}${p.optional ? '?' : ''}: ${p.type}`).join('; ')} }` : '';
   const hbody = hfn.body;
-  const bodyText = ts.isBlock(hbody) ? hbody.getText(sf) : `{\n${preludeText}  return (\n    ${hbody.getText(sf)}\n  )\n}`;
+  // a key on the helper's root belongs on the element where it's used (in a list, React reads it there):
+  // it moves to every call when its expression only needs the helper's parameters
+  let root = ts.isBlock(hbody) ? null : hbody;
+  while (root && ts.isParenthesizedExpression(root)) root = root.expression;
+  const keyed = root && (ts.isJsxElement(root) ? root.openingElement : ts.isJsxSelfClosingElement(root) ? root : null);
+  const keyAttr = keyed && keyed.attributes.properties.find((a) => ts.isJsxAttribute(a) && a.name.getText(sf) === 'key');
+  const paramSyms = new Map(hparams.map((p, i) => [checker.getSymbolAtLocation(p.name), i]));
+  let keyMoves = false;
+  if (keyAttr && keyAttr.initializer) {
+    const refs = references(checker, keyAttr.initializer);
+    keyMoves = refs.every((r) => paramSyms.has(r.sym) || !(r.sym.declarations || []).some((d) => d.getSourceFile() === sf && within(d, fn)));
+  }
+  const keyAt = (c) => {  // the key's expression with the call's arguments for the parameters
+    const e = keyAttr.initializer, ex = ts.isJsxExpression(e) ? e.expression : e;
+    const subs = references(checker, ex).filter((r) => paramSyms.has(r.sym)).map((r) => {
+      const arg = c.arguments[paramSyms.get(r.sym)];
+      const t = arg ? arg.getText(sf) : 'undefined';
+      return [r.node.getStart(sf) - ex.getStart(sf), r.node.getEnd() - ex.getStart(sf), /^[\w$.]+$/.test(t) ? t : `(${t})`];
+    });
+    return applyEdits(ex.getText(sf), subs);
+  };
+  let exprText = root ? root.getText(sf) : '';
+  if (keyMoves) {
+    const a0 = keyAttr.getStart(sf) - root.getStart(sf), a1 = keyAttr.getEnd() - root.getStart(sf);
+    exprText = exprText.slice(0, a0).replace(/\s+$/, '') + exprText.slice(a1);
+  }
+  if (root) {  // re-indented to sit in the component's return
+    const col = root.getStart(sf) - lineStart(text, root.getStart(sf));
+    exprText = exprText.split('\n').map((l, i) => (i === 0 ? l : '    ' + l.slice(Math.min(col, l.length - l.trimStart().length)))).join('\n');
+  }
+  const bodyText = ts.isBlock(hbody) ? hbody.getText(sf) : `{\n${preludeText}  return (\n    ${exprText}\n  )\n}`;
   const finalBody = ts.isBlock(hbody) && preludeText ? `{\n${preludeText}${hbody.getText(sf).slice(1)}` : bodyText;
   const compText = [importsFor(sf, usedImports, file, target).join('\n'), ...moduleMoved.map((st) => chunk(st, sharedBack.includes(declaredBy(st)[0].text))),
                     `export const ${input.name} = (${sig}) => ${finalBody}\n`].filter(Boolean).join('\n');
@@ -1673,17 +1789,15 @@ function component() {
     const attrs = [];
     hparams.forEach((p, i) => { if (c.arguments[i]) attrs.push(`${p.name.text}={${c.arguments[i].getText(sf)}}`); });
     for (const [sym] of free) attrs.push(`${sym.name}={${sym.name}}`);
+    if (keyMoves) attrs.unshift(`key={${keyAt(c)}}`);
     edits.push([c.getStart(sf), c.end, `<${input.name}${attrs.length ? ' ' + attrs.join(' ') : ''} />`]);
   }
   const imp = importBindings(sf, checker);
   const stillUsed = new Set(keptRefs.filter(({ sym }) => imp.has(sym)).map(({ sym }) => imp.get(sym)));
   pruneImports(sf, stillUsed, edits);
   const screen = mergeImports(applyEdits(text, edits), [`import { ${[input.name, ...sharedBack].join(', ')} } from "${importPath(file, target)}"`], file);
-  // a key on the helper's root belongs on the element where it's used
-  const root = ts.isBlock(hbody) ? null : hbody;
-  const keyed = root && (ts.isJsxElement(root) ? root.openingElement : ts.isJsxSelfClosingElement(root) ? root : null);
-  if (keyed && keyed.attributes.properties.some((a) => ts.isJsxAttribute(a) && a.name.getText(sf) === 'key'))
-    notes.push('the helper set `key` on its root element; in a list, React needs the key on the new element where it is used');
+  if (keyAttr && keyMoves) notes.push('the `key` on its root moved to where it is used');
+  else if (keyAttr) notes.push('the helper set `key` on its root element; in a list, React needs the key on the new element where it is used');
   return { files: { [input.file]: screen, [rel(target)]: compText },
            report: { props: props.map((p) => p.name), prop_types: props.map((p) => `${p.name}${p.optional ? '?' : ''}: ${p.type}`), calls: calls.length, rederived: [...prelude.keys()].map((st) => declaredBy(st)[0] ? declaredBy(st)[0].text : '?'),
                      helpers_moved: moduleMoved.map((st) => declaredBy(st)[0].text), notes } };
@@ -2137,8 +2251,45 @@ function toRef() {
   return { files: { [rel(file)]: out }, converted, skipped };
 }
 
+// The JSX blocks of a component worth a component of their own: elements of `min` lines or more, a few levels
+// deep, with their line ranges (what "lines" in the component op takes).
+function jsxOutline() {
+  const { sources: [sf] } = program([input.file]);
+  const fn = findFunction(sf, input.function);
+  if (!fn) throw new Error(`no function or component named ${input.function} in ${input.file}`);
+  const min = input.min || 8, depthMax = input.depth || 4, out = [];
+  const tag = (n) => (ts.isJsxElement(n) ? n.openingElement.tagName.getText(sf) : ts.isJsxSelfClosingElement(n) ? n.tagName.getText(sf) : '>');
+  const visit = (n, depth) => {
+    const jsx = ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n) || ts.isJsxFragment(n);
+    if (jsx) {
+      const a = lineOf(sf, n.getStart(sf)), b = lineOf(sf, n.getEnd());
+      if (b - a + 1 >= min) {
+        const attrs = (ts.isJsxElement(n) ? n.openingElement : ts.isJsxSelfClosingElement(n) ? n : null);
+        const hint = attrs ? attrs.attributes.properties.filter((p) => ts.isJsxAttribute(p) && /^(testID|style|title|label|key)$/.test(p.name.getText(sf)))
+          .map((p) => p.getText(sf).slice(0, 40)).join(' ') : '';
+        let first = '';  // the first words it shows: a text or a translation key, to tell blocks apart
+        const look = (c) => {
+          if (first) return;
+          if (ts.isJsxText(c) && c.text.trim()) first = c.text.trim();
+          else if (ts.isJsxAttribute(c) && /^(tx|text|title|label|placeholder|headerTx|testID)$/.test(c.name.getText(sf))
+                   && c.initializer && ts.isStringLiteral(c.initializer)) first = `${c.name.getText(sf)}="${c.initializer.text}"`;
+          else ts.forEachChild(c, look);
+        };
+        look(n);
+        out.push({ lines: [a, b], tag: tag(n), depth, hint, first: first.replace(/\s+/g, ' ').slice(0, 50) });
+      }
+      if (depth >= depthMax) return;
+      ts.forEachChild(n, (c) => visit(c, depth + 1));
+      return;
+    }
+    ts.forEachChild(n, (c) => visit(c, depth));
+  };
+  visit(fn.body, 0);
+  return { elements: out.slice(0, input.limit || 40) };
+}
+
 try {
-  const ops = { extract, compare, share, share_hook: shareHook, unify, relocate, dedupe, find_copies: findCopies, same_behaviour: sameBehaviour, signature, component, syntax, rename, fold, to_ref: toRef };
+  const ops = { extract, compare, share, share_hook: shareHook, unify, relocate, dedupe, find_copies: findCopies, same_behaviour: sameBehaviour, signature, component, syntax, rename, fold, to_ref: toRef, jsx_outline: jsxOutline };
   if (!ops[input.op]) throw new Error(`unknown op ${input.op}`);
   process.stdout.write(JSON.stringify({ ok: true, ...ops[input.op]() }));
 } catch (e) {
