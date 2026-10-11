@@ -846,8 +846,31 @@ function share() {
   return { files, report: { shared: [...moving], skipped } };
 }
 
+// Near copies made identical: each named declaration in `into` is replaced, exactly, by the same
+// declaration from `from` (the model chose which version both should use). Then `share` can take it.
+function unify() {
+  const { sources: [S, T] } = program([input.from, input.into]);
+  const key = (d) => `${d.parent || ''}/${d.name}`;
+  const ds = declarations(S).filter((d) => d.depth <= 1), dt = declarations(T).filter((d) => d.depth <= 1);
+  const edits = [], done = [], missing = [];
+  for (const name of input.names) {
+    const t = dt.find((d) => d.name === name);
+    const src = t && ds.find((d) => key(d) === key(t));
+    if (!t || !src) { missing.push(name); continue; }
+    if (src.flat === t.flat) continue;
+    const text = S.text.slice(src.stmt.getStart(S), src.stmt.end);
+    const ind = (sf, st) => sf.text.slice(lineStart(sf.text, st.getStart(sf)), st.getStart(sf));
+    const from = ind(S, src.stmt), to = ind(T, t.stmt);
+    const body = from === to ? text : text.split('\n').map((l, i) => (i && l.startsWith(from) ? to + l.slice(from.length) : l)).join('\n');
+    edits.push([t.stmt.getStart(T), t.stmt.end, body]);
+    done.push(name);
+  }
+  if (!done.length) throw new Error(missing.length ? `not found in both files: ${missing.join(', ')}` : 'already identical');
+  return { files: { [input.into]: applyEdits(T.text, edits) }, report: { unified: done, missing } };
+}
+
 try {
-  const ops = { extract, compare, share, share_hook: shareHook };
+  const ops = { extract, compare, share, share_hook: shareHook, unify };
   if (!ops[input.op]) throw new Error(`unknown op ${input.op}`);
   process.stdout.write(JSON.stringify({ ok: true, ...ops[input.op]() }));
 } catch (e) {

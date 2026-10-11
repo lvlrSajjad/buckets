@@ -2286,7 +2286,7 @@ TASK_SCHEMA = {
     "properties": {
         "id": {"type": "string"},
         "file": {"type": "string"},
-        "action": {"type": "string", "enum": ["edit", "create", "delete", "move", "share"]},
+        "action": {"type": "string", "enum": ["edit", "create", "delete", "move", "share", "unify"]},
         "instructions": {"type": "string"},
         "done_when": {"type": "string"},
         "read_first": {"type": "array", "items": {"type": "string"}},
@@ -2455,7 +2455,11 @@ text and the files it opens itself, and it cannot run commands):
   the hook's parameters, what it returns, the helpers that must come along and the imports. Action
   "share": "file" is the shared file (new or existing), "from" the two files that have the same code,
   "select" the names of the identical top-level declarations to move there; both files then import
-  them. Plan other tasks only for what a move can't do (renaming, making two near-copies identical).
+  them. Action "unify" makes near copies identical first: "file" is the variant to change, "from" the
+  other variant (one file), "select" the declarations to copy over exactly; plan it before the share,
+  only where the difference is incidental (formatting, a safer null check, `let` vs `const`, a renamed
+  local), never where one app has a real feature the other doesn't. Plan other tasks only for what
+  these can't do.
 - Instructions must be self-contained and concrete: name the functions, types and exports to add
   or change, their signatures, and where in the file they go. Include exact code when it's short.
 - "read_first" lists other files the coder should open for context (types it must use, patterns to
@@ -2829,6 +2833,9 @@ def variants_text(cmp: dict, limit: int = 3500) -> str:
         out.append(f"Near copy `{p.get('parent') + '.' if p.get('parent') else ''}{p['name']}` ({p['similarity']:.0%} alike; "
                    f"a {cmp['a'].split('/')[-2]}:{p['a'][0]}-{p['a'][1]}, b {cmp['b'].split('/')[-2]}:{p['b'][0]}-{p['b'][1]}); "
                    f"lines only in a (-) or b (+):\n" + "\n".join("  " + l for l in p.get("diff", "").splitlines()[:10]))
+    if near:
+        out.append("For a near copy whose difference is incidental, a \"unify\" task (before the share) copies one "
+                   "version over the other; leave real differences (a feature only one app has) alone.")
     if len(near) > 8:
         out.append(f"… {len(near) - 8} more near copies: " + ", ".join(f"`{p['name']}`" for p in near[8:30]))
     diff = names("different")
@@ -2864,6 +2871,11 @@ def validate_move(t: dict, f: str, repo: Path, task_id: str) -> dict:
         return {**base, "file": f, "into": into, "name": name, "where": where.split(".")[-1],
                 "select": "logic" if not select or [x.lower() for x in select] == ["logic"] else select}
     sources = [inside(x) for x in t.get("from") or []]
+    if t["action"] == "unify":
+        if len(sources) != 1 or not (repo / sources[0]).is_file() or not (repo / f).is_file() or not select:
+            raise ValueError("unify: \"file\" is the variant to change, \"from\" the one other variant to copy from, "
+                             "\"select\" the declarations to copy")
+        return {**base, "file": f, "from": sources, "select": select, "where": ""}
     if len(sources) != 2 or not all((repo / x).is_file() and x.endswith(MOVABLE) for x in sources):
         raise ValueError("share: \"from\" must name the two existing TypeScript/JavaScript files that both have the code")
     if not f.endswith(MOVABLE) or not select:
@@ -2878,7 +2890,7 @@ def validate_tasks(tasks: list, repo: Path, max_tasks: int, prefix: str) -> list
         if not f or f.startswith("/") or ".." in f.split("/"):
             raise ValueError(f"task file path {t['file']!r} must be relative to the repo root")
         action = t["action"]
-        if action in ("move", "share"):
+        if action in ("move", "share", "unify"):
             try:
                 out.append(validate_move(t, f, repo, f"{prefix}{len(out) + 1}"))
             except ValueError as e:
@@ -4263,7 +4275,7 @@ class Buckets:
         """One file's task: the planner's exact edits applied directly when they fit, else a coder
         session. Anything else the coder touches is put back as it was."""
         self.involved = list(dict.fromkeys(getattr(self, "involved", []) + [task["file"]]))
-        if task["action"] in ("move", "share"):
+        if task["action"] in ("move", "share", "unify"):
             return self.apply_move(task, commit)
         if task.get("edits"):
             done = self.apply_planned(task, commit)
@@ -4359,6 +4371,19 @@ class Buckets:
         if task["action"] == "move":
             payload = {"op": "extract", "file": task["file"], "function": task["where"], "select": task["select"],
                        "into": task["into"], "name": task["name"]}
+        elif task["action"] == "unify":
+            d = ts_moves(self.repo, {"op": "unify", "from": task["from"][0], "into": task["file"], "names": task["select"]})
+            if not d.get("ok"):
+                return {**task, "status": "failed", "note": f"BLOCKED: {d.get('error', 'unify failed')}"}
+            (self.repo / task["file"]).write_text(d["files"][task["file"]])
+            self.unified = getattr(self, "unified", set()) | set(d["report"]["unified"])
+            note = (f"made {', '.join(d['report']['unified'])} in {task['file']} identical to {task['from'][0]}'s"
+                    + (f"; not found: {', '.join(d['report']['missing'])}" if d["report"]["missing"] else ""))
+            if commit:
+                git(self.repo, "add", "-A", "--", task["file"])
+                git(self.repo, "commit", "--no-verify", "-q", "-m", f"buckets {task['id']}: unify ({note[:200]})\n\n{task['instructions'][:1000]}")
+            say(f"  {ok()} {task['id']} unify ({int(time.time() - start)}s): {paint(note[:220], 'dim')}")
+            return {**task, "status": "done", "note": f"DONE: {note}"}
         else:
             return self.apply_share(task, commit, start)
         d = ts_moves(self.repo, payload)
@@ -4404,9 +4429,10 @@ class Buckets:
         if not cmp.get("ok"):
             return {**task, "status": "failed", "note": f"BLOCKED: {cmp.get('error', 'compare failed')}"}
         same = {p["name"]: p for p in cmp["pairs"] if p["status"] == "identical"}
-        top = [n for n in task["select"] if same.get(n, {}).get("module_level")]
-        inner = [n for n in task["select"] if same.get(n, {}).get("depth") == 1]
-        skipped = [n for n in task["select"] if n not in top and n not in inner]
+        wanted = list(dict.fromkeys(task["select"] + sorted(getattr(self, "unified", set()))))  # made identical this run
+        top = [n for n in wanted if same.get(n, {}).get("module_level")]
+        inner = [n for n in wanted if same.get(n, {}).get("depth") == 1]
+        skipped = [n for n in wanted if n not in top and n not in inner]
         notes, written, kept_why = [], [], []
 
         def write(d: dict) -> None:

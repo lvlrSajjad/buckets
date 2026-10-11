@@ -1844,6 +1844,28 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
                                            "names": ["onlyA"], "into": "src/x/use-other.ts", "name": "useOther"})
         self.assertFalse(bad["ok"])
 
+    def test_unify_then_share(self):
+        a = 'import { fmt } from "../util"\n\nconst same = (x: number) => fmt(x * 2)\nconst near = (x: number) => fmt(x ?? 0)\n\nexport const A = () => same(near(1))\n'
+        b2 = a.replace("fmt(x ?? 0)", "fmt(x)").replace("export const A", "export const B")
+        for f, t in {"src/a/screen.ts": a, "src/b/screen.ts": b2, "src/util.ts": "export const fmt = (n: number) => `${n}`\n"}.items():
+            (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / f).write_text(t)
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "variants"], cwd=self.repo, check=True)
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        b = buckets.Buckets(cfg, self.repo, "x")
+        tasks = buckets.validate_tasks([
+            {"id": "T1", "file": "src/b/screen.ts", "action": "unify", "from": ["src/a/screen.ts"], "select": ["near"],
+             "instructions": "use the null-safe version", "done_when": "", "edits": []},
+            {"id": "T2", "file": "src/shared.ts", "action": "share", "from": ["src/a/screen.ts", "src/b/screen.ts"], "select": ["same"],
+             "instructions": "", "done_when": "", "edits": []}], self.repo, 8, "T")
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = [b.code_task(t) for t in tasks]
+        self.assertEqual([g["status"] for g in got], ["done", "done"], got)
+        shared = (self.repo / "src/shared.ts").read_text()
+        self.assertIn("export const near = (x: number) => fmt(x ?? 0)", shared)   # unified, then shared too
+        self.assertIn("export const same", shared)
+
     def test_shared_hook_names(self):
         self.assertEqual(buckets.shared_hook_names("a/b/create-invoice-shared.tsx", "a/b/x/use-create-invoice-screen.tsx"),
                          ("a/b/use-create-invoice-screen-shared.ts", "useCreateInvoiceScreenShared"))
