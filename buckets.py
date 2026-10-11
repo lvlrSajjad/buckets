@@ -5080,8 +5080,22 @@ class Buckets:
         for (f, name), (home, diff) in copies.items():
             gone = git(self.repo, "diff", "-U0", f"{base}..HEAD", "--", f, check=False)
             if re.search(rf"(?m)^-\s*(export\s+)?(const|let|var|function)\s+{re.escape(name)}\b", gone):
-                out.append(f"- `{f}` had its own `{name}`, which differs from `{home}`'s, and the change removed it; it now uses "
-                           f"the shared one, so these differences apply there (- shared, + the removed copy):\n{diff}")
+                # Compare the shared version as it is NOW with the copy as it WAS: the shared one may have
+                # been fixed since the dedupe first looked.
+                now = (self.repo / home).read_text() if (self.repo / home).is_file() else ""
+                was = git(self.repo, "show", f"{base}:{f}", check=False)
+                check = ts_moves(self.repo, {"op": "same_behaviour", "a_text": now, "b_text": was, "name": name}, timeout=60)
+                r = (check.get("result") if check.get("ok") else None)
+                if r and r.get("same"):
+                    out.append(f"- `{f}` had its own `{name}` and the change replaced it with `{home}`'s, which now behaves the "
+                               f"same as that copy did on {r['tried']} sample inputs (run mechanically): no behaviour change there")
+                elif r:
+                    out.append(f"- `{f}` had its own `{name}` and the change replaced it with `{home}`'s, which behaves "
+                               f"differently: ({r['input']}) gives {r['a']} now, {r['b']} from the removed copy")
+                else:
+                    out.append(f"- `{f}` had its own `{name}`, which differed from `{home}`'s when first compared, and the "
+                               f"change removed it (couldn't run the two to compare them now); first differences "
+                               f"(- shared, + the removed copy):\n{diff}")
         return ("\nBehaviour check, mechanical (a removed copy that differed; the request said behaviour must not change):\n"
                 + "\n".join(out) + "\n") if out else ""
 
@@ -5176,6 +5190,11 @@ class Buckets:
             content, notes, _, cut = chat_turn(judge, self.run, f"confirm-{rnd}", messages, schema=CONFIRM_SCHEMA,
                                                think=True, think_budget=judge.get("think_budget") or 2000,
                                                max_tokens=4000, timeout=self.timeout)
+            if cut or not content.strip():  # thinking ran out: ask for the answer, with its notes
+                content, _, _, _ = chat_turn(judge, self.run, f"confirm-{rnd}-answer", messages[:-1] + [
+                    {"role": "user", "content": messages[-1]["content"] + "\n\nYour notes so far:\n" + notes[-6000:]
+                     + "\n\nReply now with only the JSON object."}],
+                    schema=CONFIRM_SCHEMA, think=False, max_tokens=1500, timeout=self.timeout)
             d = extract_json(content)
             picked = {int(x) for x in d["real"]}
             detail(f"confirm-{rnd}: {d.get('why', '')[:200]}")

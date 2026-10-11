@@ -1080,8 +1080,27 @@ function dedupe() {
   return { files, report: { replaced, differ, missing, equivalent } };
 }
 
+// Does `name` in one text behave like `name` in another (e.g. the shared version now vs a copy as it was)?
+function sameBehaviour() {
+  const os = require('os');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'buckets-behaviour-'));
+  try {
+    const fa = path.join(dir, 'a.ts'), fb = path.join(dir, 'b.ts');
+    fs.writeFileSync(fa, input.a_text); fs.writeFileSync(fb, input.b_text);
+    const prog = ts.createProgram([fa, fb], { noEmit: true, allowJs: true, jsx: ts.JsxEmit.Preserve, noResolve: true });
+    const checker = prog.getTypeChecker();
+    const A = prog.getSourceFile(fa), B = prog.getSourceFile(fb);
+    const top = (sf) => sf.statements.find((s) => declaredBy(s).some((id) => id.text === input.name));
+    const ta = top(A), tb = top(B);
+    if (!ta || !tb) return { result: null, why: `\`${input.name}\` not found in both` };
+    return { result: behaviour(checker, A, ta, B, tb) };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 try {
-  const ops = { extract, compare, share, share_hook: shareHook, unify, relocate, dedupe };
+  const ops = { extract, compare, share, share_hook: shareHook, unify, relocate, dedupe, same_behaviour: sameBehaviour };
   if (!ops[input.op]) throw new Error(`unknown op ${input.op}`);
   process.stdout.write(JSON.stringify({ ok: true, ...ops[input.op]() }));
 } catch (e) {

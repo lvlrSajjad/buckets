@@ -2140,7 +2140,7 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
         # a hand edit that removes a differing copy is flagged for the reviewers
         (self.repo / "src/a.ts").write_text('import { fmt } from "./utils/text"\nexport const A = () => fmt(\' x \')\n')
         commit_all(self.repo, "hand edit")
-        self.assertIn("had its own `fmt`, which differs", b.removed_copies_text(base))
+        self.assertIn("which behaves differently: (null) gives <throws TypeError> now", b.removed_copies_text(base))
         subprocess.run(["git", "reset", "-q", "--hard", base], cwd=self.repo, check=True)
         # the right way: unify the safer copy into the shared one (keeping its export), then dedupe
         with self.assertRaises(ValueError):                                          # no "from" until it's filled
