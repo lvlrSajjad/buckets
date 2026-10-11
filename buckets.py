@@ -3423,6 +3423,8 @@ class Buckets:
             into = str(PurePosixPath(src).parent / into)
         named = re.search(r"\buse[A-Z]\w*", self.request)
         stem = PurePosixPath(into).stem
+        if not (named or stem.startswith("use") or re.search(r"\bhooks?\b", self.request, re.I)):
+            return None  # a component, module or util: the logic-into-a-hook move isn't what's asked
         name = named.group(0) if named else re.sub(r"[-_.](\w)", lambda m: m.group(1).upper(), stem)
         decls = self.index.outline().get(src, [])
         if not decls or not re.fullmatch(r"[A-Za-z_$][\w$]*", name):

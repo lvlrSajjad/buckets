@@ -1753,6 +1753,8 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual([t["action"] for t in b.prefer_move(planned)["tasks"]], ["move"])
         self.assertIsNone(buckets.Buckets(cfg, self.repo, "explain src/thing-screen.tsx").move_hint())
+        component = buckets.Buckets(cfg, self.repo, "Split the title part of src/thing-screen.tsx into a component in src/thing-title.tsx")
+        self.assertIsNone(component.move_hint())                              # not a hook: no logic move suggested
         sparse = {"summary": "s", "tasks": [{"id": "T1", "file": "src/thing-screen.tsx", "action": "move",
                                              "instructions": "into: src/use-thing.ts", "done_when": "", "where": "", "edits": []}]}
         filled = buckets.validate_plan(b.fill_moves(sparse), self.repo, 8)["tasks"][0]
