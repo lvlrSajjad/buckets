@@ -48,7 +48,10 @@ references through TypeScript)
     `coder.engine = "native"`. Becomes the default when the suite's A/B says it's as reliable and faster.
     opencode stays as the fallback. M
 15b. UI checks through simframe: a saved flow (`simframe flow run`) as one more check before and after,
-    with Metro reloaded on the branch; opt-in for UI changes. M
+    with Metro reloaded on the branch; opt-in for UI changes. No new code needed to start: a repo check can be
+    `"ui": "curl -s -X POST localhost:8081/reload >/dev/null; sleep 5; simframe flow run <flow>"` (Metro serves the
+    working tree buckets has on its branch; exit 0/1). Needs a saved flow, a booted simulator and Metro running;
+    still to do: run it only when the change touches UI files, and never on the other machine. M
 16. Affected tests only during rounds, the full suite at the end. M
 17. ~~Coverage-driven test jobs~~ **done** (coverage facts for test requests). M
 18. ~~`git bisect run <check>`~~ **done** (`buckets bisect`). M
