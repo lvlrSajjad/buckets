@@ -30,39 +30,17 @@ itself was left exactly as found (no branches, no `.buckets/`).
 
 ## The plan, in order (what to do next)
 
-1. ~~Windows server: MTP and caching~~ **done** (field notes 20): writes 35 → ~40 tok/s, drafts 97%
-   accepted, multi-turn prompts reuse the cache.
-2. ~~Double review + evidence rules~~ **done** (field notes 21): both machines review at once; a lone
-   definite-error claim while checks pass is confirmed by the other reviewer; weak new tests are listed
-   mechanically for the reviewers. Still to see live: a disagreement (the confirm step).
-2b. ~~Big-file refactor: mechanical extract~~ **done** (field notes 22): `ts_moves.cjs` (extract / compare /
-   share), task actions `move` and `share`, a dry-run suggestion in the planner's facts, a guard that swaps a
-   retyping plan for the move, redundant edit tasks next to a move dropped. The questionnaire split: 20 min
-   and nothing (retyping) → **5m 14s, correct**.
-2c. **Merge ecotrak / ecotrak-techs variants** (field notes 23–24): `share` (identical top-level declarations into
-   the named shared file; identical statements inside both components into a shared hook there, only what both
-   variants can move, re-deriving `useStores()`-style values, never after an early return), `unify` (near copies:
-   the model picks the version, buckets copies it exactly, before the share). Live and verified: rfp-details
-   5m 38s, inventory-details 4m 52s, create-invoice 5m 05s, proposal-details 4m 43s (with two unifies).
-   Next: a shared hook for statements after an early return (move the guard, or pass the guarded values);
-   JSX sections → components; whole-screen merges behind a `variant` prop (Claude-planned, local-applied).
-2d. **Owner's job list** (docs/roadmap.md, "Where it has to help"). Done tonight: AGENTS.md rule digest in every
-   plan and review; locale-entry check for reviews (10 real gaps found in 60 ecotrak-mobile commits); red CI
-   (failed GitHub Actions log as check output). Next: PR conflicts on PR branches, dependency batches,
-   graphify communities as facts, Sonar issues as check output, a backend contract check.
-3. **Prompt layout for cache reuse:** byte-stable front (system, tool schema in fixed order, guidance,
-   map, facts), the step's instructions last; check `prompt_eval_cached_count`. Ollama: constant
-   `num_ctx`, a longer `keep_alive` during a run.
-4. **Parallel coding lanes:** independent tasks coded on both machines when edits fall back to coders
-   (needs an opencode provider for the Mac's Ollama 35B).
-5. **Two candidates + tests** for hard tasks (both machines, tests pick, only "both failed" goes to
-   Claude); research cites 63.5% → 71.2% (SWE-TRACE).
-6. **Language servers and ast-grep:** `multilspy` (tsserver, basedpyright) for references/rename;
-   ast-grep for codemods; tree-sitter outlines (TS outline is cached per run today).
-7. **Adaptive placement:** if the Mac is under memory pressure (IDE, browsers), plan on Windows.
-8. **Windows network** (owner, when convenient): Windows → Mac is ~27 KB/s on every non-SMB port (SMB
-   30–40 MB/s). Research's top suspects: antivirus HTTP/web scanning on all ports, or Killer/SmartByte
-   prioritization. Diagnostics in the research file, section 8.
+Done (field notes 20–24): MTP and caching on Windows; double review (a lone objection while checks pass is
+weighed by the other reviewer); mechanical moves (`ts_moves.cjs`: extract, compare, share, share_hook,
+unify) with dry-run suggestions, guards and live-verified results (questionnaire split 5m 14s; rfp-details,
+inventory-details, create-invoice and proposal-details merges in 4m 43s–5m 38s); the AGENTS.md rule digest;
+the locale-entry check; red CI as check output; the variant inventory for questions.
+
+Next: **docs/roadmap.md, "Backlog, ranked"**: 0 (public-repo decision), then tier 1 (follow-ups on the
+unmerged branch, `undo`, round rollback, diff-checked reviews, time limit, memory outside the repo), then
+the refactoring toolbox (move to util, change a signature everywhere, N-way duplicates, components, renames),
+then `measure`, the batch loop and the regression suite. Older infrastructure items (prompt cache layout,
+parallel lanes, two candidates, adaptive placement, Windows network) are tier 5 there.
 
 ## How to test changes (gotchas learned the hard way)
 

@@ -3,6 +3,74 @@
 What's left, roughly in the order I'd do it, with why and how big. Measured results and the history
 behind these are in [field-notes.md](field-notes.md).
 
+## Backlog, ranked (2026-10-11, agreed with the owner)
+
+Size: S under ~1 h, M a few hours, L a day or more. Each item is tested live (ecotrak-mobile left as found).
+
+**0. Now:** decide what to do about ecotrak-specific detail in this public repo's field notes (make the repo
+private, or move the ecotrak notes to a private file).
+
+**Tier 1: gaps in what exists (trust)**
+1. Follow-ups build on the previous run's unmerged branch ("now fix w in x, z" starts from `main` today). S
+2. `undo`: revert the last merge. S
+3. Roll back a round that made things worse (round N breaks checks that N−1 passed: revert it, stop). S
+4. Reviews checked against the diff (task statuses and real changes in front of the reviewers; one said
+   "formatting was unified" when those tasks had been dropped). S
+5. A built-in time limit and clean stops: `--time-limit`, SIGTERM handled like Ctrl-C, cleanup for
+   unattended runs (a stop during coding leaves the checkout on the branch). S
+6. Project memory outside the repo, per repo (`.buckets/` appears untracked in repos that shouldn't change). S
+
+**Tier 2: the refactoring toolbox** (big, medium and small moves combined in one plan; one engine finds
+references through TypeScript)
+7. Move a function to a util, updating every importer. S–M
+8. Change a signature everywhere: add an optional parameter or prop, rename or reorder one, update every
+   call site. M
+9. Code copied 3–4 times that drifted apart: find the copies across the repo, unify, move to one util,
+   replace the copies with imports (last night's two-variant merge, generalized). M–L
+10. Turn part of a screen into a component (a render helper, or a JSX chunk by lines). M
+11. Renames across files through the TypeScript language service. S once 8 exists
+12. Shared hooks for code after an early return, or code that differs slightly. M
+
+**Tier 3: confidence and measurement**
+13. `measure`: commands run on `main` and the branch, the numbers compared (warnings, bundle size, timing,
+    coverage). S–M
+14. Batch loop (`buckets each "<request>" <targets>`). S
+15. **A regression suite for buckets itself:** fixed real requests with expected outcomes (questions,
+    small and medium changes, the split, the four merges), run overnight with times and pass rates. M
+16. Affected tests only during rounds, the full suite at the end. M
+17. Coverage-driven test jobs. M
+18. `git bisect run <check>`. M
+
+**Tier 4: workflows from the owner's list**
+19. Conflicts on PR branches. M
+20. Red CI end to end from the PR's status (the log is already read). S
+21. Sonar issues as check output. S–M
+22. Dependabot batches and package patches. M
+23. Backend contract check (mobile calls vs ecotrak-api; hard-coded search params). L
+24. Web-parity scan (ecotrak-web as a related repo). M
+25. Jira tickets as the request (text). S
+26. Python for the move tools. M
+
+**Tier 5: speed and infrastructure**
+27. Prompt layout for cache reuse; parallel coding lanes; two candidates plus tests; plan on Windows when
+    the Mac is busy; graphify communities as facts; the Windows network fix. S–M each
+28. Lighter reviews for mechanical-only runs (one reviewer when every task was a move/share/unify and the
+    checks pass). S
+
+**Quick wins, any time:** merge byte-identical variant files (`more-navigator.tsx`); a leftover-debug
+check (`console.log`/`debugger` added); cleanup jobs for the 10 missing `en_us.json` entries and the debug
+logs in the techs variants; answer questions from the facts alone when they suffice; README catch-up
+(`unify`, shared hooks, AGENTS.md digest, locale check, red CI, variant inventory); a pre-commit test hook
+in this repo; a "confirm" list for the owner of judgment calls made unattended (e.g. module state shared
+between variants).
+
+**When the owner OKs the spend:** Claude baselines for the questionnaire split and the create-invoice
+merge (about $2–4), to measure what local saves.
+
+**Stays with Claude:** advanced components (the kanban board), Figma and screenshots, e2e/CI design,
+whole-screen merges behind `isEcotrak()` guards, architecture calls; buckets applies what Claude plans
+(`--plan-file`).
+
 ## Where it has to help (the owner's list, 2026-10-11)
 
 What the owner uses Claude Code for, unprioritized, and where buckets stands on each:
