@@ -3877,6 +3877,9 @@ class Buckets:
         cov = self.coverage_hint()
         if cov:
             parts.append(cov)
+        api = self.contract_hint()
+        if api:
+            parts.append(api)
         rn = self.rename_hint()
         if rn:
             t, r = rn["task"], rn["report"]
@@ -3933,6 +3936,30 @@ class Buckets:
         if self._facts:
             say(f"  {ok()} gathered {len(shown)} code excerpt(s) and related tests mechanically, before planning")
         return self._facts
+
+    def contract_hint(self) -> str:
+        """For a request about API calls, endpoints or the backend that names files: how those files' calls fit the
+        backend's spec (from `buckets contract`, no model)."""
+        if hasattr(self, "_contract_hint"):
+            return self._contract_hint
+        self._contract_hint = ""
+        if not re.search(r"\b(api|endpoints?|backend|requests?|params?|query|payload|contract|swagger)\b", self.request, re.I):
+            return ""
+        files = [f for f in paths_in_text(self.request, self.index.files) if f.endswith((".ts", ".tsx", ".js", ".jsx"))]
+        settings = contract_settings(self.repo, self.rc)
+        if not files or not settings or not CONTRACT_SCRIPT.exists():
+            return ""
+        d = run_contract(self.repo, {**settings, "include": files})
+        if not d.get("ok"):
+            detail(f"contract check: {d.get('error')}")
+            return ""
+        found = contract_findings(d["calls"])
+        fine = [c for c in d["calls"] if c["status"] == "ok"]
+        say(f"  {ok()} checked {len(d['calls'])} API call(s) in the named files against the spec: {len(found)} finding(s)")
+        self._contract_hint = ("The named files' API calls against the backend's spec (checked mechanically):\n"
+                               + "\n".join(f"- {f}" for f in found[:30])
+                               + (f"\n- {len(fine)} other call(s) match their endpoints" if fine else ""))
+        return self._contract_hint
 
     def coverage_hint(self) -> str:
         """For a request to add tests or raise coverage for named files: what the tests don't reach in them yet
@@ -7644,6 +7671,91 @@ def cmd_each(argv: list[str]) -> int:
     return 0 if done == len(targets) else 2
 
 
+# ---------------------------------------------------------------- buckets contract
+
+
+CONTRACT_SCRIPT = Path(__file__).resolve().parent / "api_contract.cjs"
+
+
+def contract_settings(repo: Path, rc: dict) -> dict | None:
+    """Where the API spec is and what to scan: the repo rule's "contract", else a swagger-spec.json or openapi.json
+    at the top of a related repo (the backend)."""
+    c = dict(rc.get("contract") or {})
+    if not c.get("spec"):
+        for path in (rc.get("related") or {}).values():
+            for name in ("swagger-spec.json", "openapi.json", "swagger.json", "openapi/openapi.json"):
+                spec = Path(os.path.expanduser(str(path))) / name
+                if spec.is_file():
+                    c["spec"] = str(spec)
+                    break
+            if c.get("spec"):
+                break
+    if not c.get("spec"):
+        return None
+    c["spec"] = os.path.expanduser(c["spec"])
+    return c
+
+
+def run_contract(repo: Path, settings: dict) -> dict:
+    payload = {"repo": str(repo), **settings}
+    try:
+        r = subprocess.run(["node", str(CONTRACT_SCRIPT)], input=json.dumps(payload), cwd=repo, capture_output=True,
+                           text=True, timeout=600)
+        return json.loads(r.stdout) if r.stdout.strip() else {"ok": False, "error": r.stderr.strip()[-300:] or "no output"}
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
+        return {"ok": False, "error": str(e)[:300]}
+
+
+def contract_findings(calls: list[dict], files: list[str] | None = None) -> list[str]:
+    """One line per call that doesn't fit the spec: no endpoint, the wrong method, keys it doesn't declare, required
+    ones not sent."""
+    out = []
+    for c in calls:
+        if files is not None and c["file"] not in files:
+            continue
+        where = f"{c['file']}:{c['line']} {c['method']} {c['path']}"
+        if c["status"] == "no-endpoint":
+            out.append(f"{where}: no such endpoint in the spec")
+        elif c["status"] == "method-mismatch":
+            out.append(f"{where}: the spec has {', '.join(c.get('allowed') or []) or 'other methods'} there")
+        if c.get("unknown_keys"):
+            out.append(f"{where}: sends {', '.join(c['unknown_keys'])}, which {c.get('endpoint')} doesn't declare")
+        if c.get("missing_required"):
+            out.append(f"{where}: doesn't send {', '.join(c['missing_required'])}, required by {c.get('endpoint')}")
+    return out
+
+
+def cmd_contract(cfg: dict, argv: list[str]) -> int:
+    """`buckets contract`: every API call the app makes, checked against the backend's OpenAPI spec (no model)."""
+    repo = git_toplevel(".")
+    if repo is None:
+        die("run this inside the repo")
+    settings = contract_settings(repo, {**path_rules(cfg, repo), **repo_config(repo)})
+    if not settings:
+        die('no API spec found: set "contract": {"spec": "<openapi.json>", "include": ["src"]} in the repo rule, '
+            'or list the backend under "related"')
+    start = time.time()
+    with Ticker("  Checking the app's API calls against the spec"):
+        d = run_contract(repo, settings)
+    if not d.get("ok"):
+        die(f"the contract check failed: {d.get('error')}")
+    s = d["summary"]
+    findings = contract_findings(d["calls"])
+    lines = [f"## API calls against {Path(settings['spec']).name} ({int(time.time() - start)}s)", "",
+             f"{s.get('calls', len(d['calls']))} call(s) in {s.get('files', '?')} file(s): " + ", ".join(
+                 f"{s[k]} {k}" for k in ("ok", "no-endpoint", "method-mismatch", "unresolved", "external") if s.get(k)), ""]
+    if findings:
+        lines += ["| Where | What |", "|---|---|"] + [f"| `{f.split(': ', 1)[0]}` | {f.split(': ', 1)[1]} |" for f in findings]
+    else:
+        lines.append("Every call fits the spec.")
+    unresolved = [c for c in d["calls"] if c["status"] == "unresolved"]
+    if unresolved:
+        lines += ["", f"{len(unresolved)} call(s) whose URL couldn't be worked out: "
+                  + ", ".join(f"{c['file']}:{c['line']}" for c in unresolved[:12])]
+    print("\n".join(lines))
+    return 0
+
+
 # ---------------------------------------------------------------- buckets bisect
 
 
@@ -8871,6 +8983,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_win(load_config(), (sys.argv[1:] if argv is None else argv)[1:])
     if (sys.argv[1:] if argv is None else argv)[:1] == ["each"]:
         return cmd_each((sys.argv[1:] if argv is None else argv)[1:])
+    if (sys.argv[1:] if argv is None else argv)[:1] == ["contract"]:
+        return cmd_contract(load_config(), (sys.argv[1:] if argv is None else argv)[1:])
     if (sys.argv[1:] if argv is None else argv)[:1] == ["bisect"]:
         return cmd_bisect(load_config(), (sys.argv[1:] if argv is None else argv)[1:])
     if (sys.argv[1:] if argv is None else argv)[:1] == ["measure"]:

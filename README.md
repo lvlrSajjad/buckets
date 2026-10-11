@@ -257,6 +257,19 @@ One run per target, one after another, each on its own branch from where you are
 each other); `{}` is the target, `{1}`, `{2}` its fields. At the end, a table of how each went, with its
 branch to look at before merging. Good for overnight batches.
 
+## The app's API calls against the backend (`buckets contract`)
+
+```bash
+buckets contract
+```
+
+Every HTTP call the app makes (found with the TypeScript checker: direct `api.get(...)` calls and wrapper calls
+with a method and URL, URL constants and template strings resolved) checked against the backend's OpenAPI or
+Swagger spec: calls with no endpoint, the wrong method, keys the endpoint doesn't declare, required ones not
+sent. No model; seconds on a 2,000-file app. The spec comes from the repo rule (`"contract": {"spec": …,
+"include": ["src"]}`) or a `swagger-spec.json`/`openapi.json` in a related repo. A request about API calls
+that names files gets their findings in the planner's facts.
+
 ## When did it break (`buckets bisect`)
 
 ```bash
@@ -689,5 +702,5 @@ e.g. `{"~/code/oss/*": {"mode": "local"}}`.
 ## Tests
 
 ```bash
-python3 -m unittest test_buckets test_regress test_rename test_find_copies
+python3 -m unittest test_buckets test_regress test_rename test_find_copies test_api_contract
 ```

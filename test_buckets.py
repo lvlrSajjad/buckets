@@ -3932,5 +3932,27 @@ class RenamedCopies(unittest.TestCase):
         self.assertIn("const lower", (self.repo / "src/c.ts").read_text())  # behaves the same, written differently: left
 
 
+class Contract(unittest.TestCase):
+    def test_findings_name_each_call_that_doesnt_fit_the_spec(self):
+        calls = [{"file": "src/a.ts", "line": 3, "method": "GET", "path": "orders/{}", "status": "ok", "endpoint": "GET /orders/{id}",
+                  "unknown_keys": ["sort"], "missing_required": []},
+                 {"file": "src/a.ts", "line": 9, "method": "PUT", "path": "orders/{}", "status": "method-mismatch",
+                  "allowed": ["GET /orders/{id}"], "unknown_keys": [], "missing_required": []},
+                 {"file": "src/b.ts", "line": 1, "method": "GET", "path": "gone", "status": "no-endpoint",
+                  "unknown_keys": [], "missing_required": []}]
+        self.assertEqual(buckets.contract_findings(calls), [
+            "src/a.ts:3 GET orders/{}: sends sort, which GET /orders/{id} doesn't declare",
+            "src/a.ts:9 PUT orders/{}: the spec has GET /orders/{id} there",
+            "src/b.ts:1 GET gone: no such endpoint in the spec"])
+        self.assertEqual(len(buckets.contract_findings(calls, ["src/b.ts"])), 1)
+
+    def test_the_spec_is_found_in_a_related_repo(self):
+        backend = Path(tempfile.mkdtemp())
+        (backend / "openapi.json").write_text("{}")
+        got = buckets.contract_settings(Path("."), {"related": {"api": str(backend)}, "contract": {"include": ["src"]}})
+        self.assertEqual(got, {"include": ["src"], "spec": str(backend / "openapi.json")})
+        self.assertIsNone(buckets.contract_settings(Path("."), {}))
+
+
 if __name__ == "__main__":
     unittest.main()
