@@ -1595,12 +1595,21 @@ class DoubleReview(unittest.TestCase):
         self.assertFalse(got["done"])
         self.assertEqual(got["tasks"][0]["file"], "src/m.py")
 
-    def test_other_issues_win_without_asking(self):
+    def test_claims_the_checks_decide_count_as_definite(self):
+        for claim in ("a critical React Hooks violation: useStores() is called twice", "this breaks the rules of hooks",
+                      "`Button` was removed from the imports, a runtime error", "type error in the hook"):
+            self.assertTrue(buckets.DEFINITE_CLAIM.search(claim), claim)
+        self.assertFalse(buckets.DEFINITE_CLAIM.search("the request also asked for a docstring"))
+
+    def test_a_lone_objection_is_weighed_by_the_other_reviewer(self):
         win = self.verdict(False, ["the request also asked for a docstring"], ["src/m.py"])
-        got, turns = self.run_review(self.verdict(True), win, {"test": {"ok": True}})
+        got, turns = self.run_review(self.verdict(True), win, {"test": {"ok": True}}, {"real": [1], "why": "it did"})
         self.assertFalse(got["done"])
-        self.assertEqual(turns, [])
-        mac = self.verdict(False, ["`d` is undefined"], ["src/m.py"])     # failing checks: no confirming either
+        self.assertEqual(len(turns), 1)
+        got, _ = self.run_review(self.verdict(True), win, {"test": {"ok": True}}, {"real": [], "why": "style"})
+        self.assertTrue(got["done"])
+    def test_failing_checks_need_no_confirming(self):
+        mac = self.verdict(False, ["`d` is undefined"], ["src/m.py"])
         got, turns = self.run_review(mac, self.verdict(True), {"test": {"ok": False, "output": "F", "tail": "F"}})
         self.assertFalse(got["done"])
         self.assertEqual(turns, [])

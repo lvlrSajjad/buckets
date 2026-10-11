@@ -2541,17 +2541,24 @@ Reply with done, a short summary, the issues you found, and the follow-up tasks 
 
 DEFINITE_CLAIM = re.compile(r"\b(undefined|not defined|never defined|isn't defined|never called|not called anywhere|"
                             r"doesn't exist|does not exist|NameError|not imported|missing import|unresolved|"
-                            r"has no attribute|no such (?:function|method|attribute|variable))\b", re.I)
+                            r"has no attribute|no such (?:function|method|attribute|variable)|"
+                            # what type checks and lint decide, so a lone claim of it while they pass needs a second look
+                            r"rules? of hooks|hooks? (?:rule )?violation|violat\w* (?:the )?rules? of hooks|"
+                            r"type error|won't compile|doesn't compile|fails? to compile|unused (?:import|variable)|"
+                            r"runtime error|will crash|import (?:is )?missing)\b", re.I)
 
-CONFIRM_PROMPT = """Every check passes, but the other reviewer claims these definite errors in the same change:
+CONFIRM_PROMPT = """Every check passes (types, lint, tests), but the other reviewer raises these issues with the same change:
 {claims}
 
 Where the names they mention appear in the changed files now (git grep):
 {evidence}
 
-Check each claim against the code shown above. A claim is real only if the code shows it: a name
-set earlier in the function, imported, or defined elsewhere is not undefined. Reply with the numbers
-of the claims that are real (an empty list if none) and one sentence on why."""
+Weigh each issue against the code shown above. It is real only if it shows the change breaks
+behaviour, misses part of the request, or breaks one of the repo's rules; not real: style
+preferences, hypothetical risks ("potentially fragile", "if both screens are mounted"), and claims the
+passing checks already rule out (a name set earlier, imported or defined elsewhere is not undefined;
+lint checks the rules of hooks). Reply with the numbers of the real issues (an empty list if none)
+and one sentence on why."""
 
 CONFIRM_SCHEMA = {"type": "object", "properties": {"real": {"type": "array", "items": {"type": "integer"}},
                                                    "why": {"type": "string"}}, "required": ["real", "why"]}
@@ -4431,6 +4438,12 @@ class Buckets:
                 moved_names = r.get("names") or inner
                 if r.get("left"):
                     notes.append(f"kept in each component (they depend on code that differs): {', '.join(r['left'][:10])}")
+                state = [h for h in r.get("helpers_moved") or [] if re.search(
+                    rf"(?m)^\s*(?:export\s+)?(?:let|var)\s+{re.escape(h)}\b", d["files"].get(hook_file, ""))]
+                if state:
+                    notes.append(f"{', '.join(state)} is module state that moved with the statements assigning it: both "
+                                 "variants now share one copy (only matters if both are mounted at once; each app normally "
+                                 "ships one variant)")
                 notes.append(f"moved {len(moved_names)} identical statements of the components ({', '.join(moved_names[:8])}) "
                              f"into {hook} in {hook_file}; "
                              f"parameters: {', '.join(p['name'] for p in r['params']) or 'none'}; re-derived inside: "
@@ -4754,9 +4767,11 @@ class Buckets:
         dissent, agree = (first, other) if not first["done"] else (other, first)
         who, judge = (home, second) if dissent is first else (away, self.planner)
         say(f"  The reviews differ: {who} found problems, the other says done")
-        definite = [i for i in dissent["issues"] if DEFINITE_CLAIM.search(i)]
-        if not all(r["ok"] for r in now.values()) or not definite or len(definite) < len(dissent["issues"]):
-            return dissent  # any issue wins unless it is only claims the other side should confirm
+        if not all(r["ok"] for r in now.values()) or not dissent["issues"]:
+            return dissent  # failing checks, or no issues to weigh: the objection stands
+        # Every check passes and one reviewer objects: the other weighs each issue (lone claims have broken
+        # working code: a false "undefined", a "hooks violation" that lint had already ruled out).
+        definite = list(dissent["issues"])
         real = self.confirm_claims(judge, prompt, agree, definite, rnd)
         if real:
             return {**dissent, "issues": real + [i for i in dissent["issues"] if i not in definite]}
