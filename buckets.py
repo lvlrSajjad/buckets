@@ -3564,6 +3564,33 @@ class Buckets:
                         return self._signature_hint
         return None
 
+    def prefer_signature(self, plan: dict, prompt: str, validate) -> dict:
+        """A plan that hand-edits the definition and several call sites of a function the facts offered a
+        signature change for gets one more try, asked for exactly that task (the model knows the parameter's
+        details; buckets doesn't)."""
+        sig = getattr(self, "_signature_hint", None)
+        if not sig or any(t["action"] == "signature" for t in plan["tasks"]):
+            return plan
+        site_files = {s.rsplit(":", 1)[0] for s in sig["sites"]}
+        hand = [t for t in plan["tasks"] if t["action"] == "edit" and t["file"] in site_files | {sig["file"]}]
+        if len(hand) < 3:
+            return plan
+        say(f"  {warn()} the plan edits {len(hand)} files by hand for a change a signature task makes everywhere; asking for that")
+        template = json.dumps({"id": "T1", "file": sig["file"], "action": "signature", "where": sig["name"],
+                               "param": {"name": "…", "type": "…", "default": "…", "value": "…"},
+                               "instructions": "…", "done_when": "…", "edits": []})
+        try:
+            again = ask_json(self.planner, self.run, "plan-signature", SYSTEM, prompt + "\n\nYour plan edits " + str(len(hand))
+                             + f" files by hand; `{sig['name']}` is used at {len(sig['sites'])} places. Replace those edits with ONE "
+                             "signature task (it updates the definition and every call mechanically), filled in from the "
+                             "request: " + template + "\nKeep any task that does something else (like changing the function's "
+                             "body). Reply with the whole plan.", PLAN_SCHEMA, validate, think=False, max_tokens=8000,
+                             timeout=self.timeout)
+        except (ModelError, ValueError) as e:
+            detail(f"no signature plan ({str(e)[:120]})")
+            return plan
+        return again if any(t["action"] == "signature" for t in again["tasks"]) else plan
+
     def relocate_hint(self) -> dict | None:
         """When the request asks to move named top-level declarations from one file into another (a util):
         the relocate task, checked with a dry run. None otherwise."""
@@ -4458,6 +4485,7 @@ class Buckets:
             plan = ask_json(self.planner, self.run, "plan", SYSTEM, prompt, PLAN_SCHEMA, validate,
                             max_tokens=16000, timeout=self.timeout, **self.think_budget())
         plan = self.prefer_move(plan)
+        plan = self.prefer_signature(plan, prompt, validate)
         covered = {f for t in plan["tasks"] for f in [t["file"], t.get("into") or "", *(t.get("from") or [])]}
         missing = [f for f in paths_in_text(self.request, self.index.files) if plan["tasks"] and f not in covered]
         if missing:
