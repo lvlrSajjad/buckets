@@ -3323,11 +3323,13 @@ class Buckets:
                 returns=", ".join(r["returns"][:12]) + (" …" if len(r["returns"]) > 12 else ""),
                 helpers=", ".join(r["helpers_moved"]) or "none",
                 notes=("\nKept in place: " + "; ".join(r["notes"][:6])) if r["notes"] else ""))
-        if MERGE_WORDS.search(self.request):
-            for a, b in variant_pairs(self.request, list(files))[:4]:
-                cmp = ts_moves(self.repo, {"op": "compare", "a": a, "b": b}, timeout=120)
-                if cmp.get("ok"):
-                    parts.append(variants_text(cmp))
+        for h in self.share_hints():
+            parts.append(variants_text(h["compare"]))
+            if h["task"]:
+                parts.append("A mechanical share fits these two files: this task moves their identical top-level "
+                             "declarations into one file, exactly, and makes both import it:\n"
+                             + json.dumps({k: h["task"][k] for k in ("file", "action", "from", "select")})
+                             + "\nPlan it (copy it); add tasks only for what the request asks beyond it.")
         for name, path in self.related.items():  # read-only neighbours (the API this app calls…)
             theirs = request_leads(path, self.request, self.related_files(name), prefix=f"{name}:")
             if theirs:
@@ -3401,17 +3403,54 @@ class Buckets:
         self._move_hint = {"task": validate_move(task, src, self.repo, "T1"), "report": d["report"]}
         return self._move_hint
 
+    def share_hints(self) -> list[dict]:
+        """For a merge/share request naming files that exist in two variants: each pair's comparison and,
+        when they have identical top-level declarations, the share task that moves those into one file."""
+        if hasattr(self, "_share_hints"):
+            return self._share_hints
+        self._share_hints = []
+        if not MERGE_WORDS.search(self.request):
+            return []
+        files = list(self.index.files)
+        named_new = [clean_path(m) for m in re.findall(r"[\w@.+\-/]+\.(?:tsx?|jsx?)\b", self.request)
+                     if not (self.repo / clean_path(m)).exists() and "/" in m]
+        for a, b in variant_pairs(self.request, files)[:4]:
+            cmp = ts_moves(self.repo, {"op": "compare", "a": a, "b": b}, timeout=120)
+            if not cmp.get("ok"):
+                continue
+            same = [p["name"] for p in cmp["pairs"] if p["status"] == "identical" and p.get("module_level")]
+            parent = str(PurePosixPath(a).parent.parent)
+            into = next((n for n in named_new if n.startswith(parent + "/")), None) \
+                or f"{parent}/{PurePosixPath(a).stem}-shared{PurePosixPath(a).suffix}"
+            task = None
+            if same:
+                task = {"id": "T1", "file": into, "action": "share", "from": [a, b], "select": same,
+                        "instructions": f"Move what both variants share ({', '.join(same)}) into {into}.",
+                        "done_when": "Both variants import the shared code; checks pass.", "edits": [], "where": ""}
+                say(f"  {ok()} {a.split('/')[-3]}: {len(same)} identical declaration(s) can be shared mechanically")
+            self._share_hints.append({"compare": cmp, "task": task})
+        return self._share_hints
+
     def fill_moves(self, data: dict) -> dict:
-        """Move tasks often come back with their details in the instructions instead of the fields;
-        fill what's missing from the dry-run suggestion when the task moves the same file."""
-        hint = self.move_hint()
-        if not hint or not isinstance(data, dict):
+        """Move and share tasks often come back with their details in the instructions instead of the
+        fields; fill what's missing from the dry-run suggestions when the task is about the same files."""
+        if not isinstance(data, dict):
             return data
-        for t in data.get("tasks") or []:
+        hint = self.move_hint()
+        for t in data.get("tasks") or [] if hint else []:
             if isinstance(t, dict) and t.get("action") == "move" and clean_path(str(t.get("file", ""))) == hint["task"]["file"]:
                 for k in ("into", "name", "where"):
                     t[k] = t.get(k) or hint["task"][k]
                 t["select"] = t.get("select") or ["logic"]
+        for t in data.get("tasks") or []:
+            if not (isinstance(t, dict) and t.get("action") == "share"):
+                continue
+            for h in self.share_hints():
+                ht = h["task"]
+                if ht and (clean_path(str(t.get("file", ""))) == ht["file"] or set(t.get("from") or []) == set(ht["from"])):
+                    t["file"] = t.get("file") or ht["file"]
+                    t["from"] = t.get("from") or ht["from"]
+                    t["select"] = t.get("select") or ht["select"]
         return data
 
     def prefer_move(self, plan: dict) -> dict:
@@ -3427,6 +3466,14 @@ class Buckets:
                     f"that; anything left over is for the review, after the checks")
             keep = [t for t in plan["tasks"] if t not in extra]
             return {**plan, "tasks": [{**t, "id": f"T{n}"} for n, t in enumerate(keep, 1)]}
+        if not any(t["action"] == "share" for t in plan["tasks"]):
+            for h in self.share_hints():
+                ht = h["task"]
+                if ht and any(t["file"] == ht["file"] and not t.get("edits") for t in plan["tasks"]):
+                    say(f"  {warn()} the plan would retype the shared code; sharing it mechanically instead")
+                    rest = [t for t in plan["tasks"] if t["file"] != ht["file"]]
+                    fixed = validate_move(dict(ht), ht["file"], self.repo, "T1")
+                    plan = {**plan, "tasks": [{**t, "id": f"T{n}"} for n, t in enumerate([fixed] + rest, 1)]}
         hint = self.move_hint()
         if not hint:
             return plan

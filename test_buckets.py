@@ -1768,6 +1768,30 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
             self.assertIn('import { same } from "../shared"', d["files"][f])
             self.assertNotIn("fmt", d["files"][f])                             # its only user moved out
 
+    def test_a_share_request_gets_the_share(self):
+        a = 'import { fmt } from "../util"\n\nconst same = (x: number) => fmt(x * 2)\nconst diff = 1\n\nexport const A = () => same(diff)\n'
+        b2 = a.replace("const diff = 1", "const diff = [2, 3]").replace("export const A", "export const B")
+        for f, t in {"src/a/screen.ts": a, "src/b/screen.ts": b2, "src/util.ts": "export const fmt = (n: number) => `${n}`\n"}.items():
+            (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / f).write_text(t)
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "variants"], cwd=self.repo, check=True)
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        b = buckets.Buckets(cfg, self.repo, "Merge src/a/screen.ts and src/b/screen.ts: share what they have in common in src/screen-shared.ts")
+        with contextlib.redirect_stderr(io.StringIO()):
+            hints = b.share_hints()
+            self.assertEqual(hints[0]["task"]["select"], ["same"])
+            self.assertEqual(hints[0]["task"]["file"], "src/screen-shared.ts")
+            self.assertIn("A mechanical share fits these two files", b.facts())
+            retyped = {"summary": "s", "tasks": [{"id": "T1", "file": "src/screen-shared.ts", "action": "create",
+                                                  "instructions": "write it", "done_when": "", "where": "", "edits": []}]}
+            got = b.prefer_move(retyped)
+        self.assertEqual([t["action"] for t in got["tasks"]], ["share"])
+        sparse = {"summary": "s", "tasks": [{"id": "T1", "file": "src/screen-shared.ts", "action": "share", "instructions": "",
+                                             "done_when": "", "where": "", "edits": []}]}
+        task = buckets.validate_plan(b.fill_moves(sparse), self.repo, 8)["tasks"][0]
+        self.assertEqual((task["from"], task["select"]), (["src/a/screen.ts", "src/b/screen.ts"], ["same"]))
+
     def test_validation(self):
         bad = {"id": "T1", "file": "src/thing-screen.tsx", "action": "move", "where": "ThingScreen", "into": "src/ui.tsx",
                "name": "useThing", "select": [], "instructions": "", "done_when": "", "edits": []}
