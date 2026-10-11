@@ -3899,5 +3899,38 @@ class Decisions(unittest.TestCase):
             "round 2 broke typecheck, which passed before it; undid that round and stopped here"])
 
 
+class RenamedCopies(unittest.TestCase):
+    def setUp(self):
+        if not (TS_PKG.exists() and shutil.which("node")):
+            self.skipTest("needs node and a typescript package")
+        self.repo = make_repo({
+            "src/utils/time.ts": "export const formatTime = (s: string): string => {\n  const t = s.trim()\n  return t.toLowerCase()\n}\n",
+            "src/a.ts": "const fmt = (v: string): string => {\n  const t = v.trim()\n  return t.toLowerCase()\n}\n"
+                        "export const a = [' X '].map(fmt)\n",
+            "src/c.ts": "const lower = (v: string): string => v.trim().toLowerCase()\nexport const c = lower('Y')\n",
+            "src/b.ts": "const fmt = (v: string): string => v.toUpperCase()\nexport const b = fmt('x')\n",
+            "tsconfig.json": '{"compilerOptions": {"strict": true, "noEmit": true, "skipLibCheck": true}}'})
+        (self.repo / "node_modules").mkdir()
+        (self.repo / "node_modules/typescript").symlink_to(TS_PKG)
+        (self.repo / ".git/info/exclude").write_text("node_modules\n")
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        self.b = buckets.Buckets(cfg, self.repo, "replace the copies of formatTime")
+
+    def test_a_dedupe_finds_and_replaces_a_copy_kept_under_another_name(self):
+        self.assertEqual(buckets.renamed_copies(self.repo, "src/utils/time.ts", ["formatTime"]),
+                         (["src/a.ts"], {"src/a.ts": {"fmt": "formatTime"}}))  # b's fmt does something else
+        task = buckets.validate_move({"id": "T1", "file": "src/utils/time.ts", "action": "dedupe", "select": ["formatTime"],
+                                      "instructions": "", "done_when": "", "edits": []}, "src/utils/time.ts", self.repo, "T1")
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = self.b.code_task(task)
+        self.assertEqual(got["status"], "done", got)
+        a = (self.repo / "src/a.ts").read_text()
+        self.assertIn("formatTime", a)
+        self.assertIn(".map(formatTime)", a)
+        self.assertNotIn("const fmt", a)
+        self.assertIn("const fmt", (self.repo / "src/b.ts").read_text())
+        self.assertIn("const lower", (self.repo / "src/c.ts").read_text())  # behaves the same, written differently: left
+
+
 if __name__ == "__main__":
     unittest.main()

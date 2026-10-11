@@ -3326,7 +3326,10 @@ def validate_move(t: dict, f: str, repo: Path, task_id: str) -> dict:
         if not f.endswith(MOVABLE) or not select:  # the file may come from a relocate earlier in the plan
             raise ValueError("dedupe: \"file\" is where the function lives (exported), \"select\" its name(s); \"from\" "
                              "the files with their own copies (optional: they're found)")
-        return {**base, "file": f, "from": [c for c in copies if c != f], "select": select, "where": ""}
+        aliases = {inside(k): {str(a): str(b) for a, b in v.items()} for k, v in (t.get("aliases") or {}).items()
+                   if isinstance(v, dict) and (repo / clean_path(str(k))).is_file()}
+        return {**base, "file": f, "from": [c for c in copies if c != f], "select": select, "where": "",
+                **({"aliases": aliases} if aliases else {})}
     if t["action"] == "relocate":
         into = inside(t.get("into"))
         if not f.endswith(MOVABLE) or not (repo / f).is_file() or not into.endswith(MOVABLE) or into == f or not select:
@@ -3479,6 +3482,26 @@ def file_imports(repo: Path, path: str, files) -> list[str]:
             if hit and hit != path and hit not in out:
                 out.append(hit)
     return out
+
+
+def renamed_copies(repo: Path, file: str, names: list[str], exclude: tuple = ()) -> tuple[list[str], dict]:
+    """Files with their own copy of these functions under another name (identical once renamed, and more than a
+    one-liner), and the aliases dedupe needs for them: ([files], {file: {local: shared}}). Exported copies are
+    left out (dedupe won't remove what other files import)."""
+    r = ts_moves(repo, {"op": "find_copies", "file": file, "names": names}, timeout=300)
+    files, aliases = [], {}
+    text = (repo / file).read_text(errors="replace") if (repo / file).is_file() else ""
+    def trivial(name: str) -> bool:  # a one-liner like `s => s.trim()` matching is a coincidence, not a copy
+        m = re.search(rf"(?:function\s+{re.escape(name)}\b|\b{re.escape(name)}\s*=)[\s\S]*?(?=\n(?:export\s+)?(?:const|function|let|class|type|interface)\b|\Z)", text)
+        return not m or m.group(0).strip().count("\n") < 2
+    for c in (r.get("report") or {}).get("copies", []) if r.get("ok") else []:
+        # Only copies identical once renamed: another name that merely behaves the same on samples is left alone
+        if c.get("exported") or c["file"] in exclude or c["name"] == c["shared"] or c.get("how") != "identical" \
+                or trivial(c["shared"]):
+            continue
+        files.append(c["file"])
+        aliases.setdefault(c["file"], {})[c["name"]] = c["shared"]
+    return list(dict.fromkeys(files)), aliases
 
 
 def copies_of(repo: Path, names: list[str], exclude: tuple = ()) -> list[str]:
@@ -4182,13 +4205,17 @@ class Buckets:
                 continue
             r = d["report"]
             copies = copies_of(self.repo, names, (src, into))
+            renamed, aliases = renamed_copies(self.repo, src, names, (src, into))
+            copies = list(dict.fromkeys(copies + renamed))
             say(f"  {ok()} a mechanical relocate fits: {', '.join(r['moved'])} → {into}, {len(r['importers_updated'])} importer(s) "
-                f"updated (dry run)" + (f"; {len(copies)} file(s) have their own copy" if copies else ""))
+                f"updated (dry run)" + (f"; {len(copies)} file(s) have their own copy" if copies else "")
+                + (f" ({len(renamed)} under another name)" if renamed else ""))
             dedupe = validate_move({"id": "T2", "file": into, "action": "dedupe", "select": names, "from": copies,
+                                    "aliases": aliases,
                                     "instructions": f"Replace the other files' own copies of {', '.join(names)} with an import.",
                                     "done_when": "", "edits": []}, into, self.repo, "T2") if copies and (self.repo / into).exists() \
-                else ({"id": "T2", "file": into, "action": "dedupe", "select": names, "from": copies, "instructions": "",
-                       "done_when": "", "edits": [], "read_first": [], "where": ""} if copies else None)
+                else ({"id": "T2", "file": into, "action": "dedupe", "select": names, "from": copies, "aliases": aliases,
+                       "instructions": "", "done_when": "", "edits": [], "read_first": [], "where": ""} if copies else None)
             self._relocate_hint = {"task": validate_move(task, src, self.repo, "T1"), "report": r, "copies": copies,
                                    "dedupe": dedupe}
             return self._relocate_hint
@@ -5532,11 +5559,15 @@ class Buckets:
             say(f"  {ok()} {task['id']} signature ({int(time.time() - start)}s): {paint(note[:220], 'dim')}")
             return {**task, "status": "done", "note": f"DONE: {note}"}
         elif task["action"] == "dedupe":
-            copies = task.get("from") or copies_of(self.repo, task["select"], (task["file"],))
+            copies, aliases = task.get("from") or [], dict(task.get("aliases") or {})
+            if not copies:
+                renamed, aliases = renamed_copies(self.repo, task["file"], task["select"], (task["file"],))
+                copies = list(dict.fromkeys(copies_of(self.repo, task["select"], (task["file"],)) + renamed))
             if not copies:
                 say(f"  {ok()} {task['id']} dedupe: no other file defines its own copy")
                 return {**task, "status": "done", "note": "DONE: no other file defines its own copy"}
-            d = ts_moves(self.repo, {"op": "dedupe", "file": task["file"], "names": task["select"], "copies": copies})
+            d = ts_moves(self.repo, {"op": "dedupe", "file": task["file"], "names": task["select"], "copies": copies,
+                                     **({"aliases": aliases} if aliases else {})})
             if not d.get("ok"):
                 return {**task, "status": "failed", "note": f"BLOCKED: {d.get('error', 'dedupe failed')}"}
             written = []
@@ -5552,8 +5583,10 @@ class Buckets:
                     + ("; copies that DIFFER from it, so replacing them would change behaviour (if the copy is the "
                        f"better version, unify it into {task['file']} first; otherwise keep it): "
                        + "; ".join(f"{x['file']}: {x['name']} (lines only in {task['file']} (-) or the copy (+):\n{x['diff']})"
-                                   for x in r["differ"]) if r["differ"] else ""))
-            if not written and not r["differ"]:  # every copy is already gone: nothing left to do
+                                   for x in r["differ"]) if r["differ"] else "")
+                    + ("; left as they are: " + "; ".join(f"{x['file']}: {x['name']} ({x['reason']})" for x in r["refused"])
+                       if r.get("refused") else ""))
+            if not written and not r["differ"] and not r.get("refused"):  # every copy is already gone: nothing left to do
                 say(f"  {ok()} {task['id']} dedupe: no copies left to replace")
                 return {**task, "status": "done", "note": "DONE: no copies left to replace"}
             if not written:
