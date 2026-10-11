@@ -7,6 +7,7 @@
 //            imports on both sides are worked out from TypeScript's own scoping.
 //   compare  pair the declarations of two variants of a file (identical / near / different / one side).
 //   share    move declarations that are identical in two variants into one shared file.
+//   syntax   whether a file's text parses (a reflex after an edit; no types).
 //
 // Input: one JSON object on stdin with "op" and the op's fields; output: one JSON object on stdout.
 // Files in the output are full new texts (paths relative to the repo); nothing is written here.
@@ -1398,8 +1399,23 @@ function sameBehaviour() {
   }
 }
 
+// Does a file's text parse? Syntax only (no program, no types), so it takes milliseconds: used as a reflex
+// after an edit, before any check or review sees it.
+function syntax() {
+  const file = input.file, text = input.text != null ? input.text : fs.readFileSync(abs(file), 'utf8');
+  const ext = path.extname(file).toLowerCase();
+  const kind = { '.tsx': ts.ScriptKind.TSX, '.jsx': ts.ScriptKind.JSX, '.js': ts.ScriptKind.JSX, '.mjs': ts.ScriptKind.JS,
+                 '.cjs': ts.ScriptKind.JS }[ext] || ts.ScriptKind.TS;
+  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, false, kind);
+  const errors = (sf.parseDiagnostics || []).slice(0, 5).map((d) => {
+    const { line, character } = sf.getLineAndCharacterOfPosition(d.start || 0);
+    return { line: line + 1, col: character + 1, message: ts.flattenDiagnosticMessageText(d.messageText, ' ') };
+  });
+  return { errors, count: (sf.parseDiagnostics || []).length };
+}
+
 try {
-  const ops = { extract, compare, share, share_hook: shareHook, unify, relocate, dedupe, same_behaviour: sameBehaviour, signature, component };
+  const ops = { extract, compare, share, share_hook: shareHook, unify, relocate, dedupe, same_behaviour: sameBehaviour, signature, component, syntax };
   if (!ops[input.op]) throw new Error(`unknown op ${input.op}`);
   process.stdout.write(JSON.stringify({ ok: true, ...ops[input.op]() }));
 } catch (e) {

@@ -1278,6 +1278,36 @@ def ts_moves(repo: Path, payload: dict, timeout: int = 300) -> dict:
 TS_EXT = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
 
 
+def syntax_errors(repo: Path, file: str, text: str) -> list[str] | None:
+    """Where `text` (the contents of `file`) doesn't parse: Python through ast, TypeScript and JavaScript
+    through ts_moves.cjs (syntax only, no types: a fraction of a second). [] when it parses, None when it
+    can't be checked here."""
+    if file.endswith(".py"):
+        try:
+            ast.parse(text)
+            return []
+        except SyntaxError as e:
+            return [f"line {e.lineno}: {e.msg}"]
+    if not file.endswith(TS_EXT) or not shutil.which("node") or not MOVES_SCRIPT.exists():
+        return None
+    try:
+        r = subprocess.run(["node", str(MOVES_SCRIPT)], cwd=repo, capture_output=True, text=True, timeout=30,
+                           input=json.dumps({"op": "syntax", "repo": str(repo), "file": file, "text": text}))
+        d = json.loads(r.stdout)
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        return None
+    return [f"line {e['line']}: {e['message']}" for e in d["errors"]] if d.get("ok") else None
+
+
+def breaks_syntax(repo: Path, file: str, before: str | None, after: str) -> list[str]:
+    """The syntax errors an edit introduced: `after`'s, when `before` (None for a new file) parsed. A file
+    that was already broken isn't blamed on the edit."""
+    errors = syntax_errors(repo, file, after)
+    if not errors or (before is not None and syntax_errors(repo, file, before)):
+        return []
+    return errors
+
+
 def py_sig(node) -> str:
     if isinstance(node, ast.ClassDef):
         bases = ", ".join(ast.unparse(b) for b in node.bases)
@@ -5019,7 +5049,8 @@ class Buckets:
         prompt = coder_prompt(self.request, task, self.task_focus(task))
         cmd = [self.cfg["opencode_bin"], "run", "--standalone", "--agent", c["opencode_agent"], "-m", c["opencode_model"],
                "--auto", "--title", f"buckets {task['id']} {task['file']}", prompt]
-        note = ""
+        note, path = "", self.repo / task["file"]
+        original = path.read_text(errors="replace") if path.is_file() else None
         for attempt in range(1, c["attempts"] + 1):
             before = snapshot(self.repo, changed_paths(self.repo) + [task["file"]])
             start = time.time()
@@ -5048,6 +5079,17 @@ class Buckets:
             final = next((l for l in reversed(lines) if l.startswith(("DONE", "BLOCKED"))), "")
             secs = int(time.time() - start)
             if task["file"] in touched:
+                broken = breaks_syntax(self.repo, task["file"], original, path.read_text(errors="replace")) if path.is_file() else []
+                if broken and attempt < c["attempts"] and not timed_out:
+                    # A reflex: the file is put right in this task, before checks and a review round see it.
+                    say(f"  {warn()} {task['id']} {task['file']}: the change left the file unparseable ({broken[0]}); "
+                        "the coder fixes that first")
+                    prompt = coder_prompt(self.request, task, self.task_focus(task)) + SYNTAX_FIX.format(
+                        file=task["file"], errors="\n".join(f"- {e}" for e in broken[:3]))
+                    cmd[-1] = prompt
+                    continue
+                if broken:
+                    final = (final or "DONE") + f" (the file still doesn't parse: {broken[0]})"
                 if commit:
                     git(self.repo, "add", "-A", "--", task["file"])
                     git(self.repo, "commit", "--no-verify", "-q", "-m",
@@ -5151,15 +5193,14 @@ class Buckets:
             if not path.is_file():
                 return f"Error: `{rel}` doesn't exist; create it with write"
             try:
-                after, first, last = replace_once(path.read_text(errors="replace"), str(args.get("old") or ""),
-                                                  str(args.get("new") or ""))
+                old = path.read_text(errors="replace")
+                after, first, last = replace_once(old, str(args.get("old") or ""), str(args.get("new") or ""))
             except ValueError as e:
                 return f"Error: {e}"
-        if rel.endswith(".py"):
-            try:
-                ast.parse(after)
-            except SyntaxError as e:
-                return f"Error: not applied, the file wouldn't parse (line {e.lineno}: {e.msg})"
+        broken = breaks_syntax(self.repo, rel, old if name == "edit" else None, after)
+        if broken:
+            return (f"Error: not applied, the file wouldn't parse ({broken[0]}); make the change so the file "
+                    "still parses after this one edit")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(after)
         lines = after.splitlines()
@@ -5169,7 +5210,7 @@ class Buckets:
 
     def apply_planned(self, task: dict, commit: bool) -> dict | None:
         """Apply the planner's edits without a coder session; None (file untouched) when they don't
-        apply cleanly or leave a Python file that doesn't parse, so the coder does the task instead."""
+        apply cleanly or leave a file that doesn't parse, so the coder does the task instead."""
         path, start = self.repo / task["file"], time.time()
         before = path.read_text(errors="replace") if path.is_file() else None
         try:
@@ -5184,11 +5225,9 @@ class Buckets:
                 after = apply_edits(before, edits, decls_for)
             if after == before:
                 raise ValueError("the edits change nothing")
-            if task["file"].endswith(".py"):
-                try:
-                    ast.parse(after)
-                except SyntaxError as e:
-                    raise ValueError(f"the result doesn't parse (line {e.lineno}: {e.msg})")
+            broken = breaks_syntax(self.repo, task["file"], before, after)
+            if broken:
+                raise ValueError(f"the result doesn't parse ({broken[0]})")
         except ValueError as e:
             say(f"  {warn()} {task['id']}: the planned edits don't apply ({str(e)[:120]}); the coder does it")
             return None
@@ -6504,6 +6543,12 @@ def coder_prompt(request: str, task: dict, focus: str = "") -> str:
                                file=task["file"], instructions=task["instructions"],
                                done_when=task["done_when"])
 
+
+SYNTAX_FIX = """
+
+Your change to `{file}` is already in the file, but the file no longer parses:
+{errors}
+Read the lines around each error and fix them first, then finish anything left of the task."""
 
 UNATTENDED = {"on": False}  # -y or a time limit: nobody is there to look at half-done edits
 

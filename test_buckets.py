@@ -3492,5 +3492,71 @@ class PreferDedupe(unittest.TestCase):
         self.assertEqual(self.b.prefer_dedupe(tasks), tasks)
 
 
+class Reflexes(unittest.TestCase):
+    """A file an edit leaves unparseable is caught within the task (roadmap item 30), before checks and a review
+    round spend minutes on it: planned edits that would break it go to the coder, and a coder that breaks it
+    is told where and fixes it in the same task."""
+
+    def setUp(self):
+        if not (TS_PKG.exists() and shutil.which("node")):
+            self.skipTest("needs node and a typescript package")
+        self.good = "export const Row = () => (\n  <HStack>\n    <Text>Hi</Text>\n  </HStack>\n);\n"
+        self.broken = "export const Row = () => (\n  <HStack>{\n    <Text>Hi</Text>\n  </HStack>\n);\n"
+        self.repo = make_repo({"src/row.tsx": self.good, "src/m.py": "def run(x):\n    return x\n", ".gitignore": "node_modules\n"})
+        (self.repo / "node_modules").mkdir()
+        (self.repo / "node_modules/typescript").symlink_to(TS_PKG)
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False, "coder": {"engine": "native"},
+                                                          "offload": {"escalate_repeated_failure": False}})
+        self.b = buckets.Buckets(cfg, self.repo, "x")
+
+    def test_syntax_errors_say_where(self):
+        self.assertEqual(buckets.syntax_errors(self.repo, "src/row.tsx", self.good), [])
+        errors = buckets.syntax_errors(self.repo, "src/row.tsx", self.broken)
+        self.assertTrue(errors and errors[0].startswith("line "), errors)
+        self.assertEqual(buckets.syntax_errors(self.repo, "src/m.py", "def f(:\n"), ["line 1: invalid syntax"])
+        self.assertIsNone(buckets.syntax_errors(self.repo, "notes.md", "# {"))
+        # only breakage the edit brought is blamed on it
+        self.assertEqual(buckets.breaks_syntax(self.repo, "src/row.tsx", self.broken, self.broken + "\n"), [])
+        self.assertTrue(buckets.breaks_syntax(self.repo, "src/row.tsx", self.good, self.broken))
+
+    def test_planned_edits_that_break_a_tsx_file_go_to_the_coder(self):
+        task = buckets.validate_tasks([{"file": "src/row.tsx", "action": "edit", "instructions": "wrap it",
+                                        "done_when": "d", "where": "", "edits": [
+                                            {"at": "  <HStack>", "mode": "replace", "code": "  <HStack>{"}]}],
+                                      self.repo, 8, "T")[0]
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertIsNone(self.b.apply_planned(task, commit=True))
+        self.assertIn("the result doesn't parse (line ", err.getvalue())
+        self.assertEqual((self.repo / "src/row.tsx").read_text(), self.good)    # untouched
+
+    def test_the_native_coder_cant_leave_a_tsx_file_broken(self):
+        task = {"id": "T1", "file": "src/row.tsx", "action": "edit", "instructions": "i", "done_when": "d",
+                "read_first": [], "where": "", "edits": []}
+        out = self.b.coder_tool(task, {"id": "1", "name": "edit", "arguments": {
+            "path": "src/row.tsx", "old": "  <HStack>\n", "new": "  <HStack>{\n"}})
+        self.assertIn("not applied, the file wouldn't parse (line ", out)
+        self.assertEqual((self.repo / "src/row.tsx").read_text(), self.good)
+
+    def test_a_coder_that_breaks_the_file_fixes_it_in_the_same_task(self):
+        task = {"id": "T1", "file": "src/row.tsx", "action": "edit", "instructions": "say hello",
+                "done_when": "d", "read_first": [], "where": "", "edits": []}
+        prompts = []
+        def fake_coder(task, prompt, deadline, tick=None, head=""):
+            prompts.append(prompt)
+            fixed = len(prompts) > 1
+            (self.repo / "src/row.tsx").write_text((self.good if fixed else self.broken).replace("Hi", "Hello"))
+            return "DONE: said hello", False
+        with mock.patch.object(buckets.Buckets, "native_coder", side_effect=fake_coder, autospec=False), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            got = self.b.code_task(task)
+        self.assertEqual(got["status"], "done")
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("the file no longer parses:\n- line ", prompts[1])
+        self.assertIn("left the file unparseable", err.getvalue())
+        self.assertIn("<Text>Hello</Text>", (self.repo / "src/row.tsx").read_text())
+        self.assertEqual(buckets.syntax_errors(self.repo, "src/row.tsx", (self.repo / "src/row.tsx").read_text()), [])
+        self.assertEqual(buckets.git(self.repo, "status", "--porcelain").strip(), "")    # committed once, fixed
+
+
 if __name__ == "__main__":
     unittest.main()
