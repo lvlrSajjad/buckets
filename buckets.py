@@ -2286,7 +2286,7 @@ TASK_SCHEMA = {
     "properties": {
         "id": {"type": "string"},
         "file": {"type": "string"},
-        "action": {"type": "string", "enum": ["edit", "create", "delete", "move", "share", "unify", "relocate", "dedupe", "signature"]},
+        "action": {"type": "string", "enum": ["edit", "create", "delete", "move", "share", "unify", "relocate", "dedupe", "signature", "component"]},
         "instructions": {"type": "string"},
         "done_when": {"type": "string"},
         "read_first": {"type": "array", "items": {"type": "string"}},
@@ -2470,6 +2470,11 @@ text and the files it opens itself, and it cannot run commands):
   copies of a function with an import of the one that stays: "file" is where it lives (exported; plan it
   after a relocate when the function is being moved), "select" its name(s); the copies are found, and
   identical ones are replaced, copies that differ are reported. Don't hand-edit those copies.
+- Turning a render helper inside a component (`const renderRow = (item) => <...>`) into its own component:
+  plan action "component": "file" is the screen, "where" the component it's in, "select" [the helper's
+  name], "into" the new .tsx file, "name" the new component. Its parameters and the values it uses become
+  props, its body moves exactly, every call becomes an element. Extract small helpers (used by others)
+  before the bigger ones that call them.
 - Adding a parameter to a function, or a prop to a component, used across the app: plan action "signature":
   "file" defines it, "where" its name, "param" {{"name", "type", "default" (keeps existing callers
   working), "value" (what every call or use should pass, if anything)}}. The definition and every use are
@@ -2932,6 +2937,15 @@ def validate_move(t: dict, f: str, repo: Path, task_id: str) -> dict:
             raise ValueError("move: \"name\" (the new hook) and \"where\" (the component it comes from) must be names")
         return {**base, "file": f, "into": into, "name": name, "where": where.split(".")[-1],
                 "select": "logic" if not select or [x.lower() for x in select] == ["logic"] else select}
+    if t["action"] == "component":
+        into, name, where = inside(t.get("into")), str(t.get("name") or "").strip(), str(t.get("where") or "").strip().split(".")[-1]
+        helper = (select or [""])[0]
+        if not f.endswith(MOVABLE) or not (repo / f).is_file() or not into.endswith((".tsx", ".jsx")) or (repo / into).exists() \
+                or not re.fullmatch(r"[A-Z][\w$]*", name) or not re.fullmatch(r"[A-Za-z_$][\w$]*", where) \
+                or not re.fullmatch(r"[A-Za-z_$][\w$]*", helper):
+            raise ValueError("component: \"file\" is the screen, \"where\" the component the render helper is in, \"select\" "
+                             "[the helper's name], \"into\" a new .tsx file, \"name\" the new component (capitalized)")
+        return {**base, "file": f, "where": where, "select": [helper], "into": into, "name": name}
     if t["action"] == "signature":
         param = t.get("param") if isinstance(t.get("param"), dict) else {}
         where = str(t.get("where") or "").strip().split(".")[-1]
@@ -2983,7 +2997,7 @@ def validate_tasks(tasks: list, repo: Path, max_tasks: int, prefix: str) -> list
         if not f or f.startswith("/") or ".." in f.split("/"):
             raise ValueError(f"task file path {t['file']!r} must be relative to the repo root")
         action = t["action"]
-        if action in ("move", "share", "unify", "relocate", "dedupe", "signature"):
+        if action in ("move", "share", "unify", "relocate", "dedupe", "signature", "component"):
             try:
                 out.append(validate_move(t, f, repo, f"{prefix}{len(out) + 1}"))
             except ValueError as e:
@@ -3467,6 +3481,13 @@ class Buckets:
         leads = request_leads(self.repo, self.request, files)
         if leads:
             parts.append("Where the request's words appear (found mechanically):\n" + leads)
+        ch = self.component_hint()
+        if ch:
+            parts.append(f"Render helpers in {ch['where']} ({ch['file']}): " + ", ".join(ch["helpers"])
+                         + ". A \"component\" task turns one into its own component mechanically"
+                         + (": " + json.dumps({k: ch["task"][k] for k in ("file", "action", "where", "select", "into", "name")})
+                            + f" (dry run: {ch['report']['calls']} use(s), props {', '.join(ch['report']['props'])})" if ch.get("task") else ".")
+                         + " Extract helpers that others call first.")
         sig = self.signature_hint()
         if sig:
             parts.append(f"`{sig['name']}` ({sig['kind']}, defined in {sig['file']}) is used at {len(sig['sites'])} place(s): "
@@ -3543,6 +3564,50 @@ class Buckets:
                                                                f"now at {head[:8]}, so some of it may be fixed already)")
         say(f"  {ok()} read the failed CI run on {branch}: {r['name']}{stale}")
         return f"CI run that failed: {r['name']}: {r['displayTitle']} ({r['url']}){stale}\n{log}"
+
+    def component_hint(self) -> dict | None:
+        """For a request to turn part of a screen into a component: the render helpers in the named file, and
+        a dry run of the one the request names (by its name or its words)."""
+        if hasattr(self, "_component_hint"):
+            return self._component_hint
+        self._component_hint = None
+        if not re.search(r"\bcomponents?\b", self.request, re.I):
+            return None
+        files = [f for f in paths_in_text(self.request, self.index.files) if f.endswith((".tsx", ".jsx"))]
+        for f in files:
+            text = (self.repo / f).read_text(errors="replace")
+            helpers = re.findall(r"(?m)^\s+const (render[A-Z]\w*)\s*=", text)
+            if not helpers:
+                continue
+            comp = max(self.index.outline().get(f, []), key=lambda d: d["end"] - d["line"], default=None)
+            if not comp:
+                continue
+            words = {w.lower() for w in re.findall(r"[A-Za-z]+", self.request)}
+            def score(h):
+                parts = [p.lower() for p in re.findall(r"[A-Z][a-z]+", h[6:])]
+                return sum(p in words for p in parts) + (5 if h in self.request else 0)
+            pick = max(helpers, key=score)
+            hint = {"file": f, "where": comp["name"], "helpers": helpers}
+            if score(pick) > 0:
+                name = re.sub(r"^render", "", pick)
+                stem = re.sub(r"(?<!^)([A-Z])", r"-\1", name).lower()
+                named = re.search(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b", self.request)
+                cname = named.group(1) if named and named.group(1) != comp["name"] else name
+                into = str(PurePosixPath(f).parent / f"{re.sub(r'(?<!^)([A-Z])', r'-\1', cname).lower()}.tsx")
+                d = ts_moves(self.repo, {"op": "component", "file": f, "function": comp["name"], "helper": pick, "into": into,
+                                         "name": cname}, timeout=120)
+                if d.get("ok"):
+                    hint["task"] = validate_move({"id": "T1", "file": f, "action": "component", "where": comp["name"], "select": [pick],
+                                                  "into": into, "name": cname, "instructions": f"Turn {pick} into <{cname}>.",
+                                                  "done_when": "", "edits": []}, f, self.repo, "T1")
+                    hint["report"] = d["report"]
+                    say(f"  {ok()} {pick} can become <{cname}> mechanically: {d['report']['calls']} use(s), "
+                        f"{len(d['report']['props'])} props (dry run)")
+                else:
+                    detail(f"{pick} can't become a component mechanically ({d.get('error', '')[:140]})")
+            self._component_hint = hint
+            return hint
+        return None
 
     def signature_hint(self) -> dict | None:
         """For a request to add a parameter, prop, argument or option to a named function or component: where
@@ -3815,6 +3880,19 @@ class Buckets:
         # Unifies always run first, so the share after them finds those copies identical.
         converted = sorted(converted, key=lambda t: 0 if t["action"] == "unify" else 1)
         plan = {**plan, "tasks": [{**t, "id": f"T{n}"} for n, t in enumerate(converted, 1)]}
+        ch = self.component_hint()
+        if ch and ch.get("task") and not any(t["action"] == "component" for t in plan["tasks"]):
+            if any(t["file"] == ch["task"]["into"] and t["action"] in ("create", "edit") for t in plan["tasks"]):
+                say(f"  {warn()} the plan would write the component by hand; making it mechanically instead")
+                rest = [t for t in plan["tasks"] if t["file"] not in (ch["task"]["into"], ch["task"]["file"])]
+                plan = {**plan, "tasks": [{**t, "id": f"T{n}"} for n, t in enumerate([dict(ch["task"])] + rest, 1)]}
+        if any(t["action"] == "component" for t in plan["tasks"]):
+            comps = [t for t in plan["tasks"] if t["action"] == "component"]
+            mine = {f for t in comps for f in (t["file"], t["into"])}
+            redo = [t for t in plan["tasks"] if t["action"] in ("edit", "create") and t["file"] in mine]
+            if redo:
+                say(f"  {paint('dropped', 'dim')} {', '.join(t['id'] for t in redo)}: the component task already does that")
+                plan = {**plan, "tasks": [{**t, "id": f"T{n}"} for n, t in enumerate([t for t in plan["tasks"] if t not in redo], 1)]}
         rh = self.relocate_hint()
         if rh and not any(t["action"] == "relocate" for t in plan["tasks"]):
             touched = {rh["task"]["file"], rh["task"]["into"], *rh["report"]["importers_updated"], *(rh.get("copies") or [])}
@@ -4063,6 +4141,9 @@ class Buckets:
         covered = set()
         if self.move_hint():
             covered.add(self.move_hint()["task"]["file"])
+        ch = self.component_hint()
+        if ch and ch.get("task"):
+            covered.add(ch["task"]["file"])
         for h in self.share_hints():
             if h["task"]:
                 covered |= set(h["task"]["from"])
@@ -4604,7 +4685,7 @@ class Buckets:
         """One file's task: the planner's exact edits applied directly when they fit, else a coder
         session. Anything else the coder touches is put back as it was."""
         self.involved = list(dict.fromkeys(getattr(self, "involved", []) + [task["file"]]))
-        if task["action"] in ("move", "share", "unify", "relocate", "dedupe", "signature"):
+        if task["action"] in ("move", "share", "unify", "relocate", "dedupe", "signature", "component"):
             return self.apply_move(task, commit)
         if task["action"] == "delete":  # the coder can't delete files; nothing to decide here anyway
             git(self.repo, "rm", "-q", "--", task["file"])
@@ -4738,6 +4819,29 @@ class Buckets:
                 git(self.repo, "add", "-A", "--", *written)
                 git(self.repo, "commit", "--no-verify", "-q", "-m", f"buckets {task['id']}: relocate ({note[:200]})\n\n{note}")
             say(f"  {ok()} {task['id']} relocate ({int(time.time() - start)}s): {paint(note[:220], 'dim')}")
+            return {**task, "status": "done", "note": f"DONE: {note}"}
+        elif task["action"] == "component":
+            d = ts_moves(self.repo, {"op": "component", "file": task["file"], "function": task["where"], "helper": task["select"][0],
+                                     "into": task["into"], "name": task["name"]})
+            if not d.get("ok"):
+                say(f"  {warn()} {task['id']}: the component couldn't be made ({d.get('error', '')[:160]})")
+                return {**task, "status": "failed", "note": f"BLOCKED: {d.get('error', 'component failed')}"}
+            written = []
+            for f, text in d["files"].items():
+                path = (self.repo / f).resolve()
+                if self.repo.resolve() in path.parents:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(text)
+                    written.append(f)
+            r = d["report"]
+            note = (f"turned {task['select'][0]} into <{task['name']}> in {task['into']}: {r['calls']} use(s) now render it; props: "
+                    f"{', '.join(r['props'])}" + (f"; re-derived inside: {', '.join(r['rederived'])}" if r["rederived"] else "")
+                    + (f"; notes: {'; '.join(r['notes'])}" if r["notes"] else ""))
+            self.involved = list(dict.fromkeys(self.involved + written))
+            if commit:
+                git(self.repo, "add", "-A", "--", *written)
+                git(self.repo, "commit", "--no-verify", "-q", "-m", f"buckets {task['id']}: component ({note[:200]})\n\n{note}")
+            say(f"  {ok()} {task['id']} component ({int(time.time() - start)}s): {paint(note[:220], 'dim')}")
             return {**task, "status": "done", "note": f"DONE: {note}"}
         elif task["action"] == "signature":
             d = ts_moves(self.repo, {"op": "signature", "file": task["file"], "name": task["where"], "param": task["param"],

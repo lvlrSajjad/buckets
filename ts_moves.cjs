@@ -1191,6 +1191,194 @@ function signature() {
   return { files, report: { kind: component ? 'component' : 'function', sites, skipped } };
 }
 
+// A render helper inside a component (`const renderRow = (item) => <...>`) becomes a component in its own
+// file: its parameters and the component's values it uses become props (context values like useStores()
+// are re-derived inside), its body moves exactly, and every `renderRow(x)` becomes `<Row item={x} ... />`.
+function component() {
+  const file = abs(input.file), target = abs(input.into);
+  if (fs.existsSync(target)) throw new Error(`${input.into} already exists`);
+  if (!/^[A-Z][\w$]*$/.test(input.name || '')) throw new Error('the component name must start with a capital letter');
+  const { checker, sources: [sf] } = program([input.file]);
+  const text = sf.text;
+  const fn = findFunction(sf, input.function);
+  if (!fn) throw new Error(`no function or component named ${input.function} in ${input.file}`);
+  const body = fn.body.statements;
+  const helperStmt = body.find((st) => declaredBy(st).some((id) => id.text === input.helper));
+  if (!helperStmt) throw new Error(`\`${input.helper}\` isn't declared directly inside ${input.function}`);
+  let hfn = null;
+  if (ts.isFunctionDeclaration(helperStmt)) hfn = helperStmt;
+  else if (ts.isVariableStatement(helperStmt)) {
+    const init = helperStmt.declarationList.declarations[0].initializer;
+    if (init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init))) hfn = init;
+  }
+  if (!hfn) throw new Error(`\`${input.helper}\` isn't a function`);
+  if (!hasJsx(hfn)) throw new Error(`\`${input.helper}\` doesn't render anything`);
+  const helperSym = checker.getSymbolAtLocation(declaredBy(helperStmt)[0]);
+  const hparams = hfn.parameters.map((p) => {
+    if (!ts.isIdentifier(p.name)) throw new Error(`\`${input.helper}\` takes a destructured parameter; name it first`);
+    return p;
+  });
+  // every use of the helper must be a call (it becomes an element)
+  const calls = [];
+  const visitUses = (n) => {
+    if (ts.isIdentifier(n) && n !== declaredBy(helperStmt)[0] && checker.getSymbolAtLocation(n) === helperSym) {
+      if (ts.isCallExpression(n.parent) && n.parent.expression === n) calls.push(n.parent);
+      else throw new Error(`\`${input.helper}\` is used as a value at line ${lineOf(sf, n.getStart(sf))} (not called); it can't become an element there`);
+    }
+    ts.forEachChild(n, visitUses);
+  };
+  visitUses(sf);
+  const declStmt = (d) => body.find((st) => within(d, st));
+  const params = new Set(fn.parameters.flatMap((p) => bindingNames(p.name)).map((id) => checker.getSymbolAtLocation(id)));
+  // what the helper uses from the component: props
+  const free = new Map();
+  for (const { sym } of references(checker, helperStmt)) {
+    const d = sym.declarations && sym.declarations[0];
+    if (!d || d.getSourceFile() !== sf || within(d, helperStmt) || !within(d, fn)) continue;
+    if (sym === helperSym) continue;
+    free.set(sym, d);
+  }
+  // context values re-derived inside instead of passed
+  const STATEFUL = /^use(State|Ref|Reducer|Memo|Callback|Transition|Id|Optimistic|ActionState|SyncExternalStore)$/;
+  const safe = (st, seen = new Set()) => {
+    if (!st || seen.has(st) || !ts.isVariableStatement(st) || st.declarationList.declarations.length !== 1) return false;
+    const d = st.declarationList.declarations[0];
+    if (!d.initializer || hasJsx(st) || !(st.declarationList.flags & ts.NodeFlags.Const)) return false;
+    seen.add(st);
+    let ok = true;
+    const v = (n) => {
+      if (!ok) return;
+      if (ts.isFunctionLike(n) || ts.isNewExpression(n) || ts.isAwaitExpression(n)) { ok = false; return; }
+      if (ts.isCallExpression(n)) { const c = ts.isIdentifier(n.expression) ? n.expression.text : ''; if (!/^use[A-Z]/.test(c) || STATEFUL.test(c)) { ok = false; return; } }
+      ts.forEachChild(n, v);
+    };
+    v(d.initializer);
+    if (!ok) return false;
+    for (const { sym } of references(checker, d.initializer)) {
+      const dd = sym.declarations && sym.declarations[0];
+      if (dd && dd.getSourceFile() === sf && within(dd, fn.body) && !safe(declStmt(dd), seen)) return false;
+    }
+    return true;
+  };
+  const prelude = new Map();  // statement -> names needed
+  const need = (st, name) => {
+    if (!prelude.has(st)) prelude.set(st, new Set());
+    prelude.get(st).add(name);
+    for (const { sym } of references(checker, st.declarationList.declarations[0].initializer)) {
+      const dd = sym.declarations && sym.declarations[0];
+      if (dd && dd.getSourceFile() === sf && within(dd, fn.body)) need(declStmt(dd), sym.name);
+    }
+  };
+  for (const [sym, d] of [...free]) {
+    const ds = declStmt(d);
+    if (ds && safe(ds)) { need(ds, sym.name); free.delete(sym); }
+  }
+  // types for the props
+  const imports = importBindings(sf, checker);
+  const usedImports = new Set();
+  const notes = [];
+  const typeOf = (sym, d) => {
+    if (d.type) { for (const { sym: s2 } of references(checker, d.type)) if (imports.has(s2)) usedImports.add(imports.get(s2)); return d.type.getText(sf); }
+    const t = typeText(checker, d, fn, target);
+    if (!/import\(/.test(t) && t.length <= 120) return t;
+    notes.push(`\`${sym.name}\` is typed \`any\`: its inferred type is too long to write out`);
+    return 'any';
+  };
+  const props = [
+    ...hparams.map((p) => ({ name: p.name.text, type: p.type ? p.type.getText(sf) : typeText(checker, p, fn, target), optional: !!(p.questionToken || p.initializer) })),
+    ...[...free].map(([sym, d]) => ({ name: sym.name, type: typeOf(sym, d), optional: false })),
+  ];
+  for (const p of hparams) if (p.type) for (const { sym: s2 } of references(checker, p.type)) if (imports.has(s2)) usedImports.add(imports.get(s2));
+  for (const pr of props) if (/import\(/.test(pr.type) || pr.type.length > 120) { notes.push(`\`${pr.name}\` is typed \`any\``); pr.type = 'any'; }
+  const importedNames = new Map([...imports.values()].map((id) => [id.text, id]));
+  const importTypesOf = (t) => { for (const w of t.match(/[A-Za-z_$][\w$]*/g) || []) if (importedNames.has(w)) usedImports.add(importedNames.get(w)); };
+  // module-level helpers it needs come along (exported back when the screen still uses them)
+  const component_ = topStatement(sf, fn);
+  const modNeeded = new Set();
+  const moduleState = new Map();
+  const queue = [...references(checker, helperStmt), ...[...prelude.keys()].flatMap((st) => references(checker, st))];
+  while (queue.length) {
+    const { sym } = queue.pop();
+    const d = sym.declarations && sym.declarations[0];
+    if (!d) continue;
+    if (imports.has(sym)) { usedImports.add(imports.get(sym)); continue; }
+    if (d.getSourceFile() !== sf || within(d, fn)) continue;
+    const top = topStatement(sf, d);
+    if (!top || top === component_ || modNeeded.has(top) || ts.isImportDeclaration(top)) continue;
+    if (isExported(top)) continue;  // imported from the screen below
+    if (ts.isVariableStatement(top) && !(top.declarationList.flags & ts.NodeFlags.Const)) {
+      // module state: the screen may assign it, so it stays; the component gets its value as a prop
+      if (!moduleState.has(sym)) moduleState.set(sym, d);
+      continue;
+    }
+    modNeeded.add(top);
+    queue.push(...references(checker, top));
+  }
+  for (const [sym, d] of moduleState) {
+    const usedByMoved = [...modNeeded].some((st) => references(checker, st).some(({ sym: s2 }) => s2 === sym));
+    if (usedByMoved) throw new Error(`\`${sym.name}\` is module state the screen keeps, and a helper that would move along reads it; untangle that first`);
+    props.push({ name: sym.name, type: d.type ? d.type.getText(sf) : 'any', optional: false });
+    free.set(sym, d);
+    notes.push(`\`${sym.name}\` is module state in the screen; the component gets its value as a prop`);
+  }
+  for (const pr of props) importTypesOf(pr.type);  // types the props mention come from the screen's imports
+  const exportedNeeded = new Set();
+  for (const { sym } of [...references(checker, helperStmt)]) {
+    const d = sym.declarations && sym.declarations[0];
+    const top = d && d.getSourceFile() === sf ? topStatement(sf, d) : null;
+    if (top && top !== component_ && isExported(top) && !within(d, fn)) for (const id of declaredBy(top)) exportedNeeded.add(id.text);
+  }
+  if (exportedNeeded.size) throw new Error(`the helper uses ${[...exportedNeeded].join(', ')}, exported from ${input.file}; move those to a util first`);
+  const moduleMoved = sf.statements.filter((st) => modNeeded.has(st));
+  const keptRefs = sf.statements.filter((st) => !modNeeded.has(st) && !ts.isImportDeclaration(st))
+    .flatMap((st) => references(checker, st)).filter(({ node }) => !within(node, helperStmt));
+  const movedNames = new Map();
+  for (const st of moduleMoved) for (const id of declaredBy(st)) movedNames.set(checker.getSymbolAtLocation(id), id.text);
+  const sharedBack = [...new Set(keptRefs.filter(({ sym }) => movedNames.has(sym)).map(({ sym }) => movedNames.get(sym)))];
+  // the component's file
+  const chunk = (st, exp) => {
+    const t = text.slice(fullStart(sf, st), lineEnd(text, st.end)).replace(/\n*$/, '\n');
+    if (!exp || isExported(st)) return t;
+    const at = st.getStart(sf) - fullStart(sf, st);
+    return t.slice(0, at) + 'export ' + t.slice(at);
+  };
+  const preludeText = body.filter((st) => prelude.has(st)).map((st) => {
+    const d = st.declarationList.declarations[0], want = prelude.get(st);
+    if (ts.isObjectBindingPattern(d.name)) {
+      const keep = d.name.elements.filter((e) => bindingNames(e.name).some((id) => want.has(id.text)));
+      return `  const { ${keep.map((e) => e.getText(sf)).join(', ')} } = ${d.initializer.getText(sf)}\n`;
+    }
+    return '  ' + st.getText(sf) + '\n';
+  }).join('');
+  const sig = props.length ? `{ ${props.map((p) => p.name).join(', ')} }: { ${props.map((p) => `${p.name}${p.optional ? '?' : ''}: ${p.type}`).join('; ')} }` : '';
+  const hbody = hfn.body;
+  const bodyText = ts.isBlock(hbody) ? hbody.getText(sf) : `{\n${preludeText}  return (\n    ${hbody.getText(sf)}\n  )\n}`;
+  const finalBody = ts.isBlock(hbody) && preludeText ? `{\n${preludeText}${hbody.getText(sf).slice(1)}` : bodyText;
+  const compText = [importsFor(sf, usedImports, file, target).join('\n'), ...moduleMoved.map((st) => chunk(st, sharedBack.includes(declaredBy(st)[0].text))),
+                    `export const ${input.name} = (${sig}) => ${finalBody}\n`].filter(Boolean).join('\n');
+  // the screen: calls become elements, the helper goes
+  const edits = [[fullStart(sf, helperStmt), lineEnd(text, helperStmt.end), '']];
+  for (const st of moduleMoved) edits.push([fullStart(sf, st), lineEnd(text, st.end), '']);
+  for (const c of calls) {
+    const attrs = [];
+    hparams.forEach((p, i) => { if (c.arguments[i]) attrs.push(`${p.name.text}={${c.arguments[i].getText(sf)}}`); });
+    for (const [sym] of free) attrs.push(`${sym.name}={${sym.name}}`);
+    edits.push([c.getStart(sf), c.end, `<${input.name}${attrs.length ? ' ' + attrs.join(' ') : ''} />`]);
+  }
+  const imp = importBindings(sf, checker);
+  const stillUsed = new Set(keptRefs.filter(({ sym }) => imp.has(sym)).map(({ sym }) => imp.get(sym)));
+  pruneImports(sf, stillUsed, edits);
+  const screen = mergeImports(applyEdits(text, edits), [`import { ${[input.name, ...sharedBack].join(', ')} } from "${importPath(file, target)}"`], file);
+  // a key on the helper's root belongs on the element where it's used
+  const root = ts.isBlock(hbody) ? null : hbody;
+  const keyed = root && (ts.isJsxElement(root) ? root.openingElement : ts.isJsxSelfClosingElement(root) ? root : null);
+  if (keyed && keyed.attributes.properties.some((a) => ts.isJsxAttribute(a) && a.name.getText(sf) === 'key'))
+    notes.push('the helper set `key` on its root element; in a list, React needs the key on the new element where it is used');
+  return { files: { [input.file]: screen, [rel(target)]: compText },
+           report: { props: props.map((p) => p.name), calls: calls.length, rederived: [...prelude.keys()].map((st) => declaredBy(st)[0] ? declaredBy(st)[0].text : '?'),
+                     helpers_moved: moduleMoved.map((st) => declaredBy(st)[0].text), notes } };
+}
+
 // Does `name` in one text behave like `name` in another (e.g. the shared version now vs a copy as it was)?
 function sameBehaviour() {
   const os = require('os');
@@ -1211,7 +1399,7 @@ function sameBehaviour() {
 }
 
 try {
-  const ops = { extract, compare, share, share_hook: shareHook, unify, relocate, dedupe, same_behaviour: sameBehaviour, signature };
+  const ops = { extract, compare, share, share_hook: shareHook, unify, relocate, dedupe, same_behaviour: sameBehaviour, signature, component };
   if (!ops[input.op]) throw new Error(`unknown op ${input.op}`);
   process.stdout.write(JSON.stringify({ ok: true, ...ops[input.op]() }));
 } catch (e) {

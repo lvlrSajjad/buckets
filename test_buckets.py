@@ -2268,6 +2268,25 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
         self.assertEqual(d["files"]["keep.ts"],
                          "export const f = (n: number, d: number = 2) => n\n\n\n\nexport const g = 1\n\n\n\nexport const h = f(1, 3)\n")
 
+    def test_a_render_helper_becomes_a_component(self):
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False})
+        b = buckets.Buckets(cfg, self.repo, "Turn the title part of src/thing-screen.tsx into a Title component")
+        with contextlib.redirect_stderr(io.StringIO()):
+            ch = b.component_hint()
+        self.assertEqual(ch["helpers"], ["renderTitle"])
+        self.assertEqual((ch["task"]["select"], ch["task"]["name"], ch["task"]["into"]), (["renderTitle"], "Title", "src/title.tsx"))
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = b.code_task(ch["task"])
+        self.assertEqual(got["status"], "done", got)
+        screen = (self.repo / "src/thing-screen.tsx").read_text()
+        comp = (self.repo / "src/title.tsx").read_text()
+        self.assertIn("<Title title={title} />", screen)
+        self.assertNotIn("renderTitle", screen)
+        self.assertIn("export const Title = ({ title }: { title: string }) =>", comp)
+        self.assertIn("<Text>{label(title)}</Text>", comp)
+        with self.assertRaisesRegex(ValueError, "component"):
+            buckets.validate_tasks([{**ch["task"], "name": "lowercase"}], self.repo, 8, "T")
+
     def test_shared_hook_names(self):
         self.assertEqual(buckets.shared_hook_names("a/b/billing-shared.tsx", "a/b/x/use-billing-screen.tsx"),
                          ("a/b/use-billing-screen-shared.ts", "useBillingScreenShared"))
