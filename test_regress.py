@@ -23,7 +23,7 @@ FAKE = textwrap.dedent('''
         (run / "report.md").write_text(text)
         (run / "meta.json").write_text(json.dumps({"request": request, "kind": kind, "done": done, "branch": branch,
                                                    "report": str(run / "report.md")}))
-        print(f"  report: {run / 'report.md'}")
+        print(f"[00:07]   report: {run / 'report.md'}")
     if "question" in request:
         finish(None, None, "## Answer\\nalpha and beta-two", "info")
     elif "stop" in request:

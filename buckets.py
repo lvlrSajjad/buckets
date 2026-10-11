@@ -2697,6 +2697,73 @@ Rules:
 - When finished, reply with one line: "DONE: <what you changed>" or "BLOCKED: <why>"."""
 
 
+NATIVE_CODER_SYSTEM = """You are a careful coder working through tools in a git repository. Read only what you
+need (read with offset and limit), change the file with edit (copy `old` exactly from what you read, with
+enough lines to be unique), check the result the edit shows you, and stop. You can't run commands; checks
+run after you finish. When finished, reply with one line and no tool call: "DONE: <what you changed>" or
+"BLOCKED: <why>"."""
+
+CODER_TOOLS = [
+    {"type": "function", "function": {
+        "name": "read", "description": "Lines of a file, numbered. Use offset (first line, from 1) and limit for "
+        "long files.",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "offset": {"type": "integer"},
+                                                        "limit": {"type": "integer"}}, "required": ["path"]}}},
+    {"type": "function", "function": {
+        "name": "search", "description": "Lines matching a regular expression, with file and line numbers, "
+        "across the repository or under one path.",
+        "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}},
+                       "required": ["pattern"]}}},
+    {"type": "function", "function": {
+        "name": "edit", "description": "Replace `old` with `new` in a file. `old` must appear once: copy it "
+        "from the file, without the line numbers. Returns the changed lines.",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old": {"type": "string"},
+                                                        "new": {"type": "string"}},
+                       "required": ["path", "old", "new"]}}},
+    {"type": "function", "function": {
+        "name": "write", "description": "Create a new file with this content (only for a file that doesn't "
+        "exist yet).",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                       "required": ["path", "content"]}}},
+]
+
+
+def replace_once(text: str, old: str, new: str) -> tuple[str, int, int]:
+    """`old` replaced by `new`, and the changed lines (first, last, from 1). Exact first; else the same lines
+    with different indentation or trailing spaces, re-indented to the file. ValueError says what to fix."""
+    if not old.strip():
+        raise ValueError("`old` is empty: copy the lines to replace from the file (use write only for a new file)")
+    n = text.count(old)
+    if n > 1:
+        raise ValueError(f"`old` appears {n} times; include more of the surrounding lines so it appears once")
+    if n == 1:
+        at = text.index(old)
+        first = text.count("\n", 0, at) + 1
+        return text.replace(old, new, 1), first, first + new.count("\n")
+    lines, want = text.split("\n"), old.strip("\n").split("\n")
+    key = [w.strip() for w in want]
+    hits = [i for i in range(len(lines) - len(want) + 1) if [l.strip() for l in lines[i:i + len(want)]] == key]
+    if len(hits) > 1:
+        raise ValueError(f"`old` matches {len(hits)} places; include more of the surrounding lines")
+    if not hits:
+        first_line = next((w for w in want if w.strip()), "")
+        close = difflib.get_close_matches(first_line.strip(), [l.strip() for l in lines], n=1, cutoff=0.6)
+        where = next((i + 1 for i, l in enumerate(lines) if close and l.strip() == close[0]), None)
+        raise ValueError("`old` isn't in the file" + (f"; the closest line is {where}: {close[0][:120]!r}" if where else "")
+                         + ". Read those lines again and copy them exactly")
+    i = hits[0]
+    indent = lambda l: l[:len(l) - len(l.lstrip())]
+    have = indent(next(l for l in lines[i:i + len(want)] if l.strip()))
+    gave = indent(next(w for w in want if w.strip()))
+    fixed = []
+    for l in new.strip("\n").split("\n") if new.strip() else []:
+        if l.strip() and l.startswith(gave):
+            l = have + l[len(gave):]
+        fixed.append(l)
+    out = lines[:i] + fixed + lines[i + len(want):]
+    return "\n".join(out), i + 1, i + max(len(fixed), 1)
+
+
 CONFLICT_PROMPT = """A cherry-pick hit conflicts. Plan how to resolve them.
 
 Commit being applied ({sha}): {subject}
@@ -4807,11 +4874,14 @@ class Buckets:
                     action = coder_action(line)
                     if action:
                         tick.text = f"{head} · {action}"
-                cid = live("call", label=f"code-{task['id']}", machine=machine_of(c.get("url", "")),
-                           model=c["opencode_model"], think=False, prompt_tokens=est_tokens(prompt))
-                code, out, timed_out = run_proc(cmd, self.repo, c["timeout_s"], on_line=show,
-                                                env=opencode_env(self.repo))
-                live("call_end", id=cid, ok=code == 0 and not timed_out, secs=round(time.time() - start, 1))
+                if c.get("engine") == "native":
+                    out, timed_out = self.native_coder(task, cmd[-1], start + c["timeout_s"], tick, head)
+                else:
+                    cid = live("call", label=f"code-{task['id']}", machine=machine_of(c.get("url", "")),
+                               model=c["opencode_model"], think=False, prompt_tokens=est_tokens(prompt))
+                    code, out, timed_out = run_proc(cmd, self.repo, c["timeout_s"], on_line=show,
+                                                    env=opencode_env(self.repo))
+                    live("call_end", id=cid, ok=code == 0 and not timed_out, secs=round(time.time() - start, 1))
             out = strip_ansi(out)
             self.run.save(f"coder-{task['id']}-a{attempt}.log", f"{prompt}\n\n===== output =====\n{out}")
             touched = touched_since(self.repo, before)
@@ -4844,6 +4914,103 @@ class Buckets:
                 note += f" ({errors[-1][:200]})"
             say(f"  {warn()} {task['id']} {task['file']}, try {attempt}: {note}")
         return {**task, "status": "failed", "note": note}
+
+    def native_coder(self, task: dict, prompt: str, deadline: float, tick=None, head: str = "") -> tuple[str, bool]:
+        """The coder as buckets' own tool loop on the coder's model (no opencode): read, search, edit and write,
+        edits only in the task's file. Returns its log, ending in the DONE/BLOCKED line, and whether time ran out."""
+        c = self.cfg["coder"]
+        messages = [{"role": "system", "content": NATIVE_CODER_SYSTEM}, {"role": "user", "content": prompt}]
+        log, think, nudged = [], bool(c.get("think", False)), False
+        for turn in range(1, c.get("turns", 16) + 1):
+            if time.time() > deadline:
+                return "\n".join(log), True
+            self.fit_messages(messages, c)
+            content, thinking, calls, cut = chat_turn(
+                c, self.run, f"code-{task['id']}-{turn}", messages, tools=CODER_TOOLS, think=think,
+                think_budget=c.get("think_budget", 1500), max_tokens=c.get("max_tokens", 8000),
+                timeout=max(deadline - time.time(), 60))
+            if cut:
+                messages.append({"role": "user", "content": "Your notes so far:\n" + thinking[-4000:]
+                                 + "\n\nNo more thinking: make the change with the tools now."})
+                think = False
+                continue
+            if not calls:
+                log.append(content.strip())
+                if re.search(r"^(DONE|BLOCKED)", content.strip(), re.M) or nudged:
+                    return "\n".join(log), False
+                nudged = True
+                messages += [{"role": "assistant", "content": content},
+                             {"role": "user", "content": "Make the change with the tools (edit, or write for a new "
+                              "file), then reply with the one DONE: or BLOCKED: line."}]
+                continue
+            messages.append({"role": "assistant", "content": content, "tool_calls": calls})
+            for call in calls[:8]:
+                result = self.coder_tool(task, call)
+                brief = json.dumps(call["arguments"])[:90]
+                log.append(f"{call['name']} {brief} -> {result.splitlines()[0][:120] if result else ''}")
+                if tick is not None:
+                    tick.text = f"{head} · {call['name']} {str(call['arguments'].get('path', call['arguments'].get('pattern', '')))[:50]}"
+                messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"],
+                                 "content": result[:12000]})
+            for call in calls[8:]:
+                messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"],
+                                 "content": "(not run: at most 8 tool calls per turn)"})
+        log.append("BLOCKED: ran out of turns before finishing")
+        return "\n".join(log), False
+
+    def fit_messages(self, messages: list[dict], cfg: dict) -> None:
+        """Older tool results shortened, oldest first, so the conversation fits the coder's context."""
+        room = cfg.get("num_ctx", 32768) - cfg.get("max_tokens", 8000) - 500
+        for m in messages[2:]:
+            if sum(est_tokens(x.get("content") or "") for x in messages) <= room:
+                return
+            if m.get("role") == "tool" and len(m["content"]) > 300:
+                m["content"] = m["content"][:200] + "\n(… shortened: read it again if you still need it)"
+
+    def coder_tool(self, task: dict, call: dict) -> str:
+        """One of the native coder's tools. Reads and searches anywhere in the repo; changes only the task's file."""
+        args, name = call.get("arguments") or {}, call.get("name")
+        rel = clean_path(str(args.get("path") or ""))
+        path = (self.repo / rel).resolve() if rel else None
+        if path is not None and self.repo.resolve() not in path.parents:
+            return f"Error: `{rel}` is outside the repository"
+        if name == "search":
+            return grep_text(self.repo, str(args.get("pattern") or ""), [rel] if rel else [], limit=40)
+        if name == "read":
+            if path is None or not path.is_file():
+                return f"Error: `{rel}` isn't a file"
+            lines = path.read_text(errors="replace").splitlines()
+            lo = max(int(args.get("offset") or 1), 1)
+            hi = min(len(lines), lo - 1 + min(int(args.get("limit") or 400), 800))
+            return (f"`{rel}` has {len(lines)} lines; lines {lo}-{hi}:\n"
+                    + "\n".join(f"{i:>5}| {lines[i - 1]}" for i in range(lo, hi + 1)))
+        if name not in ("edit", "write"):
+            return f"Error: there is no tool {name!r}"
+        if rel != task["file"]:
+            return f"Error: you may change only `{task['file']}`"
+        if name == "write":
+            if path.exists():
+                return f"Error: `{rel}` exists; change it with edit"
+            after, first, last = str(args.get("content") or ""), 1, str(args.get("content") or "").count("\n") + 1
+        else:
+            if not path.is_file():
+                return f"Error: `{rel}` doesn't exist; create it with write"
+            try:
+                after, first, last = replace_once(path.read_text(errors="replace"), str(args.get("old") or ""),
+                                                  str(args.get("new") or ""))
+            except ValueError as e:
+                return f"Error: {e}"
+        if rel.endswith(".py"):
+            try:
+                ast.parse(after)
+            except SyntaxError as e:
+                return f"Error: not applied, the file wouldn't parse (line {e.lineno}: {e.msg})"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(after)
+        lines = after.splitlines()
+        lo, hi = max(1, first - 3), min(len(lines), last + 3)
+        return (f"{'Created' if name == 'write' else 'Edited'} `{rel}`; lines {lo}-{hi} now:\n"
+                + "\n".join(f"{i:>5}| {lines[i - 1]}" for i in range(lo, hi + 1)))
 
     def apply_planned(self, task: dict, commit: bool) -> dict | None:
         """Apply the planner's edits without a coder session; None (file untouched) when they don't

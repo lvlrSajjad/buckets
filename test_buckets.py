@@ -3142,5 +3142,77 @@ class LiveEvents(unittest.TestCase):
             self.assertEqual((mine["request"], mine["done"]), ("do the thing", "running"))
 
 
+class NativeCoder(unittest.TestCase):
+    """The coder as buckets' own tool loop: read, search, edit (tolerant of indentation), write; only the task's file."""
+
+    def setUp(self):
+        self.repo = make_repo({"src/m.py": "def run(x):\n    y = x\n    return y + 1\n",
+                               "src/n.py": "from src.m import run\n\nVALUE = run(3)\n"})
+        cfg = buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False,
+                                                          "coder": {"engine": "native"}})
+        self.b = buckets.Buckets(cfg, self.repo, "make run add 2")
+        self.task = {"id": "T1", "file": "src/m.py", "action": "edit", "instructions": "make run add 2",
+                     "done_when": "run adds 2", "read_first": [], "where": "", "edits": []}
+
+    def tool(self, name, **args):
+        return self.b.coder_tool(self.task, {"id": "1", "name": name, "arguments": args})
+
+    def test_replace_once_exact_then_by_indentation(self):
+        self.assertEqual(buckets.replace_once("a\nb\nc", "b", "B")[0], "a\nB\nc")
+        text = "def f():\n    if x:\n        go()\n    done()\n"
+        got, first, last = buckets.replace_once(text, "if x:\n    go()", "if x:\n    go(1)\n    go(2)")
+        self.assertEqual(got, "def f():\n    if x:\n        go(1)\n        go(2)\n    done()\n")
+        self.assertEqual((first, last), (2, 4))
+        with self.assertRaisesRegex(ValueError, "appears 2 times"):
+            buckets.replace_once("a\na\n", "a", "b")
+        with self.assertRaisesRegex(ValueError, "closest line is 2"):
+            buckets.replace_once("x = 1\nreturn total + 1\n", "return totl + 1", "y")
+
+    def test_tools_read_search_and_change_only_the_task_file(self):
+        self.assertIn("    3|     return y + 1", self.tool("read", path="src/m.py", offset=2, limit=5))
+        self.assertIn("src/n.py:3", self.tool("search", pattern="run\\("))
+        self.assertIn("you may change only", self.tool("edit", path="src/n.py", old="VALUE", new="V"))
+        self.assertIn("outside the repository", self.tool("read", path="../../etc/passwd"))
+        self.assertIn("wouldn't parse", self.tool("edit", path="src/m.py", old="y + 1", new="y +"))
+        out = self.tool("edit", path="src/m.py", old="return y + 1", new="return y + 2")
+        self.assertIn("    3|     return y + 2", out)
+        self.assertIn("return y + 2", (self.repo / "src/m.py").read_text())
+        self.assertIn("exists; change it with edit", self.tool("write", path="src/m.py", content="x"))
+
+    def test_the_loop_edits_then_finishes_with_the_done_line(self):
+        turns = []
+        def fake_turn(cfg, run, label, messages, **kw):
+            turns.append((label, kw.get("tools") is buckets.CODER_TOOLS))
+            if len(turns) == 1:
+                return "", "", [{"id": "a", "name": "edit", "arguments": {"path": "src/m.py", "old": "return y + 1",
+                                                                          "new": "return y + 2"}}], False
+            self.assertIn("Edited `src/m.py`", messages[-1]["content"])
+            return "DONE: run adds 2", "", [], False
+        with mock.patch.object(buckets, "chat_turn", fake_turn), contextlib.redirect_stderr(io.StringIO()):
+            got = self.b.code_task(self.task)
+        self.assertEqual(got["status"], "done")
+        self.assertEqual([t[0] for t in turns], ["code-T1-1", "code-T1-2"])
+        self.assertTrue(all(t[1] for t in turns))
+        self.assertIn("buckets T1", subprocess.run(["git", "log", "-1", "--format=%s"], cwd=self.repo,
+                                                   capture_output=True, text=True).stdout)
+
+    def test_a_reply_without_tools_or_a_done_line_is_nudged_once(self):
+        replies = iter([("I will change it.", [], ), ("Still thinking about it.", [])])
+        def fake_turn(cfg, run, label, messages, **kw):
+            text, calls = next(replies)
+            return text, "", calls, False
+        with mock.patch.object(buckets, "chat_turn", fake_turn):
+            log, timed_out = self.b.native_coder(self.task, "PROMPT", time.time() + 60)
+        self.assertEqual(log.splitlines(), ["I will change it.", "Still thinking about it."])
+        self.assertFalse(timed_out)
+
+    def test_old_tool_results_are_shortened_to_fit(self):
+        messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"},
+                    {"role": "tool", "content": "x" * 90000}, {"role": "tool", "content": "y" * 900}]
+        self.b.fit_messages(messages, {"num_ctx": 32768, "max_tokens": 8000})
+        self.assertIn("shortened", messages[2]["content"])
+        self.assertEqual(messages[3]["content"], "y" * 900)
+
+
 if __name__ == "__main__":
     unittest.main()

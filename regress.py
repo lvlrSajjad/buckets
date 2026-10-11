@@ -207,7 +207,7 @@ def run_buckets(c: dict, clone: Path, config: Path, request: str, log: Path) -> 
                 os.killpg(p.pid, signal.SIGKILL)
                 code = p.wait()
     text = log.read_text(errors="replace")
-    reports = re.findall(r"^\s*report: (\S+)$", text, re.M)
+    reports = re.findall(r"^(?:\[[\d:]+\])?\s*report: (\S+)\s*$", text, re.M)
     meta: dict = {}
     if reports and (Path(reports[-1]).parent / "meta.json").exists():
         meta = json.loads((Path(reports[-1]).parent / "meta.json").read_text())
