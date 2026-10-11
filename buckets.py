@@ -5940,6 +5940,66 @@ def earlier_unmerged(repo: Path, request: str, minutes: int = 60) -> dict | None
     return None
 
 
+MERGES = "merges.jsonl"
+
+
+def record_merge(repo: Path, m: dict) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(STATE_DIR / MERGES, "a") as f:
+        f.write(json.dumps({"repo": str(repo), "at": datetime.now().isoformat(timespec="seconds"), **m}) + "\n")
+
+
+def last_merge(repo: Path) -> dict | None:
+    try:
+        lines = (STATE_DIR / MERGES).read_text().splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            m = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if m.get("repo") == str(repo) and not m.get("undone"):
+            return m
+    return None
+
+
+def undo_merge(repo: Path) -> str:
+    """Take back the last `merge`. Nothing pushed and nothing on top: the branch moves back and the work is
+    kept as a branch. Pushed, or more commits since: revert commits instead (history is never rewritten)."""
+    m = last_merge(repo)
+    if not m:
+        raise RuntimeError("no merge by buckets to undo here (an unmerged run is thrown away with `discard`)")
+    if changed_paths(repo):
+        raise RuntimeError(dirty_tree(repo))
+    into, before, after = m["into"], m["before"], m["after"]
+    if git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() != into:
+        git(repo, "checkout", "-q", into)
+    tip = git(repo, "rev-parse", "HEAD").strip()
+    pushed = bool(git(repo, "branch", "-r", "--contains", after, check=False).strip())
+    kept = f"{m['branch']}-undone"
+    if tip == after and not pushed:
+        if not branch_exists(repo, kept):
+            git(repo, "branch", kept, after)
+        git(repo, "reset", "-q", "--keep", before)
+        how = f"moved {into} back to before the merge; the work is kept on {kept}"
+    else:
+        r = subprocess.run(["git", "revert", "--no-edit", f"{before}..{after}"], cwd=repo, capture_output=True, text=True)
+        if r.returncode != 0:
+            subprocess.run(["git", "revert", "--abort"], cwd=repo, capture_output=True)
+            raise RuntimeError(f"reverting conflicts with what came after the merge; revert it yourself: "
+                               f"git revert {before}..{after}")
+        why = "it was pushed" if pushed else "more commits came after it"
+        how = f"added commits that revert the merge on {into} ({why}, so history isn't rewritten)"
+    lines = (STATE_DIR / MERGES).read_text().splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        if json.loads(lines[i]) == m:
+            lines[i] = json.dumps({**m, "undone": datetime.now().isoformat(timespec="seconds")})
+            break
+    (STATE_DIR / MERGES).write_text("\n".join(lines) + "\n")
+    return f"undid the merge of {m['branch']} (\"{' '.join(m.get('request', '').split())[:70]}\"): {how}"
+
+
 def merge_run(repo: Path) -> str:
     """Fast-forward the latest run's branch into the branch it started from and delete it."""
     d = next((d for d in runs_newest_first(repo, ("code", "pick")) if d.get("branch")
@@ -5952,10 +6012,13 @@ def merge_run(repo: Path) -> str:
     note = "" if d.get("done") else " (that run finished but wasn't done; merged anyway because you asked)"
     if git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() != into:
         git(repo, "checkout", "-q", into)
+    before = git(repo, "rev-parse", "HEAD").strip()
     r = subprocess.run(["git", "merge", "--ff-only", branch], cwd=repo, capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"{into} has moved since the run, so it can't fast-forward; merge it yourself: "
                            f"git merge {branch}")
+    record_merge(repo, {"branch": branch, "into": into, "before": before,
+                        "after": git(repo, "rev-parse", "HEAD").strip(), "request": d.get("request", "")})
     git(repo, "branch", "-q", "-d", branch)
     older = d.get("builds_on")
     tidied = ""
@@ -6020,6 +6083,15 @@ def cmd_review(cfg: dict, repo: Path) -> int:
 def cmd_merge(repo: Path) -> int:
     try:
         say(f"{ok()} {merge_run(repo)}")
+        return 0
+    except RuntimeError as e:
+        say(f"{warn()} {e}")
+        return 1
+
+
+def cmd_undo(repo: Path) -> int:
+    try:
+        say(f"{ok()} {undo_merge(repo)}")
         return 0
     except RuntimeError as e:
         say(f"{warn()} {e}")
@@ -6928,12 +7000,14 @@ def main(argv: list[str] | None = None) -> int:
         if here is None:
             die("run this inside the repo")
         return cmd_review(cfg, here)
-    if words in (["last"], ["merge"], ["discard"]) and not args.file:
+    if words in (["last"], ["merge"], ["discard"], ["undo"]) and not args.file:
         here = git_toplevel(args.repo)
         if words == ["last"]:
             return cmd_last(here)
         if here is None:
             die("run this inside the repo")
+        if words == ["undo"]:
+            return cmd_undo(here)
         return cmd_merge(here) if words == ["merge"] else cmd_discard(here, args.yes)
 
     request = Path(args.file).read_text() if args.file else " ".join(args.request)
@@ -6992,7 +7066,7 @@ def main(argv: list[str] | None = None) -> int:
                               f" · {repo.name} · {elapsed()}")
 
 
-CHAT_COMMANDS = {"merge": "merge", "last": "last", "discard": "discard", "pr": "pr", "setup": "setup", "review": "review",
+CHAT_COMMANDS = {"merge": "merge", "last": "last", "discard": "discard", "undo": "undo", "pr": "pr", "setup": "setup", "review": "review",
                  "doctor": "--doctor", "--doctor": "--doctor"}
 
 

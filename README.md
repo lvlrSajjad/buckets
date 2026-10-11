@@ -44,8 +44,11 @@ First time? See "Set up on your own machines" below, then come back here.
    > last        the latest report again
    > merge       bring the branch into the branch you started from (fast-forward only)
    > discard     delete the branch (asks first)
+   > undo        take back the last merge (the work is kept as a branch)
    > push main   (or any other git chore, in plain words)
    ```
+
+**Follow-ups build on unmerged work.** If you haven't merged the last run and the next request builds on it (it names a file that run changed, or says "also", "now", "it" within an hour), buckets starts from that run's branch instead of the base, so its changes are there; in the chat it asks first (`follow_ups`: `"ask"`, `"always"` or `"never"` in the config). `merge` then brings in both.
 
 Writing good requests:
 - Say **what** and **where**: "add `canAll` to `Ability` in `packages/core/src/ability.ts`" beats
@@ -162,7 +165,7 @@ Go ahead? … y
 
 Commands (in the chat, with or without `buckets` in front, or from the shell): `last` (show the
 latest report), `merge` (fast-forward the latest run's branch into the branch it started from, then
-delete it), `discard` (delete it, after a y/N), `pr` (open a pull request for the latest run),
+delete it), `discard` (delete it, after a y/N), `undo` (take back the last `merge`: the branch moves back and the work is kept as `buckets/…-undone`, or, if it was pushed or more commits came after, revert commits are added instead), `pr` (open a pull request for the latest run),
 `review` (Claude reviews the latest run's branch, reading the code around the change, ~$0.20–0.50),
 `setup`, `--doctor`.
 

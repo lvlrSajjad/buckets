@@ -1592,6 +1592,38 @@ class FollowUps(unittest.TestCase):
         self.assertFalse(buckets.branch_exists(self.repo, "buckets/add-tax"))
 
 
+class Undo(unittest.TestCase):
+    def setUp(self):
+        self.repo = make_repo({"a.ts": "1\n"})
+        self.main = buckets.git(self.repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        self.start = buckets.git(self.repo, "rev-parse", "HEAD").strip()
+        buckets.git(self.repo, "switch", "-q", "-c", "buckets/two")
+        (self.repo / "a.ts").write_text("2\n")
+        commit_all(self.repo, "two")
+        buckets.git(self.repo, "switch", "-q", self.main)
+        run = buckets.Run(self.repo)
+        (run.dir / "meta.json").write_text(json.dumps({"repo": str(self.repo), "kind": "code", "request": "make it 2",
+                                                       "done": True, "branch": "buckets/two", "merge_into": self.main}))
+        buckets.merge_run(self.repo)
+
+    def test_undo_moves_back_and_keeps_the_work(self):
+        msg = buckets.undo_merge(self.repo)
+        self.assertIn("moved", msg)
+        self.assertEqual(buckets.git(self.repo, "rev-parse", "HEAD").strip(), self.start)
+        self.assertEqual((self.repo / "a.ts").read_text(), "1\n")
+        self.assertTrue(buckets.branch_exists(self.repo, "buckets/two-undone"))
+        with self.assertRaisesRegex(RuntimeError, "no merge by buckets"):
+            buckets.undo_merge(self.repo)                                        # already undone
+
+    def test_undo_reverts_when_more_came_after(self):
+        (self.repo / "b.ts").write_text("x\n")
+        commit_all(self.repo, "more")
+        msg = buckets.undo_merge(self.repo)
+        self.assertIn("revert", msg)
+        self.assertEqual((self.repo / "a.ts").read_text(), "1\n")
+        self.assertTrue((self.repo / "b.ts").exists())                          # what came after stays
+
+
 class DoubleReview(unittest.TestCase):
     """Two machines review each round; a lone "undefined"-style claim while the checks pass is confirmed
     before it can send working code back for rewriting."""
