@@ -2260,6 +2260,14 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
                                      "done_when": "", "edits": [], "param": {"name": "o", "value": "{ a: 1 }"}}], self.repo, 8, "T")[0]
         self.assertEqual(t["param"]["value"], "{ a: 1 }")                         # an object literal stays
 
+    def test_edits_leave_the_files_own_blank_lines_alone(self):
+        (self.repo / "keep.ts").write_text("export const f = (n: number) => n\n\n\n\nexport const g = 1\n\n\n\nexport const h = f(1)\n")
+        d = buckets.ts_moves(self.repo, {"op": "signature", "file": "keep.ts", "name": "f",
+                                         "param": {"name": "d", "type": "number", "default": "2", "value": "3"}})
+        self.assertTrue(d["ok"], d)
+        self.assertEqual(d["files"]["keep.ts"],
+                         "export const f = (n: number, d: number = 2) => n\n\n\n\nexport const g = 1\n\n\n\nexport const h = f(1, 3)\n")
+
     def test_shared_hook_names(self):
         self.assertEqual(buckets.shared_hook_names("a/b/billing-shared.tsx", "a/b/x/use-billing-screen.tsx"),
                          ("a/b/use-billing-screen-shared.ts", "useBillingScreenShared"))

@@ -244,6 +244,8 @@ function pruneImports(sf, stillUsed, edits) {
   }
 }
 
+// Edits applied from the end of the file backwards. Blank lines are tidied only where a removal left
+// more than one in a row: the file's own blank lines elsewhere stay as they were.
 function applyEdits(text, edits) {
   const sorted = [...edits].sort((a, b) => b[0] - a[0] || b[1] - a[1]);
   let out = text;
@@ -251,9 +253,17 @@ function applyEdits(text, edits) {
   for (const [s, e, r] of sorted) {
     if (e > last) throw new Error('overlapping edits');
     out = out.slice(0, s) + r + out.slice(e);
+    if (r === '' || r.trim() === '') {
+      let a = s, b = s + r.length;
+      while (a > 0 && /[ \t\n]/.test(out[a - 1])) a--;
+      while (b < out.length && /[ \t\n]/.test(out[b])) b++;
+      const gap = out.slice(a, b);
+      const lines = (gap.match(/\n/g) || []).length;
+      if (lines > 2) out = out.slice(0, a) + (a === 0 ? '' : '\n\n') + gap.replace(/^[\s\S]*\n/, '') + out.slice(b);
+    }
     last = s;
   }
-  return out.replace(/\n{3,}/g, '\n\n');
+  return out;
 }
 
 function afterImports(sf) {
