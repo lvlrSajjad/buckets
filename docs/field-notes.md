@@ -555,6 +555,27 @@ version exactly. Found on the way, for the owner: debug logging left in the tech
 variable for both variants (each app ships one, so nothing changes per app); and the 12 rfp statements that
 differ slightly are where the model's help is needed next (make them identical, then share).
 
+### 24. Near copies: the model picks, buckets copies (`unify`), then shares (2026-10-11 early morning)
+
+proposal-details, "merge … where a near copy differs only incidentally, use the safer version and share
+it; keep real differences". The local planner judged the two near copies right: `onAddressPress` takes
+the techs version (`Linking.openURL(url ?? "")`, null-safe); `openStatusChangeModal` differs only in quote
+style. It wrote them as edits; they were dropped as "redoing the share" (run 1), so now an edit that makes
+a near copy match the other variant becomes a `unify` (copied exactly) and runs before the share (run 2:
+both unified in 2 s each, then shared into `useProposalDetailsScreenShared`).
+
+Run 2 then showed a real gap: the hook call landed after `if (!proposal) return` (lint's rules-of-hooks
+caught it). Round 2's model moved the call up, which also moved a destructure of `proposal` above the null
+check (both reviewers caught the crash); round 3 broke `tsc`. Not done after 3 rounds. Fix in the tool: a
+hook call goes before an early return only when what moves past it just declares functions and its inputs
+are set by then; values set after the return are never re-derived inside the hook; otherwise the share
+refuses the hook with the reason ("it would need `addressName`, set after the early return at line 256") and
+does the safe part (the unifies and `FULL`), with every check passing.
+
+Lessons: the local model is good at the judgment (incidental vs real) and poor at repairing a structural
+mistake across rounds (each fix introduced the next problem); the tool has to refuse what it can't do
+safely rather than leave it to follow-up rounds.
+
 ## Lessons so far
 
 - Moving code is a job for a tool, not a model: a 1,450-line split failed after 20 min of retyping and took 3 s
