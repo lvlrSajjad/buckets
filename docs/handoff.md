@@ -90,8 +90,8 @@ Done 01:00–04:30 (field notes 32):
 - The work repo was left as found after every run (clean `main`, 5 stashes, no `buckets/*` branches).
 
 Next (in order):
-1. `merge-create-invoice` (the hardest merge): each fix moved it further (round 1 now green with every module
-   variable a ref); see the latest run in `~/.local/state/buckets-regress/logs/` and the field notes.
+1. Read the full work-repo baseline started ~04:50 from `<scratchpad>/runner5` (all 16 cases on the current code;
+   each case's diff is now kept next to its log). `merge-create-invoice` passed twice before it (9.6 and 6.0 min).
 2. `merge-proposal` stops at the early-return limit (item 12): needs the owner's call (the clean fixes change call
    sites: late values passed as arguments, or the null guard moved).
 3. Dependabot batches need `gh auth login` for the work repo on the Mac.

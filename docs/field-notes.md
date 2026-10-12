@@ -755,6 +755,13 @@ A cut-off review thinks ~60–80 s, then needs another call to answer (10–20 s
   module variables (now every identical module `let` becomes a ref). The proposal merge hit the early-return
   limit (item 12) again. A coder that answered "no changes needed" was tried again for 2.5 min; that answer is
   done now.
+- **The hardest merge, to green** (two screen hooks of ~1,000 and ~1,500 lines; seven runs, each fix found by the
+  run before). The runs showed, in order: a unify that changed behaviour; module lets declared without a value,
+  which compare didn't see; refs typed `any` like their untyped variables, counted as shortcuts; module state only
+  one variant had; a plan that named a variant as the shared file (a crash); a doc comment carried off with the
+  first variable. Run 6 was done in 9.6 min and run 7 in 6.0 min, one round each: all 15 module variables became
+  refs in one shared hook, both hooks use it, and tsc, eslint and jest pass. Read by hand from the diff the suite
+  now keeps.
 - **The opencode half, read closely**: 8 of 12. Two of the failures were buckets bugs, now fixed. The planner
   dropped the new parameter's default and the value every call should pass, then three rounds hand-edited 37
   calls in 18 min (the request's words fill those fields now). And one plan overflowed the planner's context.
