@@ -4457,12 +4457,23 @@ class Buckets:
             parents = {p["parent"] for p in inner}
             if inner and len(parents) == 1:
                 hook_file, hook = shared_hook_names(f"{parent}/x.ts", a)
-                dry = ts_moves(self.repo, {"op": "share_hook", "files": [a, b], "function": parents.pop(),
-                                           "names": [p["name"] for p in inner], "into": hook_file, "name": hook}, timeout=120)
-                if dry.get("ok"):
-                    same += [p["name"] for p in inner]
-                else:
-                    detail(f"the identical statements inside the components can't be shared yet ({dry.get('error', '')[:160]})")
+                fn, names = parents.pop(), [p["name"] for p in inner]
+                hook_dry = lambda ns: ts_moves(self.repo, {"op": "share_hook", "files": [a, b], "function": fn,  # noqa: E731
+                                                           "names": ns, "into": hook_file, "name": hook}, timeout=120)
+                late_dry = lambda ns: (ts_moves(self.repo, {"op": "share_late", "files": [a, b], "function": fn,  # noqa: E731
+                                                            "names": ns, "into": hook_file}, timeout=120)
+                                       .get("report") or {}).get("shared") or [] if ns else []
+                dry = hook_dry(names)
+                if dry.get("ok"):  # the hook takes them; functions it leaves after an early return become factories
+                    took = dry["report"].get("names") or names
+                    same += took + late_dry([n for n in names if n not in took])
+                else:  # what comes after an early return as factories, the rest in the hook
+                    late = late_dry(names)
+                    rest = [n for n in names if n not in late]
+                    again = hook_dry(rest) if late and rest else {}
+                    same += late + ((again["report"].get("names") or rest) if again.get("ok") else [])
+                    if not late:
+                        detail(f"the identical statements inside the components can't be shared yet ({dry.get('error', '')[:160]})")
             task = None
             if same:
                 task = {"id": "T1", "file": into, "action": "share", "from": [a, b], "select": same,
@@ -6046,17 +6057,53 @@ class Buckets:
             else:
                 notes.append(f"top-level share not done ({d.get('error') or 'nothing could move'})")
         if inner:
-            parents = {same[n]["parent"] for n in inner}
             hook_file, hook = task["file"], shared_hook_names(task["file"], a)[1]  # in the shared file the request named
-            d = ts_moves(self.repo, {"op": "share_hook", "files": [a, b], "function": parents.pop(), "names": inner,
-                                     "into": hook_file, "name": hook}) if len(parents) == 1 else \
-                {"ok": False, "error": "the statements are in different functions"}
+
+            def share_hook(names: list[str]) -> dict:
+                parents = {same[n]["parent"] for n in names}
+                return ts_moves(self.repo, {"op": "share_hook", "files": [a, b], "function": parents.pop(), "names": names,
+                                            "into": hook_file, "name": hook}) if len(parents) == 1 else \
+                    {"ok": False, "error": "the statements are in different functions"}
+
+            def share_late(names: list[str]) -> list[str]:
+                """Identical functions the hook can't take (after an early return, or using what's set after one)
+                become factories in the shared file; each component makes its function where it was."""
+                parents = {same[n]["parent"] for n in names}
+                if not names or len(parents) != 1:
+                    return []
+                lt = ts_moves(self.repo, {"op": "share_late", "files": [a, b], "function": parents.pop(), "names": names,
+                                          "into": hook_file})
+                if not lt.get("ok"):
+                    detail(f"share_late: {lt.get('error', '')[:200]}")
+                    return []
+                write(lt)
+                rl = lt["report"]
+                notes.append(f"made {', '.join(rl['shared'])} in {hook_file} as factories ("
+                             + ", ".join(f"{f['name']}({', '.join(q['name'] for q in f['params']) or 'nothing'})" for f in rl["factories"])
+                             + "): they come after an early return or use values set after one, so each component still makes "
+                             "them where they were, from its own values")
+                self.generated_lines = getattr(self, "generated_lines", set()) | {  # signatures written from the components' types
+                    same_line(l) for text in lt["files"].values() for f in rl["factories"] for l in text.splitlines()
+                    if f"function {f['name']}(" in l} | {
+                    same_line(f"{q['name']}: {q['type']}") for f in rl["factories"] for q in f["params"]}
+                return rl["shared"]
+
+            d = share_hook(inner)
+            late: list[str] = []
+            if not d.get("ok"):
+                late = share_late(inner)
+                rest = [n for n in inner if n not in late]
+                if late and rest:
+                    d = share_hook(rest)
             if d.get("ok"):
                 write(d)
                 r = d["report"]
                 moved_names = r.get("names") or inner
-                if r.get("left"):
-                    notes.append(f"kept in each component (they depend on code that differs): {', '.join(r['left'][:10])}")
+                if not late:
+                    late = share_late([n for n in r.get("left") or [] if n not in moved_names])
+                left = [n for n in r.get("left") or [] if n not in late]
+                if left:
+                    notes.append(f"kept in each component (they depend on code that differs): {', '.join(left[:10])}")
                 state = [h for h in r.get("helpers_moved") or [] if re.search(
                     rf"(?m)^\s*(?:export\s+)?(?:let|var)\s+{re.escape(h)}\b", d["files"].get(hook_file, ""))]
                 if state:
@@ -6070,7 +6117,7 @@ class Buckets:
                 self.generated_lines = getattr(self, "generated_lines", set()) | {  # the hook's generated signature
                     same_line(l) for text in d["files"].values() for l in text.splitlines() if f"function {hook}(" in l} | {
                     same_line(f"{p['name']}: {p['type']}") for p in r.get("params", [])}  # its parameters, one per line once formatted
-            else:
+            elif not late or len(late) < len(inner):
                 notes.append(f"shared hook not made ({d.get('error', '')[:200]})")
         if skipped:
             notes.append(f"not moved (not identical in both): {', '.join(skipped[:12])}")

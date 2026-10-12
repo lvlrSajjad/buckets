@@ -2117,6 +2117,18 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
         self.assertIn('"0.00" here, "" in the other', d["report"]["refused"][0]["why"])
         self.assertIn('set("0.00")', d["files"]["src/b/screen.ts"])
 
+    def test_unify_reads_template_strings_as_values(self):
+        a = 'declare function go(u: string): void\nconst open = (url?: string, n = 1) => {\n  go(`${n} items`)\n  go(url ?? "")\n}\n' \
+            'const label = (n: number) => `${n} items`\nexport const A = [open, label]\n'
+        b2 = a.replace('go(url ?? "")', "go(url);").replace("`${n} items`\nexport", "`${n} things`\nexport").replace("const A", "const B")
+        for f, text in {"src/a/screen.ts": a, "src/b/screen.ts": b2}.items():
+            (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / f).write_text(text)
+        d = buckets.ts_moves(self.repo, {"op": "unify", "from": "src/a/screen.ts", "into": "src/b/screen.ts", "names": ["open", "label"]})
+        self.assertTrue(d["ok"], d)
+        self.assertEqual(d["report"]["unified"], ["open"])           # code after a `${}` isn't read as a string value
+        self.assertIn('" things" here, " items" in the other', d["report"]["refused"][0]["why"])
+
     def test_an_edit_that_unifies_a_near_copy_becomes_unify(self):
         a = 'const same = (x: number) => x * 2\nconst near = (x: number) => String(x ?? 0)\n\nexport const A = () => same(1) + near(2)\n'
         b2 = a.replace("String(x ?? 0)", "String(x)").replace("export const A", "export const B")
@@ -2143,6 +2155,49 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
                                           "instructions": "", "done_when": "", "where": "", "edits": []}]}
         fixed = buckets.validate_plan(b.fill_moves(bad), self.repo, 8)["tasks"][0]
         self.assertEqual(fixed["from"], ["src/app/screen.ts"])
+
+    def test_share_late_makes_factories_for_functions_after_an_early_return(self):
+        screen = """import React, { useState } from "react"
+import { Linking } from "react-native"
+import { Text } from "./ui"
+
+export const FULL = 1
+
+export const Screen = ({ item }: { item?: { address: string } }) => {
+  const [open, setOpen] = useState(false)
+  const early = () => open
+  if (!item) return null
+  const addressName = item.address
+  const onAddressPress = (prefix: string) => {
+    Linking.openURL(prefix + (addressName ?? ""))
+    setOpen(!open)
+  }
+  const own = () => 1
+  return <Text onPress={() => onAddressPress("geo:")}>{addressName}</Text>
+}
+"""
+        ui = 'export const Text = (p: any) => null\n'
+        rn = 'export const Linking = { openURL: (u: string) => {} }\n'
+        for f, text in {"src/a/screen.tsx": screen, "src/b/screen.tsx": screen.replace("const own = () => 1", "const own = () => 2"),
+                        "src/a/ui.tsx": ui, "src/b/ui.tsx": ui, "node_modules/react-native/index.d.ts": rn}.items():
+            (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / f).write_text(text)
+        d = buckets.ts_moves(self.repo, {"op": "share_late", "files": ["src/a/screen.tsx", "src/b/screen.tsx"], "function": "Screen",
+                                         "names": ["onAddressPress", "own", "setOpen", "early"], "into": "src/screen-shared.tsx"})
+        self.assertTrue(d["ok"], d)
+        self.assertEqual(d["report"]["shared"], ["onAddressPress"])
+        self.assertEqual({r["name"]: r["why"][:20] for r in d["report"]["refused"]},
+                         {"own": "the two variants' ve", "setOpen": "no early return come", "early": "no early return come"})
+        shared, a = d["files"]["src/screen-shared.tsx"], d["files"]["src/a/screen.tsx"]
+        self.assertIn('import { Linking } from "react-native"', shared)
+        self.assertIn('import { Linking } from "react-native"\n\nexport function makeOnAddressPress({ addressName, open, setOpen }: '
+                      "{ addressName: string; open: ", shared)                 # (no React types here: useState is `any`)
+        self.assertIn(" }) {\n  return (prefix: string) => {\n    Linking.openURL(prefix + (addressName ?? \"\"))\n"
+                      "    setOpen(!open)\n  }\n}\n", shared)                   # the function exactly as it was
+        self.assertIn("  if (!item) return null\n  const addressName = item.address\n"
+                      "  const onAddressPress = makeOnAddressPress({ addressName, open, setOpen })\n", a)  # still after the return
+        self.assertIn('import { makeOnAddressPress } from "../screen-shared"', a)
+        self.assertNotIn("react-native", a)                                                  # its only user moved
 
     def test_a_move_into_the_shares_file_is_dropped(self):
         b = buckets.Buckets(buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False}), self.repo, "merge")

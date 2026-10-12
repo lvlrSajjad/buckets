@@ -746,6 +746,118 @@ function shareHook() {
   };
 }
 
+// Identical functions a component declares after an early return can't go into a hook (a hook can't be
+// called there, and what they use is set after the return). Each becomes a factory in the shared file
+// instead: `makeX({ late values })` returns the function exactly as it was, and each variant keeps
+// `const x = makeX({ ... })` where the function was, so it is still made on each render after the return.
+function shareLate() {
+  const [fa, fb] = input.files;
+  const target = abs(input.into);
+  const existing = fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : null;
+  const { checker, sources: [A, B] } = program([fa, fb]);
+  const fnB = input.function_b || input.function;
+  const cap = (n) => n[0].toUpperCase() + n.slice(1);
+  const shared = [], refused = [];
+  const plans = { a: [], b: [] };
+  const used = { a: new Set(), b: new Set() };
+  const one = (sf, fnName, name) => {
+    const fn = findFunction(sf, fnName);
+    if (!fn) throw new Error(`no function \`${fnName}\` in ${rel(sf.fileName)}`);
+    const st = fn.body.statements.find((x) => declaredBy(x).some((id) => id.text === name));
+    if (!st || !ts.isVariableStatement(st) || !(st.declarationList.flags & ts.NodeFlags.Const)
+        || st.declarationList.declarations.length !== 1) throw new Error('not a `const` of its own at the top of the component');
+    if (!fn.body.statements.slice(0, fn.body.statements.indexOf(st)).some(hasOwnReturn)) {
+      throw new Error('no early return comes before it: a shared hook can take it');
+    }
+    const decl = st.declarationList.declarations[0];
+    if (!ts.isIdentifier(decl.name) || !decl.initializer) throw new Error('not a single named value');
+    const isFn = ts.isArrowFunction(decl.initializer) || ts.isFunctionExpression(decl.initializer);
+    let unsafe = '';
+    const look = (n) => {  // a value is computed by the factory, at the same place: no hooks, nothing awaited
+      if (unsafe) return;
+      if (ts.isAwaitExpression(n) || ts.isYieldExpression(n)) unsafe = 'it awaits';
+      else if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && /^use[A-Z]/.test(n.expression.text)) unsafe = `it calls \`${n.expression.text}\`, a hook`;
+      else if (!(isFn && n === decl.initializer) && ts.isFunctionLike(n)) return;  // code inside functions runs later
+      else ts.forEachChild(n, look);
+    };
+    look(decl.initializer);
+    if (unsafe && !isFn) throw new Error(unsafe);
+    const imports = importBindings(sf, checker);
+    const params = new Map(), imps = new Set();
+    for (const { node, sym } of references(checker, decl.initializer)) {
+      if (imports.has(sym)) { imps.add(imports.get(sym)); continue; }
+      const d = sym.declarations && sym.declarations[0];
+      if (!d || d.getSourceFile() !== sf || within(d, decl.initializer)) continue;
+      if (!within(d, fn)) throw new Error(`it uses \`${sym.name}\`, declared in this file outside the component; share that first`);
+      if (isAssigned(node)) throw new Error(`it assigns to \`${sym.name}\`, which the component keeps`);
+      if (/^use[A-Z]/.test(sym.name)) throw new Error(`it uses \`${sym.name}\`, a hook`);
+      params.set(sym.name, d);
+    }
+    const typeOf = (d) => {
+      if (d.type) {
+        for (const { sym: s2 } of references(checker, d.type)) if (imports.has(s2)) imps.add(imports.get(s2));
+        return d.type.getText(sf);
+      }
+      const t = typeText(checker, d, fn, target);
+      return !/import\(/.test(t) && t.length <= 120 ? t : 'any';
+    };
+    const list = [...params.entries()].map(([n, d]) => ({ name: n, type: typeOf(d) })).sort((x, y) => x.name.localeCompare(y.name));
+    return { sf, st, decl, list, imps, isFn, text: normalized(st, sf) };
+  };
+  for (const name of input.names) {
+    try {
+      const x = one(A, input.function, name), y = one(B, fnB, name);
+      if (x.text !== y.text) throw new Error('the two variants\' versions differ; unify them first');
+      const sig = (l) => l.map((q) => `${q.name}: ${q.type}`).join('; ');
+      if (sig(x.list) !== sig(y.list)) throw new Error(`it would take different values in the two variants (${sig(x.list) || 'none'} vs ${sig(y.list) || 'none'})`);
+      const make = `${x.isFn ? 'make' : 'get'}${cap(name)}`;
+      for (const sf of [A, B]) if (new RegExp(`\\b${make}\\b`).test(sf.text)) throw new Error(`\`${make}\` is already a name in ${rel(sf.fileName)}`);
+      if (existing && new RegExp(`\\b${make}\\b`).test(existing)) throw new Error(`\`${make}\` is already a name in ${rel(target)}`);
+      plans.a.push({ ...x, make }); plans.b.push({ ...y, make });
+      x.imps.forEach((i) => used.a.add(i)); y.imps.forEach((i) => used.b.add(i));
+      shared.push(name);
+    } catch (e) {
+      refused.push({ name, why: e.message });
+    }
+  }
+  if (!shared.length) throw new Error(`nothing could be shared: ${refused.map((r) => `${r.name} (${r.why})`).join('; ')}`);
+  const factory = (p) => {
+    const sig = p.list.length ? `{ ${p.list.map((q) => q.name).join(', ')} }: { ${p.list.map((q) => `${q.name}: ${q.type}`).join('; ')} }` : '';
+    const ret = p.decl.type ? `: ${p.decl.type.getText(p.sf)}` : '';
+    return `export function ${p.make}(${sig})${ret} {\n  return ${p.decl.initializer.getText(p.sf)}\n}\n`;
+  };
+  const edit = (sf, file, list, imps) => {
+    const edits = list.map((p) => [p.decl.initializer.getStart(sf), p.decl.initializer.end,
+      `${p.make}(${p.list.length ? `{ ${p.list.map((q) => q.name).join(', ')} }` : ''})`]);
+    // imports only the moved functions used go
+    const gone = list.map((p) => p.decl.initializer);
+    const stillUsed = new Set();
+    const imports = importBindings(sf, checker);
+    for (const s of sf.statements) {
+      if (ts.isImportDeclaration(s)) continue;
+      for (const { node, sym } of references(checker, s)) {
+        if (imports.has(sym) && !gone.some((g) => within(node, g))) stillUsed.add(imports.get(sym));
+      }
+    }
+    pruneImports(sf, stillUsed, edits);
+    return mergeImports(applyEdits(sf.text, edits), [`import { ${list.map((p) => p.make).join(', ')} } from "${importPath(abs(file), target)}"`], file);
+  };
+  const importLines = importsFor(A, used.a, fa, target);
+  const body = [importLines.length ? importLines.join('\n') + '\n' : '', ...plans.a.map(factory)].filter(Boolean).join('\n');
+  let sharedText = body;
+  if (existing !== null) {
+    const lines = body.split('\n');
+    const imports = lines.filter((l) => l.startsWith('import '));
+    const rest = lines.filter((l) => !l.startsWith('import ')).join('\n').replace(/^\n+/, '');
+    sharedText = mergeImports(existing.replace(/\n*$/, '\n\n') + rest, imports, target);
+  }
+  const params = plans.a.map((p) => ({ name: p.make, params: p.list }));
+  return {
+    files: { [fa]: edit(A, fa, plans.a, used.a), [fb]: edit(B, fb, plans.b, used.b), [rel(target)]: sharedText },
+    report: { shared, refused, factories: params },
+  };
+}
+
 // ---------------------------------------------------------------- compare and share
 
 function declarations(sf) {
@@ -917,9 +1029,18 @@ function share() {
 function swappedValues(a, b) {
   const tokens = (text) => {
     const sc = ts.createScanner(ts.ScriptTarget.Latest, true, ts.LanguageVariant.JSX, text);
-    const out = [];
-    for (let k = sc.scan(); k !== ts.SyntaxKind.EndOfFileToken; k = sc.scan()) {
-      const lit = k === ts.SyntaxKind.StringLiteral || k === ts.SyntaxKind.NumericLiteral || k === ts.SyntaxKind.NoSubstitutionTemplateLiteral;
+    const K = ts.SyntaxKind, out = [], templates = [];  // brace depth at each open `${`, to rescan the template after it
+    let depth = 0;
+    for (let k = sc.scan(); k !== K.EndOfFileToken; k = sc.scan()) {
+      if (k === K.OpenBraceToken) depth++;
+      else if (k === K.CloseBraceToken) {
+        if (templates.length && templates[templates.length - 1] === depth) {
+          k = sc.reScanTemplateToken(false);
+          if (k === K.TemplateTail) templates.pop();
+        } else depth--;
+      }
+      if (k === K.TemplateHead) templates.push(depth);
+      const lit = [K.StringLiteral, K.NumericLiteral, K.NoSubstitutionTemplateLiteral, K.TemplateHead, K.TemplateMiddle, K.TemplateTail].includes(k);
       out.push({ lit, key: lit ? `v:${sc.getTokenValue()}` : sc.getTokenText() });
     }
     return out;
@@ -1897,7 +2018,7 @@ function component() {
   const imp = importBindings(sf, checker);
   const stillUsed = new Set(keptRefs.filter(({ sym }) => imp.has(sym)).map(({ sym }) => imp.get(sym)));
   pruneImports(sf, stillUsed, edits);
-  const screen = mergeImports(applyEdits(text, edits), [`import { ${[input.name, ...sharedBack].join(', ')} } from "${importPath(file, target)}"`], file);
+  const screen = mergeImports(applyEdits(text, edits), [`import { ${[input.name, ...sharedBack].join(', ')} } from "${importPath(abs(file), target)}"`], file);
   if (keyAttr && keyMoves) notes.push('the `key` on its root moved to where it is used');
   else if (keyAttr) notes.push('the helper set `key` on its root element; in a list, React needs the key on the new element where it is used');
   return { files: { [input.file]: screen, [rel(target)]: compText },
@@ -2427,7 +2548,7 @@ function jsxOutline() {
 }
 
 try {
-  const ops = { extract, compare, share, share_hook: shareHook, unify, relocate, dedupe, find_copies: findCopies, same_behaviour: sameBehaviour, signature, component, syntax, rename, fold, to_ref: toRef, jsx_outline: jsxOutline };
+  const ops = { extract, compare, share, share_hook: shareHook, share_late: shareLate, unify, relocate, dedupe, find_copies: findCopies, same_behaviour: sameBehaviour, signature, component, syntax, rename, fold, to_ref: toRef, jsx_outline: jsxOutline };
   if (!ops[input.op]) throw new Error(`unknown op ${input.op}`);
   process.stdout.write(JSON.stringify({ ok: true, ...ops[input.op]() }));
 } catch (e) {
