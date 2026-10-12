@@ -746,6 +746,15 @@ A cut-off review thinks ~60–80 s, then needs another call to answer (10–20 s
   failed one case that opencode passed: its planner added an unasked-for file, and the round tidying it up broke
   lint. The native coder is now the default (nothing outside buckets, no `$PWD` class of bug), with opencode for
   the last try when a native try changes nothing.
+- **The new tools, live** (current code, one run each): a JSX chunk → a component in 4.3 min (one block and its 4
+  identical copies became one element), a fold in 4.9 min, a rename in 6.0 min, a branch update with a conflict
+  in 4.1 min, the signature change in 7.5 min (three rounds: the planner copied the hint's `…` placeholder as
+  the default; the request's own values now win). A merge failed for two reasons, both fixed. The planner
+  "unified" a focus handler that sets `"0.00"` in one app and `""` in the other (a real difference; both
+  reviewers caught it): unify now keeps copies that swap a value. And input refs the share pulled in stayed
+  module variables (now every identical module `let` becomes a ref). The proposal merge hit the early-return
+  limit (item 12) again. A coder that answered "no changes needed" was tried again for 2.5 min; that answer is
+  done now.
 - **The opencode half, read closely**: 8 of 12. Two of the failures were buckets bugs, now fixed. The planner
   dropped the new parameter's default and the value every call should pass, then three rounds hand-edited 37
   calls in 18 min (the request's words fill those fields now). And one plan overflowed the planner's context.
