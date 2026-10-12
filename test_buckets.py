@@ -3825,6 +3825,9 @@ class ModuleStateRefs(unittest.TestCase):
         return r.stdout + r.stderr
 
     def test_a_share_turns_the_state_into_refs_in_the_shared_hook(self):
+        f = self.repo / "src/x/b/screen.tsx"   # module state only one variant has becomes a ref there too
+        f.write_text(f.read_text().replace("let hits = 0\n", "let hits = 0\nlet onlyHere = 0\n").replace("hits += id\n", "hits += id\n    onlyHere = id\n"))
+        subprocess.run(["git", "commit", "-qam", "onlyHere"], cwd=self.repo, check=True)
         task = buckets.validate_tasks([{"id": "T1", "file": "src/x/screen-shared.ts", "action": "share",
                                         "from": ["src/x/a/screen.tsx", "src/x/b/screen.tsx"], "select": ["loaded", "hits"],
                                         "instructions": "", "done_when": "", "edits": []}], self.repo, 8, "T")[0]
@@ -3836,6 +3839,8 @@ class ModuleStateRefs(unittest.TestCase):
         shared = (self.repo / "src/x/screen-shared.ts").read_text()
         self.assertIn("const loadedRef = useRef<boolean>(false)", shared)
         self.assertNotIn("let loaded", shared)
+        self.assertIn("onlyHereRef.current = id", (self.repo / "src/x/b/screen.tsx").read_text())
+        self.assertIn("in src/x/b/screen.tsx: turned module state into refs in Screen (onlyHere → onlyHereRef)", got["note"])
         for v in ("a", "b"):
             screen = (self.repo / f"src/x/{v}/screen.tsx").read_text()
             self.assertNotIn("let loaded", screen)

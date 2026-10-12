@@ -5984,6 +5984,14 @@ class Buckets:
                     return {**task, "status": "failed", "note": f"BLOCKED: {cmp.get('error', 'compare failed')}"}
                 same = {p["name"]: p for p in cmp["pairs"] if p["status"] == "identical"}
                 wanted = [n for n in wanted if n not in refs] + [r for r in refs.values() if r in same]
+                # module state only one variant has: refs too, in that variant (the owner's call covers it alike)
+                for f in (a, b):
+                    own = re.findall(r"(?m)^(?:let|var)\s+([A-Za-z_$][\w$]*)", (self.repo / f).read_text(errors="replace"))
+                    if own:
+                        more, w, n = self.module_refs([f], own)
+                        if more:
+                            pre += w
+                            notes.append(f"in {f}: {n}")
         top = [n for n in wanted if same.get(n, {}).get("module_level")]
         inner = [n for n in wanted if same.get(n, {}).get("depth") == 1]
         skipped = [n for n in wanted if n not in top and n not in inner]
