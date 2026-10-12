@@ -3389,8 +3389,8 @@ def validate_move(t: dict, f: str, repo: Path, task_id: str) -> dict:
         return {**base, "file": f, "from": sources, "select": select, "where": ""}
     if len(sources) != 2 or not all((repo / x).is_file() and x.endswith(MOVABLE) for x in sources):
         raise ValueError("share: \"from\" must name the two existing TypeScript/JavaScript files that both have the code")
-    if not f.endswith(MOVABLE) or not select:
-        raise ValueError("share: \"file\" is the shared .ts/.tsx file and \"select\" the names to move into it")
+    if not f.endswith(MOVABLE) or not select or f in sources:
+        raise ValueError("share: \"file\" is the shared .ts/.tsx file (not one of the variants) and \"select\" the names to move into it")
     return {**base, "file": f, "from": sources, "select": select, "where": ""}
 
 
@@ -4551,6 +4551,8 @@ class Buckets:
             for h in self.share_hints():
                 ht = h["task"]
                 if ht and (clean_path(str(t.get("file", ""))) == ht["file"] or set(t.get("from") or []) == set(ht["from"])):
+                    if clean_path(str(t.get("file", ""))) in ht["from"]:  # a variant named as the shared file
+                        t["file"] = ht["file"]
                     t["file"] = t.get("file") or ht["file"]
                     t["from"] = t.get("from") or ht["from"]
                     t["select"] = t.get("select") or ht["select"]
@@ -6039,9 +6041,8 @@ class Buckets:
                              f"into {hook} in {hook_file}; "
                              f"parameters: {', '.join(p['name'] for p in r['params']) or 'none'}; re-derived inside: "
                              f"{', '.join(r.get('rederived') or []) or 'nothing'}")
-                self.generated_lines = getattr(self, "generated_lines", set()) | {
-                    same_line(l) for l in d["files"][[f for f in d["files"] if f not in (a, b)][0]].splitlines()
-                    if f"function {hook}(" in l}
+                self.generated_lines = getattr(self, "generated_lines", set()) | {  # the hook's generated signature
+                    same_line(l) for text in d["files"].values() for l in text.splitlines() if f"function {hook}(" in l}
             else:
                 notes.append(f"shared hook not made ({d.get('error', '')[:200]})")
         if skipped:

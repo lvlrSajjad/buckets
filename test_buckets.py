@@ -1996,6 +1996,11 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
                                              "done_when": "", "where": "", "edits": []}]}
         task = buckets.validate_plan(b.fill_moves(sparse), self.repo, 8)["tasks"][0]
         self.assertEqual((task["from"], task["select"]), (["src/app/screen.ts", "src/app-pro/screen.ts"], ["same"]))
+        into_variant = {"summary": "s", "tasks": [{"id": "T1", "file": "src/app/screen.ts", "action": "share", "select": ["same"],
+                                                   "from": ["src/app/screen.ts", "src/app-pro/screen.ts"], "instructions": "",
+                                                   "done_when": "", "where": "", "edits": []}]}
+        task = buckets.validate_plan(b.fill_moves(into_variant), self.repo, 8)["tasks"][0]
+        self.assertEqual(task["file"], "src/screen-shared.ts")                 # never into one of the variants
 
     def test_share_hook_and_inner_statements(self):
         comp = ('import { useState } from "react"\nimport { useStores } from "../stores"\n\n'
