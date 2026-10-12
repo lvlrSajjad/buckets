@@ -5508,6 +5508,9 @@ class Buckets:
                     git(self.repo, "add", "-A", "--", task["file"])
                     git(self.repo, "commit", "--no-verify", "-q", "-m",
                         f"buckets {task['id']}: {task['action']} {task['file']}\n\n{task['instructions'][:1500]}")
+                if final.startswith("BLOCKED"):  # it changed the file but didn't finish: half done, not done
+                    say(f"  {warn()} {task['id']} {task['file']} ({secs}s): {final[:150]}")
+                    return {**task, "status": "blocked", "note": final}
                 note = final.removeprefix("DONE:").strip() or f"changed {task['file']}"
                 say(f"  {ok()} {task['id']} {task['file']} ({secs}s): {paint(note[:150], 'dim')}")
                 return {**task, "status": "done", "note": final}

@@ -754,7 +754,8 @@ function declarations(sf) {
     let name = null;
     if ((ts.isFunctionDeclaration(n) || ts.isMethodDeclaration(n) || ts.isClassDeclaration(n)
          || ts.isInterfaceDeclaration(n) || ts.isTypeAliasDeclaration(n) || ts.isEnumDeclaration(n)) && n.name) name = n.name.getText(sf);
-    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) name = n.name.getText(sf);
+    // a variable with a value; at module level a bare `let ref` too (module state set later)
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && (n.initializer || n.parent.parent.parent === sf)) name = n.name.getText(sf);
     if (name) {
       const stmt = ts.isVariableDeclaration(n) ? n.parent.parent : n;
       list.push({ name, depth, parent, node: n, stmt, lo: lineOf(sf, stmt.getStart(sf)), hi: lineOf(sf, stmt.end),

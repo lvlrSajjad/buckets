@@ -2053,6 +2053,16 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
         self.assertIn("export const near = (x: number) => fmt(x ?? 0)", shared)   # unified, then shared too
         self.assertIn("export const same", shared)
 
+    def test_compare_sees_bare_module_lets(self):
+        a = "let ref: any\nlet n = 0\nexport const A = () => { ref = 1; n++; let local; return local }\n"
+        for f, t in {"src/a/s.ts": a, "src/b/s.ts": a.replace("const A", "const B")}.items():
+            (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / f).write_text(t)
+        c = buckets.ts_moves(self.repo, {"op": "compare", "a": "src/a/s.ts", "b": "src/b/s.ts"})
+        got = {p["name"]: (p["status"], p.get("mutable")) for p in c["pairs"]}
+        self.assertEqual(got["ref"], ("identical", True))
+        self.assertNotIn("local", got)                                          # an inner bare `let` stays out
+
     def test_unify_keeps_copies_that_swap_a_value(self):
         a = 'const focus = (n: number, set: (v: string) => void) => { if (n === 0) set("") }\n' \
             'const open = (url?: string) => go(url ?? "")\ndeclare function go(u: string): void\nexport const A = [focus, open]\n'
@@ -3659,6 +3669,16 @@ class Reflexes(unittest.TestCase):
         with mock.patch.object(buckets.Buckets, "native_coder", side_effect=fake_coder), contextlib.redirect_stderr(io.StringIO()):
             got = self.b.code_task(task)
         self.assertEqual((got["status"], len(calls)), ("done", 1))
+
+    def test_a_coder_that_changes_the_file_but_runs_out_is_not_done(self):
+        task = {"id": "T1", "file": "src/row.tsx", "action": "edit", "instructions": "say hello",
+                "done_when": "d", "read_first": [], "where": "", "edits": []}
+        def fake_coder(*a, **k):
+            (self.repo / "src/row.tsx").write_text(self.good.replace("Hi", "Hello"))
+            return "BLOCKED: ran out of turns before finishing", False
+        with mock.patch.object(buckets.Buckets, "native_coder", side_effect=fake_coder), contextlib.redirect_stderr(io.StringIO()):
+            got = self.b.code_task(task)
+        self.assertEqual(got["status"], "blocked")
 
     def test_a_coder_that_breaks_the_file_fixes_it_in_the_same_task(self):
         task = {"id": "T1", "file": "src/row.tsx", "action": "edit", "instructions": "say hello",
