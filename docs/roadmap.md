@@ -112,6 +112,37 @@ references through TypeScript)
 32, 36. **Wait for more machines or models**: routing by pass rates (32) and moving a dropped machine's task (36)
     have nothing to choose between with one model on two machines.
 
+**Tier 7: new projects from scratch** (added 2026-10-12, agreed with the owner; after the current A/B and 29b/29c).
+Today buckets only works well inside an existing repo: an empty one has no map, facts, examples or checks, a
+setup touches many files at once, and nothing looks at the rendered page. Most of that is missing setup and
+missing eyes, not model strength. Stacks, the owner's choice: **React Native**: Infinite Red's Ignite on Expo;
+**web**: Vite + React + TypeScript + Tailwind + shadcn/ui; **backend**: NestJS; **desktop**: the web stack inside
+Electron. Ranked:
+38. **A setup step, no model** (a typed step like the git chores, asked before it runs): `ignite new` (Expo),
+    `npm create vite` + Tailwind + `shadcn init`, `nest new`, the web app wrapped in Electron. Pinned versions,
+    non-interactive flags, install, first commit, and the new repo's checks (tsc, eslint, jest; Nest's e2e test)
+    written into its rules, so the first real run has a baseline. S–M
+39. **Page checks, mechanical**: web and Electron's renderer through a headless browser: every route loads with
+    no console errors, isn't blank, has no horizontal scroll at 375 px, passes axe; Lighthouse optional. React
+    Native goes through 15b (simframe). A check like tsc: fails the run, the coder fixes it. M
+40. **The frameworks' own generators as tools**: `ignite generate screen|component|model`, `nest g resource`
+    (module, controller, service, DTOs), `shadcn add <component>`. The model picks the generator and fills the
+    result in instead of writing boilerplate (the same idea as the move tools: copy, don't retype). S–M
+41. **Multi-file tasks for new files**: a new screen needs its route, page, store and API file together. A task
+    may create a set of new files; edits to existing files stay one file per task. M
+42. **Templates as examples**: per stack, a reference repo (an admin dashboard, a store, a feed; Ignite's demo
+    app for React Native) as a related repo, so "build a store" becomes "adapt this storefront" (licences
+    checked). Requests then read "an orders screen like the template's users screen". S–M
+43. **A spec from Claude, once**: screens, routes, data models and endpoints in one Claude plan (`--plan-file`,
+    ~$1–3), then `buckets each` builds it a screen and a Nest resource at a time, locally; the contract check
+    (23) keeps the screens and the backend in step. S–M
+44. **Design tokens fixed at setup** (Ignite's theme, the shadcn theme) and a check that screens use them (no
+    raw colours or sizes), so the model assembles instead of designing. S
+45. **Local eyes**: a Qwen-VL-class 7–8B on the Mac looks at 39's and 15b's screenshots for "broken" only
+    (overlaps, missing sections, unstyled pages), never "good-looking"; count false alarms before trusting it. M
+46. **Measure it**: regression cases from the setup step per stack (an admin panel, a feed, a store, a landing
+    page), hand-checked. Expected: admin panels almost all local; feeds and stores local after 43's spec. M
+
 **Quick wins, any time:** merge byte-identical variant files (`one navigator`); a leftover-debug
 check (`console.log`/`debugger` added); cleanup jobs for what the checks find (missing locale entries, leftover debug
 logs); answer questions from the facts alone when they suffice; README catch-up
@@ -132,8 +163,8 @@ branches good or bad.
 merge (about $2–4), to measure what local saves.
 
 **Stays with Claude:** advanced components (the advanced board), Figma and screenshots, e2e/CI design,
-whole-screen merges behind `isAppA()` guards, architecture calls; buckets applies what Claude plans
-(`--plan-file`).
+whole-screen merges behind `isAppA()` guards, architecture calls, a new project's spec (item 43) and visual taste
+(motion, polished landing pages like `live.html`); buckets applies what Claude plans (`--plan-file`).
 
 ## Where it has to help (the owner's list, 2026-10-11)
 
@@ -159,6 +190,7 @@ What the owner uses Claude Code for, unprioritized, and where buckets stands on 
 | Git conflicts, red CI | conflicts in cherry-picks | read the failing CI log (`gh run view --log-failed`) as check output and fix like a failing check |
 | Sonar issues | — | Sonar's issue list (API/export) as check output, fixed like lint |
 | Patching packages (`patch-package`) | — | a task kind that edits `node_modules/<pkg>` and runs `npx patch-package <pkg>`; the patch file is the change |
+| New projects from scratch (React Native, web, backend, desktop) | weak: no map, facts, examples or checks in an empty repo; nothing looks at the page | Tier 7: setup step (Ignite/Expo, Vite + shadcn, NestJS, Electron), page checks, generators as tools, templates, a Claude spec once |
 | Use graphify's graph where it exists (`graphify-out/graph.json`: the work repo has 20k nodes, 69k edges, 727 communities, 8% model-inferred links) | — | optional facts: files in the same community as the request's leads, inferred links; only when its `built_at_commit` is close to HEAD; skip vendored paths (`.yarn/`); measure on the vague hide-fields request |
 | **AGENTS.md followed, not just read** | long agent docs cut to the sections matching the request (70k chars in the work repo) | **its rules (always/never/must lines, plus the checklist sections) as a short block every plan and review sees, and the review checks the diff against each rule** |
 

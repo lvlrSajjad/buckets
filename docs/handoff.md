@@ -100,6 +100,8 @@ Next (in order):
 3. Dependabot batches need `gh auth login` for the work repo on the Mac.
 4. UI checks through simframe can start as a repo check command (roadmap 15b): needs a saved flow and Metro.
 5. The other session owns 29b (review thinking budget) and tier 6.
+6. Tier 7 (new projects from scratch, roadmap 38–46), after the above: start with the setup step (38) and page
+   checks (39). Stacks: Ignite on Expo, Vite + React + shadcn, NestJS, the web app in Electron.
 
 Known weak spots: the local planner varies run to run (guards cover it); reviewers are the weakest link
 (verify every branch yourself); each new tool needed 3–7 live attempts before a clean run.
