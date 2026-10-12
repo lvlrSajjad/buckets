@@ -121,6 +121,15 @@ class ToRefTests(unittest.TestCase):
         (repo / "src/f.tsx").write_text(out)
         self.assertEqual(tsc_errors(repo), "")
 
+    def test_a_comment_a_blank_line_apart_stays_where_it_is(self):
+        repo = make_repo({"src/react.d.ts": REACT, "src/g.tsx": (
+            'import { useState } from "react"\n\n/**\n * The screen and everything it does.\n */\n\nlet n = 0\n\n'
+            'export function G() {\n  const [s] = useState(1)\n  n += s\n  return <i>{n}</i>\n}\n')})
+        d = to_ref(repo, file="src/g.tsx")
+        out = d["files"]["src/g.tsx"]
+        self.assertIn(" * The screen and everything it does.\n */\n", out)
+        self.assertIn("export function G() {\n  const nRef = useRef<number>(0)\n", out)   # no comment came along
+
     def test_a_clash_is_skipped(self):
         repo = make_repo({"src/react.d.ts": REACT, "src/b.tsx": (
             'let n = 0\n\nexport function Counter() {\n  const nRef = 1\n  n += nRef\n  return <i>{n}</i>\n}\n')})

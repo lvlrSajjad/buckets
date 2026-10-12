@@ -2346,7 +2346,8 @@ function toRef() {
       // a comment above it goes with it, unless it's the file's header or a directive (eslint-, @ts-, a license)
       let start = fullStart(sf, st), comment = text.slice(start, lineStart(text, st.getStart(sf))).trim();
       const first = sf.statements[0] === st || /eslint|@ts-|@flow|license|copyright|^#!/i.test(comment);
-      if (first || ds.length > 1) { start = lineStart(text, st.getStart(sf)); comment = ''; }
+      const apart = /\n[ \t]*\n[ \t]*$/.test(text.slice(start, lineStart(text, st.getStart(sf))));  // a blank line: it's about what follows, not this
+      if (first || apart || ds.length > 1) { start = lineStart(text, st.getStart(sf)); comment = ''; }
       if (comment) for (const list of byFn.values()) for (const e of list) if (e.item.name === ds[0].name.text) e.comment = comment;
       edits.push([start, lineEnd(text, st.getEnd()), '']);
     } else {
