@@ -133,6 +133,20 @@ Electron. Ranked:
 42. **Templates as examples**: per stack, a reference repo (an admin dashboard, a store, a feed; Ignite's demo
     app for React Native) as a related repo, so "build a store" becomes "adapt this storefront" (licences
     checked). Requests then read "an orders screen like the template's users screen". S–M
+    **Animated and landing pages, the approved list** (2026-10-12, from search results; each LICENSE file
+    checked before first use). A page is assembled, not found: polished whole-page animated templates are mostly
+    paid, so the pieces come from:
+    - Starter: `shadcn-landing-page` (leoMirandaa; Vite + React + TS + Tailwind + shadcn, MIT), or Launch UI
+      (Next.js + shadcn, MIT).
+    - Sections and effects: Magic UI (MIT; installed with `shadcn add <registry url>`, so item 40 covers it).
+    - Scroll effects, page transitions, WebGL heroes: Codrops demos (MIT unless a demo says otherwise; the
+      code is in the `codrops` GitHub organization).
+    - Shader backgrounds: Paper Shaders (`@paper-design/shaders-react`, Apache 2.0; 0.0.x, pin the version).
+    - Motion: Motion (formerly Framer Motion, MIT). 3D: react-three-fiber + drei (MIT).
+    - Off by default: GSAP (free, but not for products whose end users pay for access; Webflow can change the
+      terms), React Bits (MIT + Commons Clause), Aceternity's paid templates, 21st.dev components without a
+      clear licence. Never: GPL (Syntro) or non-commercial (Once UI's Magic Portfolio, CC BY-NC) templates.
+    - Still Claude or a person: choosing and arranging the pieces (the layout and motion pass).
 43. **A spec from Claude, once**: screens, routes, data models and endpoints in one Claude plan (`--plan-file`,
     ~$1–3), then `buckets each` builds it a screen and a Nest resource at a time, locally; the contract check
     (23) keeps the screens and the backend in step. S–M
