@@ -1,4 +1,4 @@
-# Handoff (updated 2026-10-12 ~01:00)
+# Handoff (updated 2026-10-12 ~04:30)
 
 Read this first. Details: [../README.md](../README.md), [field-notes.md](field-notes.md) (every
 measurement; 20–28 are the latest), [roadmap.md](roadmap.md), and the research in
@@ -78,17 +78,25 @@ Done after compacting (2026-10-12, 00:00–01:00; field notes 32):
 - Private cases added: `fold-navigator`, `chunk-component`; `merge-create-invoice` now expects no module `let` in
   the shared file.
 
+Done 01:00–04:30 (field notes 32):
+- **The native coder is the default** (A/B: the same results and times as opencode on every task both did);
+  opencode takes a coder's last try when a native try changed nothing (`"coder": {"fallback": "opencode"}`).
+- Live runs of the new tools on the current code: chunk → component, fold, rename, branch update with a conflict,
+  signature all pass. Fixes from them: unify keeps copies that swap a value; every module `let` a merge meets
+  becomes a ref (bare `let x` too, and ones only one variant has); "no changes needed" is done; request-spelled
+  signature values win over the planner's; tasks on folders dropped; a half-done coder is blocked, not done; refs
+  typed `any` like their untyped variable aren't counted as shortcuts.
+- JSX chunks: identical copies in the same component become the same element.
+- The work repo was left as found after every run (clean `main`, 5 stashes, no `buckets/*` branches).
+
 Next (in order):
-1. **Finish reading the A/B** (runner at `<scratchpad>/runner`, frozen at 35042ea, so it has none of tonight's
-   fixes): opencode 8/12. Native so far: 3 pass; `component` failed through planner scope creep, not the coder.
-   Decide the coder default per case where the coder actually worked (coder-hide, compact-*, merge follow-ups).
-2. **Run with the current code**: `python3 regress.py rename update-conflict fold-navigator chunk-component
-   signature merge-create-invoice merge-proposal component`. Verify branches by hand.
-3. Item 12 (shared hooks past early returns) needs the owner's view: the clean ways change call sites.
-4. Dependabot batches need `gh auth login` for the work repo on the Mac (not logged in).
-5. Then JSX chunk dedupe (repeated blocks), simframe UI checks (15b); the other session owns 29b and tier 6.
-   Whoever runs 29b: start with 29c (thinking-mode sampling) as its first arm. New: 37 (past merged plans as
-   examples); fine-tuning looked at and set aside (roadmap, "Not now").
+1. `merge-create-invoice` (the hardest merge): each fix moved it further (round 1 now green with every module
+   variable a ref); see the latest run in `~/.local/state/buckets-regress/logs/` and the field notes.
+2. `merge-proposal` stops at the early-return limit (item 12): needs the owner's call (the clean fixes change call
+   sites: late values passed as arguments, or the null guard moved).
+3. Dependabot batches need `gh auth login` for the work repo on the Mac.
+4. UI checks through simframe can start as a repo check command (roadmap 15b): needs a saved flow and Metro.
+5. The other session owns 29b (review thinking budget) and tier 6.
 
 Known weak spots: the local planner varies run to run (guards cover it); reviewers are the weakest link
 (verify every branch yourself); each new tool needed 3–7 live attempts before a clean run.
