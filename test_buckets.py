@@ -271,6 +271,13 @@ class Shortcuts(unittest.TestCase):
                   "--- /dev/null\n+++ b/src/use-screen.ts\n+export const f = (q: Q, a: any) => {\n")
         self.assertEqual(buckets.find_shortcuts(joined, []), [])           # a formatter joined it; `export` added
 
+    def test_a_generated_signature_line_isnt_a_shortcut(self):
+        sig = "setShowCancelModal: React.Dispatch<React.SetStateAction<{ isOpen: boolean; data: any }>>"
+        diff = f"--- /dev/null\n+++ b/src/shared.tsx\n+  {sig}\n+  other: any\n"
+        hits = buckets.find_shortcuts(diff, [], {buckets.same_line(sig)})
+        self.assertEqual(len(hits), 1)
+        self.assertIn("other: any", hits[0])                            # the line reported is the new one
+
     def test_flags_added_lines_only(self):
         hits = buckets.find_shortcuts(self.DIFF, [])
         # src/a.ts adds one `as any` and removes one, so only the @ts-ignore counts there.
@@ -1215,6 +1222,23 @@ class LlamaCppServer(unittest.TestCase):
         self.assertEqual(saved["stats"]["prompt_eval_duration"], 100_000_000)  # ms -> ns, like Ollama's
         self.assertEqual(saved["stats"]["prompt_eval_cached_count"], 30)
 
+    def test_sampling_settings_reach_the_server_and_thinking_has_its_own(self):
+        fake = FakeLlamaServer(thoughts=50)
+        try:
+            cfg = {"url": fake.url, "model": "big:35b", "api": "llamacpp", "num_ctx": 65536, "think": True,
+                   "think_budget": 10, "temperature": 0.3, "top_k": 40,
+                   "think_sampling": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "bogus": 1}}
+            with contextlib.redirect_stderr(io.StringIO()):
+                buckets.ask_json(cfg, self.run, "plan", "sys", "go", {"type": "object"}, lambda d: d)
+        finally:
+            fake.close()
+        thinking, answer = fake.bodies[0], fake.bodies[-1]
+        self.assertEqual({k: thinking.get(k) for k in ("temperature", "top_p", "top_k", "min_p")},
+                         {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0})
+        self.assertNotIn("bogus", thinking)
+        self.assertEqual((answer["temperature"], answer["top_k"], answer.get("top_p")), (0.3, 40, None))  # no thinking after the cut
+        self.assertEqual(buckets.sampling({"temperature": 0.2}, True), {"temperature": 0.2})
+
     def test_the_thinking_budget_and_the_schema_after_a_cut(self):
         fake = FakeLlamaServer(thoughts=50)
         try:
@@ -1756,8 +1780,9 @@ class DoubleReview(unittest.TestCase):
             return validate(self.verdict(True))
         with mock.patch.object(buckets, "ask_json", fake_ask), contextlib.redirect_stderr(io.StringIO()):
             self.b.review(self.plan, [], self.base, {}, {}, 1, [], None)
-        self.assertIn("Planned but not run (these changes were NOT made):\n- edit src/m.py: unify the quotes", seen[0])
-        self.assertIn("a task\n  that failed, was blocked or was dropped did not happen", seen[0])
+        self.assertIn("as a mismatch):\n- edit src/m.py: unify the quotes", seen[0])
+        self.assertIn("anything else they asked for is NOT", seen[0])
+        self.assertIn("a task\n  that failed or was blocked did not happen", seen[0])
 
     def test_both_done(self):
         got, turns = self.run_review(self.verdict(True), self.verdict(True), {"test": {"ok": True}})
@@ -1793,6 +1818,17 @@ class DoubleReview(unittest.TestCase):
         self.assertEqual(len(turns), 1)
         got, _ = self.run_review(self.verdict(True), win, {"test": {"ok": True}}, {"real": [], "why": "style"})
         self.assertTrue(got["done"])
+    def test_a_lone_objection_to_any_types_the_change_doesnt_add_is_dropped(self):
+        mac = self.verdict(False, ["Type safety: the `navigation` prop is typed as `any`; it should be typed"], ["src/m.py"])
+        got, turns = self.run_review(mac, self.verdict(True), {"test": {"ok": True}})
+        self.assertTrue(got["done"])
+        self.assertEqual(turns, [])                                     # nothing to confirm: the shortcut check decides
+        self.assertIn("copied from the original code", got["summary"])
+        mixed = self.verdict(False, ["`d` is undefined in `run`", "`x` is typed as `any`"], ["src/m.py"])
+        got, turns = self.run_review(mixed, self.verdict(True), {"test": {"ok": True}}, {"real": [1], "why": "w"})
+        self.assertEqual(got["issues"], ["`d` is undefined in `run`"])  # only the other claim is weighed
+        self.assertNotIn("typed as `any`", turns[0][2])
+
     def test_failing_checks_need_no_confirming(self):
         mac = self.verdict(False, ["`d` is undefined"], ["src/m.py"])
         got, turns = self.run_review(mac, self.verdict(True), {"test": {"ok": False, "output": "F", "tail": "F"}})
@@ -2107,6 +2143,22 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
                                           "instructions": "", "done_when": "", "where": "", "edits": []}]}
         fixed = buckets.validate_plan(b.fill_moves(bad), self.repo, 8)["tasks"][0]
         self.assertEqual(fixed["from"], ["src/app/screen.ts"])
+
+    def test_a_move_into_the_shares_file_is_dropped(self):
+        b = buckets.Buckets(buckets.deep_merge(buckets.DEFAULT_CONFIG, {"mode": "local", "memory": False}), self.repo, "merge")
+        pair = ["src/a/screen.ts", "src/b/screen.ts"]
+        plan = {"summary": "s", "tasks": [
+            {"id": "T1", "file": "src/shared.ts", "action": "share", "from": pair, "select": ["FULL", "Screen.id"],
+             "instructions": "", "done_when": "", "where": "", "edits": []},
+            {"id": "T2", "file": "src/a/screen.ts", "action": "move", "into": "src/shared.ts", "name": "useShared",
+             "where": "Screen", "select": "logic", "instructions": "a shared hook", "done_when": "", "edits": []},
+            {"id": "T3", "file": "src/a/screen.ts", "action": "move", "into": "src/a/use-other.ts", "name": "useOther",
+             "where": "Screen", "select": "logic", "instructions": "its own hook", "done_when": "", "edits": []}]}
+        with contextlib.redirect_stderr(io.StringIO()), mock.patch.object(b, "share_hints", lambda: []):
+            got = b.prefer_move(plan)
+        self.assertEqual([(t["id"], t["action"], t.get("into")) for t in got["tasks"]],
+                         [("T1", "share", None), ("T2", "move", "src/a/use-other.ts")])  # a move elsewhere stays
+        self.assertIn("move src/a/screen.ts: a shared hook", b.dropped_tasks[0])
 
     def test_relocate_moves_to_a_util_and_repoints_importers(self):
         files = {

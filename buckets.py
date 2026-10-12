@@ -912,6 +912,7 @@ def openai_body(body: dict) -> dict:
     the thinking, as with Ollama (checked: it thinks first, then answers in the schema)."""
     out = {"model": body["model"], "messages": wire_messages(body["messages"], "openai"), "stream": True,
            "max_tokens": body["options"]["num_predict"], "temperature": body["options"].get("temperature", 0.3),
+           **{k: body["options"][k] for k in SAMPLING_KEYS if k in body["options"]},
            "chat_template_kwargs": {"enable_thinking": bool(body["think"])}}
     if body.get("tools"):
         out["tools"] = body["tools"]
@@ -979,6 +980,23 @@ def _stream_chat_llamacpp(url: str, body: dict, label: str, timeout: float, quie
     return "".join(content), "".join(thinking), stats
 
 
+def sampling(cfg: dict, think: bool) -> dict:
+    """A role's sampling settings: its temperature (and top_p, top_k, min_p, presence_penalty when set),
+    with "think_sampling" on top for calls that think (Qwen's cards give different values for thinking)."""
+    out = {"temperature": cfg.get("temperature", 0.3)}
+    out.update({k: cfg[k] for k in SAMPLING_KEYS if k in cfg})
+    if think:
+        out.update({k: v for k, v in (cfg.get("think_sampling") or {}).items() if k in ("temperature", *SAMPLING_KEYS)})
+    return out
+
+
+SAMPLING_KEYS = ("top_p", "top_k", "min_p", "presence_penalty")
+
+
+def unsampled(options: dict) -> dict:
+    return {k: v for k, v in options.items() if k not in ("temperature", *SAMPLING_KEYS)}
+
+
 def chat(cfg: dict, run: Run, label: str, system: str, user: str, *, schema: dict | None = None,
          think: bool | None = None, max_tokens: int = 8192, timeout: float = 2400, quiet: bool = False,
          think_budget: int | None = None) -> str:
@@ -992,8 +1010,7 @@ def chat(cfg: dict, run: Run, label: str, system: str, user: str, *, schema: dic
     body = {
         "model": cfg["model"], "stream": True, "think": think, "keep_alive": cfg.get("keep_alive", "10m"),
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        "options": {"num_ctx": cfg.get("num_ctx", 32768), "temperature": cfg.get("temperature", 0.3),
-                    "num_predict": max_tokens},
+        "options": {"num_ctx": cfg.get("num_ctx", 32768), **sampling(cfg, think), "num_predict": max_tokens},
     }
     if schema:
         body["format"] = schema
@@ -1013,7 +1030,7 @@ def chat(cfg: dict, run: Run, label: str, system: str, user: str, *, schema: dic
                                              else f"thought for {cut.tokens} tokens (the budget)")
                 + "; asking for the answer now")
             body["think"] = False
-            body["options"]["num_predict"] = min(max_tokens, 8000)
+            body["options"] = {**unsampled(body["options"]), **sampling(cfg, False), "num_predict": min(max_tokens, 8000)}
             body["messages"][1]["content"] = (user + "\n\nYour notes from thinking about this so far (cut short, "
                                               "but use them):\n" + notes + "\n\nNow give your answer. No more "
                                               "reasoning: reply with only the answer itself, and keep each task's "
@@ -1034,6 +1051,7 @@ def chat(cfg: dict, run: Run, label: str, system: str, user: str, *, schema: dic
                 if body["think"]:
                     say(f"  {warn()} {friendly(label)}: ran out of room while thinking; trying again without")
                     body["think"] = False
+                    body["options"] = {**unsampled(body["options"]), **sampling(cfg, False)}
                     continue
                 raise ReplyTooLong(f"{label}: the reply hit the {body['options']['num_predict']}-token limit")
             secs = stats.get("total_duration", 0) / 1e9
@@ -1056,8 +1074,7 @@ def chat_turn(cfg: dict, run: Run, label: str, messages: list[dict], *, tools: l
     llama = cfg.get("api") == "llamacpp"
     body = {"model": cfg["model"], "stream": True, "think": think, "keep_alive": cfg.get("keep_alive", "10m"),
             "messages": messages if llama else wire_messages(messages, "ollama"),
-            "options": {"num_ctx": cfg.get("num_ctx", 32768), "temperature": cfg.get("temperature", 0.3),
-                        "num_predict": max_tokens}}
+            "options": {"num_ctx": cfg.get("num_ctx", 32768), **sampling(cfg, think), "num_predict": max_tokens}}
     if tools:
         body["tools"] = tools
     if schema:
@@ -2486,6 +2503,9 @@ def same_line(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().rstrip(";,").strip()
 
 
+ABOUT_ANY = re.compile(r"`any`|\bas any\b|:\s*any\b|<any>|\b(?:typed|type[sd]?) (?:as )?`?any`?\b|\bany type\b", re.I)
+
+
 def find_shortcuts(diff: str, allowed: list[str], generated: set | frozenset = frozenset()) -> list[str]:
     """Added lines that silence checks or skip tests instead of fixing the problem.
 
@@ -2496,6 +2516,8 @@ def find_shortcuts(diff: str, allowed: list[str], generated: set | frozenset = f
     removed: dict[tuple[str, str], int] = {}
     moved: dict[tuple[str, str], int] = {}  # (pattern, line) removed anywhere: code that moved between files
     file = "?"
+    # `generated`: lines buckets wrote itself from existing types (a moved hook's signature).
+    diff = "\n".join(l for l in diff.splitlines() if not (l.startswith("+") and same_line(l[1:]) in generated))
     for line in diff.splitlines():
         if line.startswith("+++ "):
             file = line[6:] if line.startswith("+++ b/") else line[4:]
@@ -2516,8 +2538,6 @@ def find_shortcuts(diff: str, allowed: list[str], generated: set | frozenset = f
     # Across the whole diff: when the removed lines held at least as many of a pattern as the added
     # ones, the change moved or rewrapped them (a formatter joins lines, a move adds `export`); only
     # the excess can be new.
-    # `generated`: lines buckets wrote itself from existing types (a moved hook's signature).
-    diff = "\n".join(l for l in diff.splitlines() if not (l.startswith("+") and same_line(l[1:]) in generated))
     plus = "\n".join(l[1:] for l in diff.splitlines() if l.startswith("+") and not l.startswith("+++"))
     minus = "\n".join(l[1:] for l in diff.splitlines() if l.startswith("-") and not l.startswith("---"))
     excess = {key: len(re.findall(pattern, plus)) - len(re.findall(pattern, minus))
@@ -2833,7 +2853,8 @@ Rules:
   leftover or duplicated code, files that should have changed but didn't, tasks that failed.
 - If not done, write follow-up tasks that fix only what's wrong. Don't redo correct work.
 - The plan summary says what was intended. Describe only what the diff and the task results show: a task
-  that failed, was blocked or was dropped did not happen, so don't report its change as made.
+  that failed or was blocked did not happen, so don't report its change as made. Differences between the plan's
+  wording (a name, a step) and the code aren't issues: judge the code.
 {agent_rules}{rules}
 Reply with done, a short summary, the issues you found, and the follow-up tasks (empty when done)."""
 
@@ -4645,6 +4666,11 @@ class Buckets:
         if moves:
             mine = {f for t in moves for f in ([t["file"], t["into"]] if t["action"] == "move" else [t["file"], *t["from"]])}
             extra = [t for t in plan["tasks"] if t["action"] in ("edit", "create", "delete") and t["file"] in mine]
+            # A move of a variant's logic into the file a share of that pair makes: the share already writes the
+            # shared hook (its dry run found the identical statements), and the move would fail on the file it made.
+            shares = {t["file"]: t for t in moves if t["action"] == "share"}
+            extra += [t for t in moves if t["action"] == "move" and t.get("into") in shares
+                      and t["file"] in (shares[t["into"]].get("from") or [])]
             for ft in (t for t in moves if t["action"] == "fold" and t["file"] in folds):  # importers' edits about the fold
                 stem = PurePosixPath(ft["file"]).stem
                 extra += [t for t in plan["tasks"] if t["action"] == "edit" and t not in extra
@@ -6042,7 +6068,8 @@ class Buckets:
                              f"parameters: {', '.join(p['name'] for p in r['params']) or 'none'}; re-derived inside: "
                              f"{', '.join(r.get('rederived') or []) or 'nothing'}")
                 self.generated_lines = getattr(self, "generated_lines", set()) | {  # the hook's generated signature
-                    same_line(l) for text in d["files"].values() for l in text.splitlines() if f"function {hook}(" in l}
+                    same_line(l) for text in d["files"].values() for l in text.splitlines() if f"function {hook}(" in l} | {
+                    same_line(f"{p['name']}: {p['type']}") for p in r.get("params", [])}  # its parameters, one per line once formatted
             else:
                 notes.append(f"shared hook not made ({d.get('error', '')[:200]})")
         if skipped:
@@ -6265,7 +6292,9 @@ class Buckets:
                    + self.changed_code(base),
             diff=self.diff_text(base), rules=TASK_RULES.format(max_tasks=self.cfg["max_tasks"]),
             agent_rules=self.agent_rules_text(),
-            dropped=("Planned but not run (these changes were NOT made):\n" + "\n".join(
+            dropped=("Planned tasks dropped before coding, because a mechanical move, share or rename does their main part "
+                     "(that part is in the diff, made by the move; anything else they asked for is NOT; judge by the diff, "
+                     "and don't report this list against the diff as a mismatch):\n" + "\n".join(
                 f"- {d}" for d in getattr(self, "dropped_tasks", [])) + "\n") if getattr(self, "dropped_tasks", []) else "")
 
         def validate(d):
@@ -6403,9 +6432,10 @@ class Buckets:
         if not isinstance(other, dict):
             say(f"  {warn()} the second review on {machine_label(second)} didn't come back ({str(other)[:120]})")
             return first
-        return self.merge_reviews(first, other, second, now, prompts[0] if prompts else "", rnd)
+        return self.merge_reviews(first, other, second, now, prompts[0] if prompts else "", rnd, shortcuts)
 
-    def merge_reviews(self, first: dict, other: dict, second: dict, now: dict, prompt: str, rnd: int) -> dict:
+    def merge_reviews(self, first: dict, other: dict, second: dict, now: dict, prompt: str, rnd: int,
+                      shortcuts: list[str] | tuple = ()) -> dict:
         home, away = self.home, machine_label(second)
         if first["done"] == other["done"]:
             say(f"  Both reviews ({home} and {away}) say " + ("done" if first["done"] else "not done"))
@@ -6424,10 +6454,19 @@ class Buckets:
             return dissent  # failing checks, or no issues to weigh: the objection stands
         # Every check passes and one reviewer objects: the other weighs each issue (lone claims have broken
         # working code: a false "undefined", a "hooks violation" that lint had already ruled out).
-        definite = list(dissent["issues"])
+        # An `any` the diff adds is the shortcut check's to find, and it found none: the `any`s in the diff
+        # are the original code's (a generated signature copies the declarations' types). A lone objection
+        # to them broke a green extraction in a follow-up round.
+        typed = [i for i in dissent["issues"] if not shortcuts and ABOUT_ANY.search(i)]
+        if typed and len(typed) == len(dissent["issues"]):
+            say(f"  {ok()} {who}'s objection is to `any` types the change doesn't add (the shortcut check found none); "
+                "keeping the work")
+            return {**agree, "summary": agree["summary"] + f" (The other reviewer objected to `any` types copied from the "
+                                                           f"original code: {'; '.join(typed)[:300]})"}
+        definite = [i for i in dissent["issues"] if i not in typed]
         real = self.confirm_claims(judge, prompt, agree, definite, rnd)
         if real:
-            return {**dissent, "issues": real + [i for i in dissent["issues"] if i not in definite]}
+            return {**dissent, "issues": real}
         say(f"  {ok()} {who}'s claim{'s' if len(definite) > 1 else ''} didn't hold up; keeping the work")
         return {**agree, "summary": agree["summary"] + f" (A second reviewer's claim was checked and didn't "
                                                        f"hold up: {'; '.join(definite)[:300]})"}
