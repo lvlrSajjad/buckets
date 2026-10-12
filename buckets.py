@@ -5952,6 +5952,9 @@ class Buckets:
                 (self.repo / f).write_text(text)
                 written.append(f)
         conv = {c["name"]: c for c in ds[0]["converted"]}
+        # a ref's type is the variable's own (an untyped `let` was already `any`): not a shortcut this change adds
+        self.generated_lines = getattr(self, "generated_lines", set()) | {
+            same_line(f"const {c['ref']} = useRef<{c['type']}>({c['init']})") for d in ds for c in d["converted"]}
         kept = [f"{x['name']} ({x['why']})" for x in ds[0]["skipped"]]
         pairs = ", ".join(f"{n} → {conv[n]['ref']}" for n in common)
         note = (f"turned module state into refs in {conv[common[0]]['component']} ({pairs}): "

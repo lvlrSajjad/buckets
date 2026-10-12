@@ -3872,6 +3872,19 @@ class ModuleStateRefs(unittest.TestCase):
         self.assertEqual(subprocess.run(["git", "status", "--porcelain"], cwd=self.repo, capture_output=True,
                                         text=True).stdout.strip(), "")
 
+    def test_an_untyped_ref_isnt_a_shortcut_the_change_adds(self):
+        f = self.repo / "src/x/b/screen.tsx"
+        f.write_text(f.read_text().replace("let hits = 0\n", "let hits = 0\nlet el: any\n").replace("hits += id\n", "hits += id\n    el = id\n"))
+        subprocess.run(["git", "commit", "-qam", "el"], cwd=self.repo, check=True)
+        task = buckets.validate_tasks([{"id": "T1", "file": "src/x/b/screen.tsx", "action": "to_ref", "select": ["el"],
+                                        "instructions": "", "done_when": "", "edits": []}], self.repo, 8, "T")[0]
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = self.b.code_task(task)
+        self.assertEqual(got["status"], "done", got)
+        diff = subprocess.run(["git", "diff", "-U0", "HEAD~1..HEAD"], cwd=self.repo, capture_output=True, text=True).stdout
+        self.assertIn("useRef<any>", diff)
+        self.assertEqual(buckets.find_shortcuts(diff, [], self.b.generated_lines), [])
+
     def test_the_action_alone(self):
         task = buckets.validate_tasks([{"id": "T1", "file": "src/x/b/screen.tsx", "action": "to_ref", "select": ["hits"],
                                         "instructions": "", "done_when": "", "edits": []}], self.repo, 8, "T")[0]
