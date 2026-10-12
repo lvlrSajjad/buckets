@@ -378,11 +378,16 @@ def run_case(c: dict, suite: str, rep: int, logs: Path, overrides: dict | None =
         checks.append({"check": "clean after the run", "ok": False, "detail": leftovers.splitlines()[0]})
     minutes = round(sum(s["minutes"] for s in steps), 1)
     slow = c.get("expect", {}).get("max_minutes")
+    diff = None  # the branch's change, kept for reading by hand (the clone is reset next)
+    branch = steps[-1].get("branch")
+    if branch and git(clone, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False).strip():
+        diff = logs / f"{c['name']}-{rep}.diff"
+        diff.write_text(git(clone, "diff", f"{c.get('branch', 'main')}...{branch}", check=False))
     reset_clone(clone, c.get("branch", "main"), c["commit"])
     changed = differences(before, snapshot(src))
     result = {"suite": suite, "case": c["name"], "rep": rep, "ok": all(x["ok"] for x in checks) and bool(checks),
               "minutes": minutes, "slow": bool(slow and minutes > slow), "steps": steps, "checks": checks,
-              "buckets": buckets_version(), "log": str(log), "overrides": overrides or {}, "finished": datetime.now().isoformat(timespec="seconds")}
+              "buckets": buckets_version(), "log": str(log), "diff": str(diff) if diff else None, "overrides": overrides or {}, "finished": datetime.now().isoformat(timespec="seconds")}
     if changed:
         result["ok"] = False
         result["checks"].append({"check": "repo as found", "ok": False, "detail": f"changed: {', '.join(changed)}"})

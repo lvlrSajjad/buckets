@@ -106,6 +106,7 @@ class Suite(unittest.TestCase):
         r = regress.results()[-1]
         self.assertTrue(r["ok"], r["checks"])
         self.assertEqual(len(r["checks"]), 7)
+        self.assertIn("+hello", Path(r["diff"]).read_text())                 # the branch's change, kept to read by hand
         self.assertEqual(regress.snapshot(self.src), before)
         self.assertIn("1/1 passed", out)
 
