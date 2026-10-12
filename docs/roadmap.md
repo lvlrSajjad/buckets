@@ -31,7 +31,10 @@ references through TypeScript)
 10. ~~Turn part of a screen into a component~~ **done** (`component`, field notes 28): render helpers, and a JSX
     chunk by lines (the facts list the screen's JSX blocks with line ranges). M
 11. ~~Renames across files through the TypeScript language service~~ **done** (`rename`). S
-12. Shared hooks for code after an early return, or code that differs slightly. M
+12. ~~Shared code after an early return~~ **done** (`share_late`, field notes 33; the owner's call: late values passed
+    in, the null guard stays): identical functions and values a component declares after an early return become
+    `makeX({ … })` / `getX({ … })` factories in the shared file, and each variant makes them where they were. Code
+    that differs slightly is still `unify` first.
 12a. ~~Module state into refs~~ **done** (`to_ref`, the owner's call): module-level `let`s one component uses
     become `useRef`s; moves and shares do it first for the state they meet.
 
@@ -78,16 +81,14 @@ references through TypeScript)
 
 **Tier 6: borrowed from how a brain works** (agreed 2026-10-11; the "many machines" picture in
 `buckets live` led here; re-ranked after measuring, field notes 31). Ranked by what the runs show, not the analogy.
-29b. **Review thinking budget, next.** 44% of planner reviews and 67% of second reviews think until the budget
-    cuts them off (~60–80 s), then need another call to answer. A/B on the suite: a lower budget, or the verdict
-    first and the reasoning after; keep only what still catches what reviews caught. S–M
-29c. **Thinking-mode sampling, as 29b's first arm** (added 2026-10-12). The planner and both reviewers think at
-    temperature 0.2–0.3 and send no `top_k`/`top_p`/`min_p`/`presence_penalty` (the llama.cpp path passes only
-    temperature). Qwen's model cards for this family recommend ~0.6 / top_p 0.95 / top_k 20 / min_p 0 for thinking,
-    warn that near-greedy decoding causes endless repetition, and suggest a `presence_penalty` (up to 1.5) for
-    quantized models; check the exact values on the 3.6 card. That would explain thinking that runs until cut off
-    and the need for our repeating-thought detector. Run it before choosing a lower budget, since it may change
-    what the budget needs to be. Measure: share of calls cut off, review time, and what reviews still catch. S
+29b. **Review thinking budget: measured, not changed yet** (field notes 33). Replaying 24 saved reviews: a
+    1,000-token budget kept the verdicts (21/23) and the real catches, 27% faster per review, but added one false
+    objection and one answer that ran past its limit; no thinking at all was 2.7× faster and wrong on 8 of 12
+    approvals (and passed a removed null check). Next: an A/B on the suite at 1,500–2,000. S
+29c. ~~Thinking-mode sampling~~ **measured, not adopted** (field notes 33): Qwen's recommended thinking settings
+    (0.6/0.95/20/0, and 1.0 with presence 1.5) didn't cut fewer reviews off (58% and 46% vs 46%) and each missed a
+    real bug that temperature 0.3 caught. The settings stay available per role (`top_p`, `top_k`, `min_p`,
+    `presence_penalty`, `think_sampling`), unset.
 30. ~~Reflexes before a model round~~ **done** as a syntax reflex (field notes 31): planned edits, the native
     coder and any coder session can't leave a TS/JS file unparseable; 7.2 → 3.8 min on the case it targets. The
     history showed fixers for type errors had almost nothing to fix. Still open: the mechanical moves (the

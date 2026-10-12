@@ -771,6 +771,69 @@ A cut-off review thinks ~60–80 s, then needs another call to answer (10–20 s
   dropped the new parameter's default and the value every call should pass, then three rounds hand-edited 37
   calls in 18 min (the request's words fill those fields now). And one plan overflowed the planner's context.
 
+### 33. Review settings replayed, and the baseline's three failures (2026-10-12 morning)
+
+**Replaying reviews instead of re-running the suite.** `tools/replay_reviews.py` takes review prompts saved by
+past suite runs and sends them again under other settings, each on the machine that answered it (planner
+reviews on the Mac, second reviews on Windows, side by side), with the budget the run gave it (2,500 tokens,
+1,500 for light jobs). 24 reviews, balanced by role, by whether thinking was cut off, and by verdict. One arm
+takes ~20 min instead of an hour or more for a suite run, and every arm sees exactly the same prompts.
+
+| Arm | Cut off | Mean time | Same verdict as the original |
+|---|---|---|---|
+| now: temperature 0.3, nothing else | 46% | 73 s | 22/24 |
+| Qwen's "precise coding" thinking (0.6 / top_p 0.95 / top_k 20 / min_p 0) | 58% | 67 s | 24/24 |
+| Qwen's general thinking (1.0, presence penalty 1.5) | 46% | 71 s | 22/24 |
+| a 1,000-token budget | 96% | 53 s | 21/23 (+1 reply too long) |
+| no thinking | 0% | 27 s | 15/24 |
+
+- **29c (sampling) isn't the cause.** The model card's thinking settings didn't cut fewer reviews off. Where
+  the arms disagreed, temperature 0.3 was the one that caught real bugs: a unify that removed a null-safe
+  default (the "precise" arm approved it), and module-level refs shared between variants (the "general" arm
+  approved them). Kept as is; the settings are now available per role (`top_p`, `top_k`, `min_p`,
+  `presence_penalty`, and `think_sampling` for calls that think), unset.
+- **29b (budget): a cut-off review mostly reaches the same verdict.** At 1,000 tokens almost every review is
+  cut and answers from its notes, 27% faster, with the same real catches, but one new false objection (to the
+  owner's refs pattern) and one answer that ran past the output limit. Not adopted; worth a suite A/B at
+  1,500–2,000. No thinking is out: 2.7× faster, and "not done" on 8 of the 12 reviews that approve.
+
+**The three failures of the 13/16 baseline, read from their logs.** None of them was what the handoff said:
+- *merge-rfp*: the share task already wrote the shared hook, then a second `move` task the planner added for the
+  same hook failed ("the file already exists"), and edits dropped because the share did them were listed to the
+  reviewers as "NOT made". Both reviewers reported the mismatch, plus module state the variants now share. Now
+  a move into the file a share of the same pair makes is dropped, dropped tasks are described as done by the
+  move, the plan's wording against the code isn't an issue, and shared module state is told to the reviewers as
+  a call the owner confirms (it's logged as one).
+- *component*: one reviewer objected to an `any` prop type copied from the original and to an import the move
+  kept as it was; the other reviewer ruled out the import but upheld the `any`, and round 2 broke the checks.
+  `any`s the change adds are the shortcut check's to find: a lone objection about `any` when it found none keeps
+  the work.
+- *merge-proposal*: not the early-return limit this time. The shortcut check flagged two `any`s in the shared
+  hook's generated signature: the exemption for generated lines matched only the line with the function's name,
+  and the formatter had put each parameter on its own line.
+
+**Item 12, the early return, done mechanically** (`share_late`). Identical functions and values a component
+declares after an early return can't go into the shared hook. Each becomes a factory in the shared file:
+`makeX({ late values })` returns the function exactly as it was, `getX({ … })` computes the value with the same
+expression, and each variant keeps `const x = makeX({ … })` where `x` was, after the return. Values that call a
+hook or await stay. On the real pair: two values and one function shared, tsc and eslint clean. It also turned up
+a scanning bug in `unify`: after a `${}` in a template string the scanner read code up to the next backtick as a
+string value, so a null-safe default was refused as "a value differs".
+
+**The suite on the branch** (suite 20261012-090337, the 7 cases these changes touch, one run each): **7/7**,
+including the three that failed: the rfp merge done in 6.8 min (was not done, 10.6), the component in 4.3 min
+(was not done, 8.3), the proposal merge in 8.7 min (was not done, 8.1). Every check (tsc, eslint, jest) passed on
+every branch, and both reviews said done in round 1 each time. Read by hand: the factories return the original
+code byte for byte, and each screen makes them in the same place after its null check. The rfp merge used them
+for six late values and functions. One weak spot remains: in the proposal merge the planner's two unify tasks
+came back malformed and were dropped, so the two near copies stayed in each screen this time (the case passes;
+the run before shared one of them). The other 9 cases passed at the baseline but haven't been run on this code;
+the review prompt changes touch all of them, so the next full suite is the real new baseline.
+
+Lessons: read the failing run's log before trusting the handoff's diagnosis (two of three failures were different
+bugs from the ones written down). And a replay of saved prompts answers a settings question in minutes, with every
+arm seeing the same input. A suite run varies with the plan as well.
+
 ## Lessons so far
 
 - Run it, don't argue about it: comparing two versions of a small function on sample inputs settles

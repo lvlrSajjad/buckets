@@ -1,4 +1,4 @@
-# Handoff (updated 2026-10-12 ~06:30)
+# Handoff (updated 2026-10-12 ~10:00)
 
 Read this first. Details: [../README.md](../README.md), [field-notes.md](field-notes.md) (every
 measurement; 20–28 are the latest), [roadmap.md](roadmap.md), and the research in
@@ -89,19 +89,27 @@ Done 01:00–04:30 (field notes 32):
 - JSX chunks: identical copies in the same component become the same element.
 - The work repo was left as found after every run (clean `main`, 5 stashes, no `buckets/*` branches).
 
+Done 07:45–10:00 (field notes 33; owner away, both laptops):
+- **The three baseline failures fixed**, each a different bug from the one written down: a duplicate move into the
+  share's file (and dropped tasks described to reviewers as "NOT made"), a lone objection to `any` types the change
+  didn't add, and a generated hook signature flagged as shortcuts once the formatter split it. Shared module state
+  is now told to reviewers as the owner's call to confirm.
+- **Item 12 done** (`share_late`, the owner's call: late values passed in): functions and values after an early
+  return become `makeX`/`getX` factories in the shared file. `unify` misread template strings (fixed).
+- **29c measured, not adopted; 29b measured**: `tools/replay_reviews.py` replays saved review prompts under other
+  settings. Qwen's sampling didn't cut fewer reviews off and missed real bugs 0.3 caught; a 1,000-token budget kept
+  the verdicts 27% faster but added a false objection; no thinking is out.
+- Suite 20261012-090337 on the 7 affected cases: **7/7**.
+
 Next (in order):
-1. **Baseline 13/16** (suite 20261012-045022; diffs next to the logs). Failing: `merge-proposal` (item 12),
-   `merge-rfp` and `component` (round 1 right and green; a review objection, to the plan's wording and to imports
-   the move copied as they were, started a round 2 that broke the checks). Reviews that object to what a mechanical
-   move kept as it was are 29b's territory (the other session). Also in rfp: a second task tried to create the
-   shared file the share had just made ("already exists"); worth a look.
-2. `merge-proposal` stops at the early-return limit (item 12): needs the owner's call (the clean fixes change call
-   sites: late values passed as arguments, or the null guard moved).
-3. Dependabot batches need `gh auth login` for the work repo on the Mac.
-4. UI checks through simframe can start as a repo check command (roadmap 15b): needs a saved flow and Metro.
-5. The other session owns 29b (review thinking budget) and tier 6.
-6. Tier 7 (new projects from scratch, roadmap 38–46), after the above: start with the setup step (38) and page
-   checks (39). Stacks: Ignite on Expo, Vite + React + shadcn, NestJS, the web app in Electron.
+1. **A full suite run** (all 16) for the new baseline: the review prompt changes touch every case.
+2. 29b on the suite: the review budget at 1,500–2,000 vs 2,500 (replay said 1,000 is too low).
+3. The planner's `unify` tasks still come back malformed (two dropped in the proposal merge); the unify hint could
+   fill them like the share's.
+4. Dependabot batches need `gh auth login` for the work repo on the Mac.
+5. UI checks through simframe can start as a repo check command (roadmap 15b): needs a saved flow and Metro.
+6. Tier 7 (new projects from scratch, roadmap 38–46): start with the setup step (38) and page checks (39). Stacks:
+   Ignite on Expo, Vite + React + shadcn, NestJS, the web app in Electron.
 
 Known weak spots: the local planner varies run to run (guards cover it); reviewers are the weakest link
 (verify every branch yourself); each new tool needed 3–7 live attempts before a clean run.
