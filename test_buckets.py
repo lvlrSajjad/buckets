@@ -2053,6 +2053,19 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
         self.assertIn("export const near = (x: number) => fmt(x ?? 0)", shared)   # unified, then shared too
         self.assertIn("export const same", shared)
 
+    def test_unify_keeps_copies_that_swap_a_value(self):
+        a = 'const focus = (n: number, set: (v: string) => void) => { if (n === 0) set("") }\n' \
+            'const open = (url?: string) => go(url ?? "")\ndeclare function go(u: string): void\nexport const A = [focus, open]\n'
+        b2 = a.replace('set("")', 'set("0.00")').replace('go(url ?? "")', "go(url)").replace("export const A", "export const B")
+        for f, t in {"src/a/screen.ts": a, "src/b/screen.ts": b2}.items():
+            (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / f).write_text(t)
+        d = buckets.ts_moves(self.repo, {"op": "unify", "from": "src/a/screen.ts", "into": "src/b/screen.ts", "names": ["focus", "open"]})
+        self.assertTrue(d["ok"], d)
+        self.assertEqual(d["report"]["unified"], ["open"])                    # the added null check is incidental
+        self.assertIn('"0.00" here, "" in the other', d["report"]["refused"][0]["why"])
+        self.assertIn('set("0.00")', d["files"]["src/b/screen.ts"])
+
     def test_an_edit_that_unifies_a_near_copy_becomes_unify(self):
         a = 'const same = (x: number) => x * 2\nconst near = (x: number) => String(x ?? 0)\n\nexport const A = () => same(1) + near(2)\n'
         b2 = a.replace("String(x ?? 0)", "String(x)").replace("export const A", "export const B")
@@ -2298,6 +2311,12 @@ export const ThingScreen = ({ id, title }: { id: number; title: string }) => {
         with contextlib.redirect_stderr(io.StringIO()):
             t = buckets.validate_plan(b.fill_moves(other), self.repo, 8)["tasks"][0]
         self.assertEqual(t["param"], {"name": "size", "default": "1"})     # another parameter: left as planned
+        odd = {"summary": "s", "tasks": [{"id": "T1", "file": "s.ts", "action": "signature", "where": "f", "instructions": "",
+                                          "done_when": "", "edits": [], "param": {"name": "duration", "type": "…", "default": ",2000,2000",
+                                                                                  "value": "…"}}]}
+        with contextlib.redirect_stderr(io.StringIO()):
+            t = buckets.validate_plan(b.fill_moves(odd), self.repo, 8)["tasks"][0]
+        self.assertEqual(t["param"], {"name": "duration", "type": "number", "default": "2000", "value": "3000"})
         (self.repo / "s.ts").write_text("export const f = (n: number) => ({ n, duration: 2000, other: () => 2000 })\n"
                                         "export const g = () => ({ duration: 2000 })\nexport const h = f(1)\n")
         task = buckets.validate_plan(b.fill_moves({"summary": "s", "tasks": [dict(sparse["tasks"][0], param={"name": "duration"})]}),
@@ -3629,6 +3648,17 @@ class Reflexes(unittest.TestCase):
             got = b.code_task(task)
         self.assertEqual((got["status"], ran), ("done", ["sh"]))
         self.assertIn("last try through opencode", err.getvalue())
+
+    def test_a_coder_that_finds_nothing_to_change_is_done_without_another_try(self):
+        task = {"id": "T1", "file": "src/row.tsx", "action": "edit", "instructions": "say hi",
+                "done_when": "d", "read_first": [], "where": "", "edits": []}
+        calls = []
+        def fake_coder(*a, **k):
+            calls.append(1)
+            return "DONE: No changes needed - the file already says Hi", False
+        with mock.patch.object(buckets.Buckets, "native_coder", side_effect=fake_coder), contextlib.redirect_stderr(io.StringIO()):
+            got = self.b.code_task(task)
+        self.assertEqual((got["status"], len(calls)), ("done", 1))
 
     def test_a_coder_that_breaks_the_file_fixes_it_in_the_same_task(self):
         task = {"id": "T1", "file": "src/row.tsx", "action": "edit", "instructions": "say hello",

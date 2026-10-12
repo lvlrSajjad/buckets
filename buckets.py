@@ -3401,6 +3401,9 @@ def validate_tasks(tasks: list, repo: Path, max_tasks: int, prefix: str) -> list
         if not f or f.startswith("/") or ".." in f.split("/"):
             raise ValueError(f"task file path {t['file']!r} must be relative to the repo root")
         action = t["action"]
+        if (f in (".", "./") or (repo / f).is_dir()) and action not in ("fold",):
+            say(f"  {warn()} dropped a {action} task on the folder {f!r} (a task changes one file)")
+            continue
         if action in ("move", "share", "unify", "relocate", "dedupe", "signature", "component", "rename", "fold", "to_ref"):
             try:
                 out.append(validate_move(t, f, repo, f"{prefix}{len(out) + 1}"))
@@ -4480,8 +4483,9 @@ class Buckets:
         for t in data.get("tasks") or [] if asked.get("name") else []:  # a signature task missing what the request says
             if isinstance(t, dict) and t.get("action") == "signature":
                 param = t.get("param") if isinstance(t.get("param"), dict) else {}
-                if param.get("name") in (None, "", asked["name"]):
-                    t["param"] = {**asked, **{k: v for k, v in param.items() if v not in (None, "")}}
+                if param.get("name") in (None, "", asked["name"]):  # what the request spells out wins (the planner
+                    t["param"] = {**{k: v for k, v in param.items() if v not in (None, "") and "…" not in str(v)
+                                     and str(v).strip(". ")}, **asked}   # copied a "…" placeholder, or wrote ",2000,2000")
         hint = self.move_hint()
         for t in data.get("tasks") or [] if hint else []:
             if isinstance(t, dict) and t.get("action") == "move" and clean_path(str(t.get("file", ""))) == hint["task"]["file"]:
@@ -5510,6 +5514,10 @@ class Buckets:
             if final.startswith("BLOCKED"):
                 say(f"  {warn()} {task['id']} {task['file']}: {final}")
                 return {**task, "status": "blocked", "note": final}
+            if final.startswith("DONE") and re.search(r"\b(no changes?|nothing)\b.{0,30}\b(needed|required|to (do|change))\b|\balready\b", final, re.I):
+                # "the file already has it": done; another try would only say so again (the review judges it)
+                say(f"  {ok()} {task['id']} {task['file']}: {paint(final[:150], 'dim')}")
+                return {**task, "status": "done", "note": final}
             note = "timed out" if timed_out else (final or "no change made")
             nothing_made = not timed_out
             if (attempt < c["attempts"] and not timed_out
@@ -5840,7 +5848,9 @@ class Buckets:
             (self.repo / task["file"]).write_text(d["files"][task["file"]])
             self.unified = getattr(self, "unified", set()) | set(d["report"]["unified"])
             note = (f"made {', '.join(d['report']['unified'])} in {task['file']} identical to {task['from'][0]}'s"
-                    + (f"; not found: {', '.join(d['report']['missing'])}" if d["report"]["missing"] else ""))
+                    + (f"; not found: {', '.join(d['report']['missing'])}" if d["report"]["missing"] else "")
+                    + (f"; kept as they are (real differences): {'; '.join(r['name'] + ': ' + r['why'] for r in d['report']['refused'])}"
+                       if d["report"].get("refused") else ""))
             if commit:
                 git(self.repo, "add", "-A", "--", task["file"])
                 git(self.repo, "commit", "--no-verify", "-q", "-m", f"buckets {task['id']}: unify ({note[:200]})\n\n{task['instructions'][:1000]}")
@@ -5956,7 +5966,8 @@ class Buckets:
         same = {p["name"]: p for p in cmp["pairs"] if p["status"] == "identical"}
         wanted = list(dict.fromkeys(task["select"] + sorted(getattr(self, "unified", set()))))  # made identical this run
         notes, written, kept_why, pre = [], [], [], []
-        state = [n for n in wanted if same.get(n, {}).get("module_level") and same[n].get("mutable")]
+        # every identical module `let` (the shared code may pull in ones it wasn't asked to move, like input refs)
+        state = [n for n, p in same.items() if p.get("module_level") and p.get("mutable")]
         if state and self.cfg.get("module_state", "ref") == "ref":  # refs in the shared hook, not one module variable
             refs, pre, note = self.module_refs([a, b], state)
             notes.append(note)

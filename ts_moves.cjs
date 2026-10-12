@@ -911,16 +911,51 @@ function share() {
 
 // Near copies made identical: each named declaration in `into` is replaced, exactly, by the same
 // declaration from `from` (the model chose which version both should use). Then `share` can take it.
+// The values two versions of a declaration swap at the same place ("" where the other has "0.00"): a real
+// difference in behaviour, not formatting or an added null check (`url ?? ""` adds a value; nothing is swapped).
+function swappedValues(a, b) {
+  const tokens = (text) => {
+    const sc = ts.createScanner(ts.ScriptTarget.Latest, true, ts.LanguageVariant.JSX, text);
+    const out = [];
+    for (let k = sc.scan(); k !== ts.SyntaxKind.EndOfFileToken; k = sc.scan()) {
+      const lit = k === ts.SyntaxKind.StringLiteral || k === ts.SyntaxKind.NumericLiteral || k === ts.SyntaxKind.NoSubstitutionTemplateLiteral;
+      out.push({ lit, key: lit ? `v:${sc.getTokenValue()}` : sc.getTokenText() });
+    }
+    return out;
+  };
+  const x = tokens(a), y = tokens(b);
+  if (x.length * y.length > 4e6) return [];
+  const L = Array.from({ length: x.length + 1 }, () => new Int32Array(y.length + 1));
+  for (let i = x.length - 1; i >= 0; i--) for (let j = y.length - 1; j >= 0; j--)
+    L[i][j] = x[i].key === y[j].key ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const swaps = [];
+  let i = 0, j = 0, dx = [], dy = [];
+  const flush = () => {
+    const vx = dx.filter((t) => t.lit), vy = dy.filter((t) => t.lit);
+    if (vx.length && vy.length) swaps.push(`${vx.map((t) => t.key.slice(2)).join(' ')} → ${vy.map((t) => t.key.slice(2)).join(' ')}`);
+    dx = []; dy = [];
+  };
+  while (i < x.length && j < y.length) {
+    if (x[i].key === y[j].key) { flush(); i++; j++; }
+    else if (L[i + 1][j] >= L[i][j + 1]) dx.push(x[i++]);
+    else dy.push(y[j++]);
+  }
+  dx.push(...x.slice(i)); dy.push(...y.slice(j)); flush();
+  return swaps;
+}
+
 function unify() {
   const { sources: [S, T] } = program([input.from, input.into]);
   const key = (d) => `${d.parent || ''}/${d.name}`;
   const ds = declarations(S).filter((d) => d.depth <= 1), dt = declarations(T).filter((d) => d.depth <= 1);
-  const edits = [], done = [], missing = [];
+  const edits = [], done = [], missing = [], refused = [];
   for (const name of input.names) {
     const t = dt.find((d) => d.name === name);
     const src = t && ds.find((d) => key(d) === key(t));
     if (!t || !src) { missing.push(name); continue; }
     if (src.flat === t.flat) continue;
+    const swaps = input.values ? [] : swappedValues(T.text.slice(t.stmt.getStart(T), t.stmt.end), S.text.slice(src.stmt.getStart(S), src.stmt.end));
+    if (swaps.length) { refused.push({ name, why: `a value differs (${swaps.slice(0, 2).map((w) => w.replace(/^(.*) → (.*)$/, (m, p, q) => `${JSON.stringify(p)} here, ${JSON.stringify(q)} in the other`)).join('; ')}): a real difference, kept` }); continue; }
     let text = S.text.slice(src.stmt.getStart(S), src.stmt.end);
     if (isExported(t.stmt) && !isExported(src.stmt)) text = 'export ' + text;  // keep the target's export
     if (!isExported(t.stmt) && isExported(src.stmt)) text = text.replace(/^export\s+/, '');
@@ -930,8 +965,9 @@ function unify() {
     edits.push([t.stmt.getStart(T), t.stmt.end, body]);
     done.push(name);
   }
-  if (!done.length) throw new Error(missing.length ? `not found in both files: ${missing.join(', ')}` : 'already identical');
-  return { files: { [input.into]: applyEdits(T.text, edits) }, report: { unified: done, missing } };
+  if (!done.length) throw new Error(refused.length ? `nothing unified: ${refused.map((r) => `${r.name}: ${r.why}`).join('; ')}`
+    : missing.length ? `not found in both files: ${missing.join(', ')}` : 'already identical');
+  return { files: { [input.into]: applyEdits(T.text, edits) }, report: { unified: done, missing, refused } };
 }
 
 // Top-level declarations moved into another file (a util), exported there; the source file and every
