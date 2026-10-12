@@ -6054,6 +6054,7 @@ class Buckets:
                     notes.append(f"{', '.join(state)} is module state (a module-level `let`): it moved with everything that "
                                  "assigns it, so each screen reads and writes it as before, but both variants now share one "
                                  "copy (only matters if both are mounted at once; each app normally ships one variant)")
+                    say(f"  {paint('to confirm', 'dim')}: {', '.join(state)} is module state both variants now share (one copy)")
             else:
                 notes.append(f"top-level share not done ({d.get('error') or 'nothing could move'})")
         if inner:
@@ -6110,6 +6111,7 @@ class Buckets:
                     notes.append(f"{', '.join(state)} is module state that moved with the statements assigning it: both "
                                  "variants now share one copy (only matters if both are mounted at once; each app normally "
                                  "ships one variant)")
+                    say(f"  {paint('to confirm', 'dim')}: {', '.join(state)} is module state both variants now share (one copy)")
                 notes.append(f"moved {len(moved_names)} identical statements of the components ({', '.join(moved_names[:8])}) "
                              f"into {hook} in {hook_file}; "
                              f"parameters: {', '.join(p['name'] for p in r['params']) or 'none'}; re-derived inside: "
@@ -6363,6 +6365,10 @@ class Buckets:
                        "original declarations, so an `any` there is the original code's own type. Helpers and types that moved "
                        "along are exported from their new file for the code that still uses them; where they should live "
                        "long-term is a separate refactor.")
+            if any("now share one copy" in r["note"] for r in moved):
+                prompt += (" Module state the variants now share (one module `let` instead of one per variant file) is a call "
+                           "made without asking and listed for the owner to confirm: each app ships one variant, so the two "
+                           "copies are never mounted together. Don't list it as an issue.")
             if any("into refs" in r["note"] for r in moved):
                 prompt += (" Module-level variables turned into `useRef`s is the owner's chosen pattern, not a defect: a ref "
                            "is per mounted screen and starts from its initial value on each mount. Flag it only if code "
