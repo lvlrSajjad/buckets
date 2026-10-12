@@ -1,4 +1,4 @@
-# Handoff (updated 2026-10-12 ~04:30)
+# Handoff (updated 2026-10-12 ~06:30)
 
 Read this first. Details: [../README.md](../README.md), [field-notes.md](field-notes.md) (every
 measurement; 20–28 are the latest), [roadmap.md](roadmap.md), and the research in
@@ -90,8 +90,11 @@ Done 01:00–04:30 (field notes 32):
 - The work repo was left as found after every run (clean `main`, 5 stashes, no `buckets/*` branches).
 
 Next (in order):
-1. Read the full work-repo baseline started ~04:50 from `<scratchpad>/runner5` (all 16 cases on the current code;
-   each case's diff is now kept next to its log). `merge-create-invoice` passed twice before it (9.6 and 6.0 min).
+1. **Baseline 13/16** (suite 20261012-045022; diffs next to the logs). Failing: `merge-proposal` (item 12),
+   `merge-rfp` and `component` (round 1 right and green; a review objection, to the plan's wording and to imports
+   the move copied as they were, started a round 2 that broke the checks). Reviews that object to what a mechanical
+   move kept as it was are 29b's territory (the other session). Also in rfp: a second task tried to create the
+   shared file the share had just made ("already exists"); worth a look.
 2. `merge-proposal` stops at the early-return limit (item 12): needs the owner's call (the clean fixes change call
    sites: late values passed as arguments, or the null guard moved).
 3. Dependabot batches need `gh auth login` for the work repo on the Mac.

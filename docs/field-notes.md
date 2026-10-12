@@ -762,6 +762,11 @@ A cut-off review thinks ~60–80 s, then needs another call to answer (10–20 s
   first variable. Run 6 was done in 9.6 min and run 7 in 6.0 min, one round each: all 15 module variables became
   refs in one shared hook, both hooks use it, and tsc, eslint and jest pass. Read by hand from the diff the suite
   now keeps.
+- **The new baseline** (all 16 work-repo cases, current code, native coder, one run each): **13/16**, the best yet
+  (the frozen suites before tonight's fixes: 8/12 and 10/12). The three failures: the early-return limit (item
+  12), and two where round 1 was right with every check passing and a review objection started a round 2 that broke
+  the checks (and was undone). One objection was to the plan's wording, the other to imports the move copied
+  unchanged from the screen. That is the review's strictness, roadmap 29b.
 - **The opencode half, read closely**: 8 of 12. Two of the failures were buckets bugs, now fixed. The planner
   dropped the new parameter's default and the value every call should pass, then three rounds hand-edited 37
   calls in 18 min (the request's words fill those fields now). And one plan overflowed the planner's context.
